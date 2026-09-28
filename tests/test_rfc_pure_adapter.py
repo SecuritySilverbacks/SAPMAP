@@ -221,6 +221,52 @@ def test_is_open_reflects_ping(open_conn):
     assert conn.is_open is False
 
 
+def test_get_attributes_maps_snake_case_to_camelcase(monkeypatch):
+    """saprfclib's ConnectionAttributes uses snake_case (sys_id, partner_host,
+    kernel_rel, ...); SAPMAP callers read the C-SDK camelCase names (sysId,
+    partnerHost, kernelRel, ...).  get_attributes() must translate."""
+    import dataclasses
+    from saprfclib.connection import ConnectionAttributes
+
+    field_names = {f.name for f in dataclasses.fields(ConnectionAttributes)}
+    values = dict(sys_id="S4H", sys_number="00", partner_host="s4hanadev",
+                  client="001", user="JORIS", language="E",
+                  partner_rel="758", kernel_rel="793", codepage="4103",
+                  rfc_role="S", unicode_mode=True)
+    ca = ConnectionAttributes(**{k: v for k, v in values.items()
+                                 if k in field_names})
+
+    class _Conn:
+        def get_connection_attributes(self):
+            return ca
+        def ping(self):
+            return True
+
+    monkeypatch.setattr(P._lib, "connect", lambda **kw: _Conn())
+    conn = P.RFCConnection(ashost="h", sysnr="00", client="000")
+    conn.open()
+    attrs = conn.get_attributes()
+    assert attrs["sysId"] == "S4H"
+    assert attrs["partnerHost"] == "s4hanadev"
+    assert attrs["kernelRel"] == "793"
+    assert attrs["partnerRel"] == "758"
+    assert attrs["client"] == "001"
+
+
+def test_get_attributes_passes_through_dict(monkeypatch):
+    """If a backend returns attributes as a dict, keep it as-is."""
+    class _Conn:
+        def get_connection_attributes(self):
+            return {"sysId": "X", "client": "002"}
+        def ping(self):
+            return True
+
+    monkeypatch.setattr(P._lib, "connect", lambda **kw: _Conn())
+    conn = P.RFCConnection(ashost="h", sysnr="00", client="000")
+    conn.open()
+    assert conn.get_attributes() == {"sysId": "X", "client": "002"}
+
+
 # ---------------------------------------------------------------------------
 # Manually-built descriptors (guards the FieldDesc/TypeDesc API that changed
 # between saprfclib 0.1.1 and 0.1.5 — call_raw callers in sapmap_rfc /
