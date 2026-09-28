@@ -82,7 +82,7 @@ SAPMAP discovers SAP systems on a network, maps RFC connections between them, ex
 - **System identification** — Unauthenticated RFC_SYSTEM_INFO probing (3 methods: V6 single-packet, V2 error leak, Chipik-style)
 - **SAPControl queries** — Extract SID, database type, system type, and OS via SOAP API (GetInstanceProperties, GetProcessList)
 - **Message Server info disclosure** — Unauthenticated HTTP GET on the MS HTTP port (81NN) hits `/msgserver/text/dump?3=1` for the full `ms/*` profile parameter table and `?8=1` for the precise kernel release + patch level + Git commit hash.  Fires whenever `ms/acl_info` + `ms/HTTP/acl_info` are at their defaults (SAP Notes 1421005 / 2696233).  Both dumps land in `loot/msinfo/<SID>_<host>_<inst>_*.txt`; raises a HIGH finding, adds the discovered port to the node's port list, and populates a dedicated sidebar block with SID / instance / kernel PL / MS ports (36NN + 39NN) / system-type banner and in-app viewers for the raw dumps
-- **Database detection** — Port fingerprinting for HANA, MaxDB, MSSQL, Oracle, DB2
+- **Database detection** — Port fingerprinting for HANA, MaxDB, MSSQL, Oracle, DB2, Sybase ASE
 
 ### Default Account Detection
 - **SAP default credential scanning** — Tests 16 well-known SAP default username/password combinations via DIAG protocol
@@ -359,7 +359,7 @@ modules/
 │   ├── sap_ms_betrusted.py            Message Server betrusted (10KBLAZE) — protocol layer
 │   ├── sap_betrusted_chain.py         Full 10KBLAZE chain: betrusted → GW trust → user create
 │   ├── sap_gw_xpg_standalone.py       Standalone Gateway SAPXPG client
-│   ├── sap_db_sql_writers.py          GW-SAPXPG database SQL writers (HANA / MSSQL / Oracle / MaxDB)
+│   ├── sap_db_sql_writers.py          GW-SAPXPG database SQL writers (HANA / MSSQL / Oracle / MaxDB / DB2 / Sybase)
 │   ├── sap_ransapware.py             RanSAPware Awareness PoC — table data encryption/decryption
 │   ├── sap_java_ctc.py                Java CTC ConfigServlet deploy
 │   ├── sap_java_telnet.py             Java telnet console deploy
@@ -1148,6 +1148,7 @@ SAPMAP uses this to run SQL commands that create a user directly in the database
 | MSSQL | Execute `sqlcmd -Q` with inline SQL |
 | Oracle | Pipe SQL to `sqlplus` via `/bin/sh -c` |
 | DB2 | Execute `db2` CLI with inline SQL |
+| Sybase ASE | Write SQL as an isql batch to a temp file, drop a POSIX-sh wrapper that locates `/sybase/<SID>/OCS-*/bin/isql` and sets `LD_LIBRARY_PATH` (incl. `lib3p64` for the CSI encryption libs), then invoke `isql -Usapsa -P<pw> -S<SID> -X`.  On the SAP-on-Sybase demo/trial VMs the `sapsa` password is empty; on real landscapes the operator supplies it (typically recovered from RSECTAB's `+++SYBADM` entry).  Before isql runs, a diagnostic `R3trans -d` confirms the SAP kernel itself can reach ASE (issue #26). |
 
 The created user (SAPMAP00) gets:
 - Pre-computed password hashes (BCODE + PASSCODE, CODVN=G)

@@ -15,6 +15,10 @@ from sapmap_config import (
     sql_maxdb,
     sql_oracle,
     sql_db2,
+    sql_sybase,
+    SQL_GENERATORS,
+    BCODE_HEX,
+    PASSCODE_HEX,
 )
 from sapmap_exploit import _cmd_caret_escape, _mssql_write_and_exec_win
 
@@ -50,6 +54,13 @@ def test_normalize_db_type():
     # Direct keys returned as-is
     assert normalize_db_type("MSS") == "MSS"
     assert normalize_db_type("ORACLE") == "ORACLE"
+    # Sybase (issue #26) — direct key returned as-is, aliases normalise to SYB.
+    # RFCSI_ANON typically reports the raw kernel string "Sybase ASE", so the
+    # substring-match branch is the one that matters most in production.
+    assert normalize_db_type("SYB") == "SYB"
+    assert normalize_db_type("SYBASE") == "SYBASE"
+    assert normalize_db_type("Sybase ASE") == "SYB"
+    assert normalize_db_type("Sybase ASE 16.0") == "SYB"
 
 
 # ---------------------------------------------------------------------------
@@ -97,6 +108,7 @@ def test_sql_generators_return_list():
         (sql_maxdb, ("S4H", "000", "SAPMAP00")),
         (sql_oracle, ("S4H", "000", "SAPMAP00")),
         (sql_db2, ("S4H", "000", "SAPMAP00")),
+        (sql_sybase, ("NPL", "001", "SAPMAP00")),
     ]
     for gen_fn, args in generators:
         result = gen_fn(*args)
@@ -339,3 +351,164 @@ def test_mssql_file_includes_go_separators():
     # At least one echo command should write "GO" to the file
     go_echoes = [p for _, p in cmds if "echo GO" in p]
     assert go_echoes, "GO batch separators must be written to the SQL file"
+
+
+# ---------------------------------------------------------------------------
+# sql_sybase — Sybase ASE for SAP (issue #26)
+#
+# Sybase-specific traits the generator must honour:
+#   * Schema-qualified table names (SAPSR3.USR02) — the isql session logs in
+#     as sapsa which is not the SAP schema owner.
+#   * BINARY / VARBINARY literals use Sybase's 0x<hex> form (no quotes, no
+#     'x' prefix) — MaxDB's x'…' and HANA's '…' both fail on ASE.
+#   * The generator itself returns bare SQL; the writer inserts the "go"
+#     batch terminator between statements when emitting the isql file.
+# ---------------------------------------------------------------------------
+
+def test_sql_sybase_in_generators_registry():
+    """SYB must appear as a first-class entry in SQL_GENERATORS so that
+    _execute_sql_via_gateway's caller no longer rejects Sybase nodes with
+    'Unsupported database type: SYB' (the original bug in issue #26)."""
+    assert "SYB" in SQL_GENERATORS
+    assert SQL_GENERATORS["SYB"] is sql_sybase
+
+
+def test_sql_sybase_contains_mandt_and_username():
+    stmts = sql_sybase("NPL", "001", "SAPMAP00")
+    body = " ".join(stmts)
+    assert "'001'" in body
+    assert "'SAPMAP00'" in body
+
+
+def test_sql_sybase_tables_are_schema_qualified():
+    """Every table reference must carry the schema prefix — the sapsa login
+    used by isql does NOT default to the SAP schema, so unqualified names
+    resolve against sapsa's own (empty) schema and the INSERTs miss."""
+    stmts = sql_sybase("NPL", "001", "SAPMAP00", schema="SAPSR3")
+    for stmt in stmts:
+        for table in ("USR02", "USR04", "UST04", "USREFUS", "USRBF2"):
+            if table in stmt:
+                assert f"SAPSR3.{table}" in stmt, (
+                    f"Sybase SQL must schema-qualify {table}: {stmt}")
+
+
+def test_sql_sybase_custom_schema():
+    """Callers can override the schema for landscapes that use SAPR3
+    or SAP<SID>."""
+    stmts = sql_sybase("NPL", "001", "SAPMAP00", schema="SAPNPL")
+    body = " ".join(stmts)
+    assert "SAPNPL.USR02" in body
+    assert "SAPSR3." not in body
+
+
+def test_sql_sybase_binary_literals_use_0x_form():
+    """BCODE and PASSCODE must be written as Sybase 0x-hex literals,
+    NOT as MaxDB's x'…' or HANA's plain string form."""
+    stmts = sql_sybase("NPL", "001", "SAPMAP00")
+    body = " ".join(stmts)
+    # BCODE INSERT and PASSCODE UPDATE both present.
+    bcode_stmts = [s for s in stmts if "BCODE" in s and "INSERT" in s.upper()]
+    pass_stmts  = [s for s in stmts if "PASSCODE" in s and "UPDATE" in s.upper()]
+    assert bcode_stmts, "must INSERT a BCODE row"
+    assert pass_stmts,  "must UPDATE PASSCODE row"
+    assert f"0x{BCODE_HEX}"    in body
+    assert f"0x{PASSCODE_HEX}" in body
+    # And explicitly NOT the other-DB spellings.
+    assert f"x'{BCODE_HEX}'"   not in body, "MaxDB-style x'…' must not appear"
+    assert f"'{BCODE_HEX}'"    not in body, "HANA-style '…' must not appear"
+
+
+def test_sql_sybase_includes_sap_all_row():
+    """SAP_ALL profile assignment is the whole point of the exploit —
+    must be present, in the same tables as the other backends."""
+    stmts = sql_sybase("NPL", "001", "SAPMAP00")
+    body = " ".join(stmts)
+    assert "SAP_ALL" in body
+    assert "UST04" in body
+    assert "USR04" in body
+
+
+def test_sql_sybase_has_no_go_separators_in_generator():
+    """The `go` batch terminator is Sybase's, but it is inserted by the
+    writer, not the generator (the generator's contract stays identical to
+    the other backends: bare SQL, one statement per list entry)."""
+    stmts = sql_sybase("NPL", "001", "SAPMAP00")
+    for s in stmts:
+        assert s.strip().lower() != "go", (
+            f"generator must not emit standalone 'go' entries: {s!r}")
+
+
+# ---------------------------------------------------------------------------
+# Sybase writer — isql batch assembly (issue #26)
+# ---------------------------------------------------------------------------
+
+def test_sybase_isql_batch_inserts_go_between_statements():
+    """_build_sybase_isql_batch must:
+       - start with `use <SID>` + `go` so the sapsa session lands on the
+         SAP application database (whose name is the SID by convention).
+       - separate every statement with a `go` batch terminator.
+       - not emit consecutive `go go` when a caller pre-inserted one."""
+    from sap_db_sql_writers import _build_sybase_isql_batch
+    batch = _build_sybase_isql_batch("NPL", [
+        "SELECT 1",
+        "GO",                # caller-inserted, must be de-duplicated
+        "SELECT 2",
+    ]).decode("utf-8")
+    lines = [ln.strip() for ln in batch.splitlines() if ln.strip()]
+    assert lines[0] == "use NPL"
+    assert lines[1] == "go"
+    assert "SELECT 1" in lines
+    assert "SELECT 2" in lines
+    # No two `go` in a row.
+    for i in range(len(lines) - 1):
+        assert not (lines[i] == "go" and lines[i + 1] == "go"), (
+            f"unexpected consecutive 'go' at lines[{i}]")
+
+
+def test_sybase_wrapper_locates_isql_across_ocs_versions():
+    """The wrapper must not hard-code a single OCS version — SAP-on-Sybase
+    ships /sybase/<SID>/OCS-15_7 through OCS-16_0 depending on kernel age,
+    and the writer needs to work on all of them without a code change."""
+    from sap_db_sql_writers import _build_sybase_wrapper_script
+    script = _build_sybase_wrapper_script("NPL", db_password="")
+    # Glob for any OCS-* version, not a specific one.
+    assert "/sybase/*/OCS-*/bin/isql" in script
+    # sapsa auth with -X encryption, batch mode.
+    assert "-Usapsa" in script
+    assert "-X" in script
+    # SID surfaces as -S<SID>.
+    assert '-S"$SID"' in script or '-SNPL' in script
+    # SYBASE env must be set from the isql path so libtcl_r.cfg resolves.
+    assert "export SYBASE" in script
+
+
+def test_sybase_wrapper_embeds_password_safely():
+    """Password with a single quote must not break out of the shell literal
+    (real-world SAP-generated passwords can contain any printable char)."""
+    from sap_db_sql_writers import _build_sybase_wrapper_script
+    script = _build_sybase_wrapper_script("NPL", db_password="ab'cd")
+    # The escaped form is the shell-single-quoted-with-inner-escape pattern.
+    assert "'ab'\\''cd'" in script
+
+
+def test_sybase_dispatcher_extracts_client_from_sql(monkeypatch):
+    """The dispatcher must extract the MANDT from the first-seen '<3-digit>'
+    VALUES-clause literal so R3trans's session client matches the SQL —
+    a fixed '001' would be wrong for landscapes that use '100' or '200'."""
+    import sap_db_sql_writers as w
+    captured = {}
+
+    def fake_writer(host, gw_port, instance_str, hostname, sid, kernel,
+                    stmts, saprouter="", db_password="", python3_path="/usr/bin/python3",
+                    client="001"):
+        captured["client"] = client
+        return True
+
+    monkeypatch.setattr(w, "_sybase_write_and_exec", fake_writer)
+    stmts = [
+        "DELETE FROM SAPSR3.USR02 WHERE MANDT='200' AND BNAME='X'",
+        "INSERT INTO SAPSR3.USR02 (MANDT,BNAME) VALUES ('200','X')",
+    ]
+    w._execute_sql_via_gateway("10.0.0.1", 3300, "NPL", "h", stmts,
+                                db_type="SYB", os_type="linux")
+    assert captured["client"] == "200"
