@@ -2668,13 +2668,13 @@ is the human-readable version.
   Chastuhin.  F_SAP_INIT / F_SAP_SEND kernel-release leak layout used
   in SAPMAP's gateway probes.  SOAP LM Configuration Wizard templates
   and user-attribute structures for CVE-2020-6287 are ported verbatim.
-- **[gelim/nmap-sap](https://github.com/gelim/nmap-sap)** — Guillaume
-  Delugré.  Gateway startrfc CPIC handshake reused as the
+- **[gelim/nmap-sap](https://github.com/gelim/nmap-sap)** — Mathieu Geli
+  (`gelim`).  Gateway startrfc CPIC handshake reused as the
   gateway-detection payload.
 - **[gelim/sap_ms](https://github.com/gelim/sap_ms)** and
   **[gelim/sap-pse-tools](https://github.com/gelim/sap-pse-tools)** —
-  Message Server MS_LOGON_DIAG/RFC opcodes and PSE PKCS#7 structure
-  references.
+  also Mathieu Geli.  Message Server MS_LOGON_DIAG/RFC opcodes and
+  PSE PKCS#7 structure references.
 - **[usdAG/sncscan](https://github.com/usdAG/sncscan)** — SNC posture
   scanner.  The 97-byte GSS token and ext-fields blobs are copied
   verbatim into `modules/protocols/sap_snc.py`.
