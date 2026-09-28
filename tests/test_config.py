@@ -444,10 +444,15 @@ def test_sql_sybase_has_no_go_separators_in_generator():
 
 def test_sybase_isql_batch_inserts_go_between_statements():
     """_build_sybase_isql_batch must:
-       - start with `use <SID>` + `go` so the sapsa session lands on the
-         SAP application database (whose name is the SID by convention).
+       - start with `use <SID>` + `go` (SAP app DB name matches SID) and
+         `set chained off` + `go` so INSERTs don't need an explicit
+         COMMIT inside CHAINED transaction mode (SAP-on-Sybase default —
+         verified live against NPL 7.5x: without this the rows silently
+         roll back when isql exits).
        - separate every statement with a `go` batch terminator.
-       - not emit consecutive `go go` when a caller pre-inserted one."""
+       - not emit consecutive `go go` when a caller pre-inserted one.
+       - end with `commit tran` + `go` as a belt-and-suspenders flush
+         (no-op when chained is off, required when it isn't)."""
     from sap_db_sql_writers import _build_sybase_isql_batch
     batch = _build_sybase_isql_batch("NPL", [
         "SELECT 1",
@@ -457,8 +462,13 @@ def test_sybase_isql_batch_inserts_go_between_statements():
     lines = [ln.strip() for ln in batch.splitlines() if ln.strip()]
     assert lines[0] == "use NPL"
     assert lines[1] == "go"
+    assert lines[2] == "set chained off"
+    assert lines[3] == "go"
     assert "SELECT 1" in lines
     assert "SELECT 2" in lines
+    # Trailing commit — chained-mode belt-and-suspenders.
+    assert lines[-2] == "commit tran"
+    assert lines[-1] == "go"
     # No two `go` in a row.
     for i in range(len(lines) - 1):
         assert not (lines[i] == "go" and lines[i + 1] == "go"), (
@@ -517,6 +527,11 @@ def test_sybase_dispatcher_extracts_client_from_sql(monkeypatch):
         return True
 
     monkeypatch.setattr(w, "_sybase_write_and_exec", fake_writer)
+    # Stub the implicit SSFS SSO read so the test doesn't try to open
+    # sockets to the fake host (each SAPXPG attempt takes 30s to time
+    # out; without this the whole suite stalls for minutes).
+    monkeypatch.setattr(w, "_try_implicit_sybase_ssfs_creds",
+                         lambda *a, **k: {})
     stmts = [
         "DELETE FROM SAPSR3.USR02 WHERE MANDT='200' AND BNAME='X'",
         "INSERT INTO SAPSR3.USR02 (MANDT,BNAME) VALUES ('200','X')",
@@ -735,6 +750,9 @@ def test_execute_sql_via_gateway_threads_db_user_and_password(monkeypatch):
         return True
 
     monkeypatch.setattr(w, "_sybase_write_and_exec", fake_writer)
+    # Also stub the implicit SSFS read to avoid the fake-host socket hang.
+    monkeypatch.setattr(w, "_try_implicit_sybase_ssfs_creds",
+                         lambda *a, **k: {})
     w._execute_sql_via_gateway(
         "10.0.0.1", 3300, "NPL", "h",
         ["INSERT INTO SAPSR3.USR02 (MANDT,BNAME) VALUES ('001','X')"],
@@ -744,3 +762,55 @@ def test_execute_sql_via_gateway_threads_db_user_and_password(monkeypatch):
     )
     assert captured["db_password"] == "s3cret"
     assert captured["db_user"]     == "sapsr3"
+
+
+def test_sybase_dispatcher_triggers_implicit_ssfs_when_password_missing(monkeypatch):
+    """When the caller does NOT supply db_password, the SYB dispatcher must
+    read SSFS off the target via the GW chain and use the discovered
+    sapsa credentials — the whole point of the "just Create User" UX
+    Julian asked for.  Conversely, when db_password IS supplied the
+    implicit read must NOT run (would burn extra SAPXPG round-trips)."""
+    import sap_db_sql_writers as w
+    ssfs_calls = []
+    fake_ssfs = {
+        "sapsa_user": "sapsa",
+        "sapsa_password": "siroj1978",
+        "source": "SSFS DB_CONNECT/* (SAP default)",
+    }
+
+    def fake_ssfs_read(*a, **k):
+        ssfs_calls.append(1)
+        return fake_ssfs
+
+    seen = {}
+    def fake_writer(host, gw_port, instance_str, hostname, sid, kernel,
+                    stmts, saprouter="", db_password="", db_user="sapsa",
+                    python3_path="/usr/bin/python3", client="001"):
+        seen["db_password"] = db_password
+        seen["db_user"]     = db_user
+        return True
+
+    monkeypatch.setattr(w, "_try_implicit_sybase_ssfs_creds", fake_ssfs_read)
+    monkeypatch.setattr(w, "_sybase_write_and_exec", fake_writer)
+
+    # 1. No db_password → implicit read triggers, discovered password used.
+    ssfs_calls.clear(); seen.clear()
+    w._execute_sql_via_gateway(
+        "10.0.0.1", 3300, "NPL", "h",
+        ["INSERT INTO SAPSR3.USR02 (MANDT,BNAME) VALUES ('001','X')"],
+        db_type="SYB", os_type="linux",
+    )
+    assert ssfs_calls == [1]
+    assert seen["db_password"] == "siroj1978"
+    assert seen["db_user"]     == "sapsa"
+
+    # 2. db_password supplied → implicit read does NOT run.
+    ssfs_calls.clear(); seen.clear()
+    w._execute_sql_via_gateway(
+        "10.0.0.1", 3300, "NPL", "h",
+        ["INSERT INTO SAPSR3.USR02 (MANDT,BNAME) VALUES ('001','X')"],
+        db_type="SYB", os_type="linux",
+        db_password="operator-supplied",
+    )
+    assert ssfs_calls == []
+    assert seen["db_password"] == "operator-supplied"
