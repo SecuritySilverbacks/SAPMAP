@@ -22,6 +22,7 @@ from sapmap_scanner import (
     _sap_ports_for_instance_range,
     extract_targets_from_router_info,
     scan_host_via_saprouter,
+    scan_network_via_saprouter,
 )
 
 
@@ -451,3 +452,91 @@ class TestScanHostViaSaprouter(unittest.TestCase):
         assert "has_sap" in result
         assert "probe_counts" in result
         assert result["host"] == self.TARGET
+
+
+# ---------------------------------------------------------------------------
+# Partial-ACL finding wording (issue #56)
+# ---------------------------------------------------------------------------
+
+class TestPartialACLFinding(unittest.TestCase):
+    """The partial-allow ACL finding must reflect that a scoped saprouttab is
+    the intended design for internal / single-point-of-contact SAProuters, not
+    a weakness. The remediation must never recommend widening router access.
+    """
+
+    ROUTER_PREFIX = "/H/10.0.0.1/S/3299"
+
+    def _run_with_partial_acl(self):
+        """Drive scan_network_via_saprouter for a host that has both open and
+        ACL-denied ports (the internal-SAProuter case in the issue).  Returns
+        the resulting node's partial-ACL finding, or None."""
+        from sapmap_models import SAPNode
+        host = "10.0.0.42"
+        host_result = {
+            "host": host,
+            "open_ports": [(3200, "dispatcher", "00")],
+            "acl_denied_ports": [3300, 3600, 3901],
+            "has_sap": True,
+            "probe_counts": {},
+        }
+        stub_node = SAPNode(sid="INT", system_type="SAP?", ip=host, hostname="")
+
+        with patch("sapmap_scanner.scan_host_via_saprouter",
+                   return_value=host_result), \
+             patch("sapmap_scanner._build_nodes_from_fast_scan",
+                   return_value=[stub_node]):
+            nodes = scan_network_via_saprouter(
+                self.ROUTER_PREFIX, [host],
+                instance_range=(0, 1), timeout=1, concurrency=1,
+                verbose=False,
+            )
+
+        assert len(nodes) == 1
+        acl_findings = [f for f in nodes[0].findings
+                        if "ACL" in f.name or "saprouttab" in f.description.lower()]
+        return acl_findings[0] if acl_findings else None
+
+    def test_finding_name_is_neutral_not_weakness(self):
+        f = self._run_with_partial_acl()
+        assert f is not None, "expected a partial-ACL finding to be emitted"
+        # The old wording called this a partial *block* / weakness. New wording
+        # is neutral — no "block", "weakness", or "half-open".
+        lowered = f.name.lower()
+        assert "partially blocks" not in lowered
+        assert "half-open" not in lowered
+        assert "weakness" not in lowered
+
+    def test_finding_is_informational(self):
+        from sapmap_models import Severity
+        f = self._run_with_partial_acl()
+        assert f.severity == Severity.INFO
+
+    def test_remediation_does_not_recommend_widening(self):
+        """The old text recommended 'open it fully if the use case requires it'.
+        Any remediation that widens router access is a security regression."""
+        f = self._run_with_partial_acl()
+        rem = f.remediation.lower()
+        assert "open it fully" not in rem
+        assert "open the host fully" not in rem or "do not" in rem  # allow explicit "do NOT" note
+        assert "widen" not in rem or "do not widen" in rem or "not widen" in rem
+
+    def test_remediation_mentions_scoped_router_as_expected(self):
+        """The rewrite should tell the operator that a partial allow is the
+        intended design for SPOC / internal SAProuters."""
+        f = self._run_with_partial_acl()
+        rem = f.remediation.lower()
+        assert "spoc" in rem or "internal" in rem or "expected" in rem
+
+    def test_description_reports_allowed_and_denied_counts(self):
+        """Defenders care what IS reachable, so the finding must list allowed
+        ports (not just denied ones as the old wording did)."""
+        f = self._run_with_partial_acl()
+        desc = f.description
+        # allowed port from open_ports fixture
+        assert "3200" in desc
+        # a denied port from acl_denied_ports fixture
+        assert "3300" in desc or "3901" in desc
+
+
+if __name__ == "__main__":
+    unittest.main()
