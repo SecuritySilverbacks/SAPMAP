@@ -275,7 +275,7 @@ def find_all_chains(state: SAPMAPState, max_depth: int = 6,
                 "source_sid":       src_node.sid,
                 "target_sid":       tgt_sid,
                 "destination_name":
-                    f"TMSADM@{dest.target_sid}.DOMAIN_{dest.domain}",
+                    f"TMSADM@{dest.target_sid}.{dest.domain}",
                 "rfc_user":         "TMSADM",
                 # Controller access + SAP_ALL TMSADM = full transport
                 # rights.  Even non-SAP_ALL TMSADM can inject/import.
