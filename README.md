@@ -426,7 +426,7 @@ The `modules/__init__.py` registers each subpackage on `sys.path` so existing fl
 
 - **Python 3.8+**
 - The Python packages listed below (all required — see `requirements.txt`)
-- **SAP NetWeaver RFC SDK** — strongly recommended for a real engagement; enables the entire authenticated attack surface.  Alternative: install [`saprfclib`](https://github.com/randomstr1ng/saprfclib) (pure-Python, Python 3.12+, zero native deps) and pass `--pure-rfc` — the C SDK becomes optional.  Live-tested end-to-end against S/4HANA 2023 and NetWeaver 7.42; a handful of minor edge-case bugs remain (two thin workarounds in `sap_rfc_pure.py`, tracked upstream at randomstr1ng/saprfclib).  For an engagement you can't afford weirdness in, stay on the C SDK; for a locked-down laptop / ARM Mac / CI container without the SDK installed, the pure-Python backend is a viable substitute.  See [Pure-Python RFC Backend](#pure-python-rfc-backend---pure-rfc) for the full write-up
+- **SAP NetWeaver RFC SDK** — strongly recommended for a real engagement; enables the entire authenticated attack surface.  Alternative: install [`saprfclib`](https://github.com/randomstr1ng/saprfclib) (pure-Python, Python 3.12+, zero native deps) and pass `--pure-rfc` — the C SDK becomes optional.  Live-tested end-to-end against S/4HANA 2023 and NetWeaver 7.42; every edge-case bug surfaced during integration is now fixed upstream (saprfclib ≥ 0.1.5), so `sap_rfc_pure.py` carries no workarounds.  For an engagement you can't afford weirdness in, stay on the C SDK; for a locked-down laptop / ARM Mac / CI container without the SDK installed, the pure-Python backend is a viable substitute.  See [Pure-Python RFC Backend](#pure-python-rfc-backend---pure-rfc) for the full write-up
 
 ### Python packages (all required)
 
@@ -445,7 +445,7 @@ The `modules/__init__.py` registers each subpackage on `sys.path` so existing fl
 |---|---|---|
 | `pyjks` (≥ 20) | OFFLINE 3DES Java-SecStore decrypt path | Pulls in `twofish==0.3.0` (2013), which has no wheels for Python 3.12+ and fails to build cleanly on modern envs.  The JSP / server-side path works without it, so a fresh install can skip pyjks and still cover Java SecStore. |
 | `hdbcli` (≥ 2.19) | DBCON direct-DB pivot to external HANA — after SecStore decrypt SAPMAP pairs `/DBCON/<name>` passwords with the DBCON table, connects to the external HANA over the wire, fingerprints whether it is SAP-shape (USR02 present) and can plant SAPMAP00 via direct SQL. | SAP's official HANA driver is a hefty native package that is only useful when the target actually has an external HANA DB defined in DBCON.  Without it the DBCON edges still show up on the map but "Test Connection" reports "hdbcli not installed".  MSSQL / Oracle / DB2 / MaxDB drivers will follow in v2 (`pyodbc`, `oracledb`, `ibm_db`, `pymaxdb`). |
-| `saprfclib` (≥ 0.1.1) | Zero-native-dependency RFC backend — swaps out the proprietary SAP NW RFC SDK for a pure-Python re-implementation.  Enabled by passing `--pure-rfc` at startup.  Same authenticated attack surface as the C SDK path (BAPI calls, RFC_READ_TABLE, RFC_ABAP_INSTALL_AND_RUN, SXPG_STEP_XPG_START, ticket forgery, propagation, ...).  See [Pure-Python RFC Backend](#pure-python-rfc-backend---pure-rfc). | Requires Python 3.12+ and is still catching up on edge cases against older NetWeaver kernels (two thin workarounds live in `sap_rfc_pure.py`, tracked upstream at randomstr1ng/saprfclib).  For a production engagement, prefer the C SDK; for macOS / ARM / CI where the SDK is a pain to install, saprfclib is a viable substitute. |
+| `saprfclib` (≥ 0.1.5) | Zero-native-dependency RFC backend — swaps out the proprietary SAP NW RFC SDK for a pure-Python re-implementation.  Enabled by passing `--pure-rfc` at startup.  Same authenticated attack surface as the C SDK path (BAPI calls, RFC_READ_TABLE, RFC_ABAP_INSTALL_AND_RUN, SXPG_STEP_XPG_START, ticket forgery, propagation, ...).  See [Pure-Python RFC Backend](#pure-python-rfc-backend---pure-rfc). | Requires Python 3.12+.  All edge cases surfaced during integration are fixed upstream as of 0.1.5, so `sap_rfc_pure.py` runs without workarounds.  For a production engagement, prefer the C SDK; for macOS / ARM / CI where the SDK is a pain to install, saprfclib is a viable substitute. |
 
 Install optional extras with `pip install pyjks hdbcli saprfclib` when you need them — or use the Docker image below, which bakes them in.
 
@@ -904,19 +904,13 @@ You'll see the resolved backend printed at startup:
 ### Known gaps
 
 Live-tested end-to-end against S/4HANA 2023 (kernel 793) and NetWeaver
-7.42.  Julian (the saprfclib author) fixed six issues surfaced during
-integration ([#7](https://github.com/randomstr1ng/saprfclib/issues/7),
-[#8](https://github.com/randomstr1ng/saprfclib/issues/8),
-[#9](https://github.com/randomstr1ng/saprfclib/issues/9),
-[#10](https://github.com/randomstr1ng/saprfclib/issues/10),
-[#11](https://github.com/randomstr1ng/saprfclib/issues/11),
-[#12](https://github.com/randomstr1ng/saprfclib/issues/12)).  Two thin
-workarounds remain in `modules/protocols/sap_rfc_pure.py` (silent
-drop of unknown kwargs to match C-SDK behaviour; clean `RFCError`
-when saprfclib's `_build_invoke_frame` overflows the 64 KB uint16
-frame footer for very large ABAP payloads).  Both are single-line
-retries around `self._conn.call()`; both go away as soon as the
-upstream fixes land.
+7.42.  Julian (the saprfclib author) turned around every issue surfaced
+during integration ([#7](https://github.com/randomstr1ng/saprfclib/issues/7)–[#12](https://github.com/randomstr1ng/saprfclib/issues/12),
+plus [#24](https://github.com/randomstr1ng/saprfclib/issues/24) unknown-kwarg
+parity and [#30](https://github.com/randomstr1ng/saprfclib/issues/30) the
+64 KB TLV frame footer).  As of **saprfclib 0.1.5** all of them are fixed
+upstream, so `modules/protocols/sap_rfc_pure.py` now wraps the library's
+public interface directly with **no workarounds**.
 
 `pip3 install --upgrade saprfclib` (add `--break-system-packages` on
 Homebrew Python) pulls the newest fixes.

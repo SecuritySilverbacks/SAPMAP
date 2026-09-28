@@ -335,14 +335,16 @@ class TestPropagate:
         assert not r["success"]
         assert "no IP/hostname" in r["error"]
 
-    def test_pyrfc_missing_dropped_from_channels_early(self):
-        """When the operator asks for RFC but pyrfc isn't installed,
-        the propagation should drop "rfc" from the channels list
-        BEFORE attempting any replay, and surface a clear
-        ``rfc_skipped_reason`` in the result.  Previously this was
-        counted as a failed attempt whose error ("pyrfc not
-        available") then "won" the last-evidence race when HTTP also
-        failed — masking the real HTTP failure reason."""
+    def test_no_rfc_backend_dropped_from_channels_early(self):
+        """When the operator asks for RFC but no RFC backend is installed,
+        the propagation should drop "rfc" from the channels list BEFORE
+        attempting any replay, and surface a clear ``rfc_skipped_reason``.
+        Previously this was counted as a failed attempt whose error then
+        "won" the last-evidence race when HTTP also failed — masking the
+        real HTTP failure reason.
+
+        There are two RFC backends now (saprfclib, pyrfc); RFC is only
+        dropped when BOTH are absent, so both must be shadowed here."""
         import sys
         from sap_ticket_propagate import propagate_via_forged_ticket
         from sapmap_models import SAPMAPState
@@ -351,10 +353,13 @@ class TestPropagate:
         state = SAPMAPState()
         state.add_node(node)
 
-        # Force the ImportError path inside propagate_via_forged_ticket
-        # by removing pyrfc from sys.modules and shadowing it as None.
-        saved = sys.modules.get("pyrfc")
+        # Force the ImportError path for BOTH backends by shadowing each as
+        # None in sys.modules (a None entry makes `import x` raise ImportError).
+        sentinel = object()
+        saved = {name: sys.modules.get(name, sentinel)
+                 for name in ("pyrfc", "sap_rfc_pure")}
         sys.modules["pyrfc"] = None
+        sys.modules["sap_rfc_pure"] = None
         try:
             err = urllib.error.HTTPError(
                 "url", 401, "Unauthorized", {}, None)
@@ -363,17 +368,17 @@ class TestPropagate:
                     ticket, node, state,
                     channels=["http", "rfc"])
         finally:
-            if saved is None:
-                sys.modules.pop("pyrfc", None)
-            else:
-                sys.modules["pyrfc"] = saved
+            for name, val in saved.items():
+                if val is sentinel:
+                    sys.modules.pop(name, None)
+                else:
+                    sys.modules[name] = val
 
-        # RFC was requested but dropped — the evidence should NOT be
-        # "pyrfc not available" alone; it should reflect the HTTP
-        # outcome (with the pyrfc note appended).
+        # RFC was requested but dropped — the evidence should reflect the
+        # HTTP outcome, with a clear "no RFC backend" note, not an RFC error.
         assert "rfc" in r["channels_requested"]
         assert "rfc" not in r["channels_tried"]
-        assert "pyrfc" in r["rfc_skipped_reason"].lower()
+        assert "backend" in r["rfc_skipped_reason"].lower()
         # No RFC attempts logged
         assert all(att["channel"] != "rfc" for att in r["attempts"])
 

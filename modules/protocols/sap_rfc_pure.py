@@ -5,8 +5,11 @@ unchanged.
 saprfclib requires Python 3.12+.  On older interpreters this module
 will fail to import, and SAPMAP falls back to the C SDK automatically.
 
-Monkey-patch history (all removed 2026-08-27 — Julian fixed these
-upstream at randomstr1ng/saprfclib):
+Requires saprfclib >= 0.1.5.  Every bug surfaced during integration is now
+fixed upstream (randomstr1ng/saprfclib), so this adapter carries no
+workarounds — it wraps the public interface directly.
+
+Upstream fixes that this adapter used to work around (all now resolved):
 
     #7  RFCPING response parse failure on kernel 793
     #8  connect() rejected the `lang` kwarg
@@ -14,15 +17,12 @@ upstream at randomstr1ng/saprfclib):
     #10 TABLE params carried rfctype=STRUCTURE in auto-fetched FunctionDesc
     #11 _encode_structure raised KeyError for partial row dicts
     #12 _call_bootstrap only fetched type_desc when rfctype==STRUCTURE
-
-Active workarounds (still upstream-open; re-check when saprfclib bumps):
-
-    #24 Connection.call() raises ValueError on unknown kwargs — C SDK / pyrfc
-        silently drop them.  We catch the ValueError, remove the offending
-        kwargs from the message, and retry once.
-    (n/a) _build_invoke_frame's `struct.pack('>HH', 0, len(tlv_body))` overflows
-        when the ABAP program body exceeds 64KB.  We catch struct.error and
-        raise a clean RFCError so SAPMAP's fallback chains can react.
+    #24 Connection.call() raised ValueError on unknown kwargs — fixed in
+        v0.1.2: connect(strict_params=False) (the default) now drops
+        unrecognised kwargs, matching pyrfc / the C SDK.
+    #30 TLV frame footer overflowed the 16-bit length for bodies > 64KB
+        (large ABAP INSTALL_AND_RUN payloads etc.) — fixed in v0.1.2:
+        tlv_record() now emits the extended uint32 length form.
 
 If you see regressions, `pip3 install --upgrade saprfclib` first.
 """
@@ -30,8 +30,6 @@ If you see regressions, `pip3 install --upgrade saprfclib` first.
 import datetime
 import inspect
 import logging
-import re as _re
-import struct as _struct
 import traceback as _tb
 
 logger = logging.getLogger(__name__)
@@ -145,45 +143,6 @@ def _translate_exception(exc):
     if hasattr(_lib, 'LogonError') and isinstance(exc, _lib.LogonError):
         return LogonError(message, **kwargs)
     return RFCError(message, **kwargs)
-
-
-# ---------------------------------------------------------------------------
-# Direction constant mapping for _make_func_desc
-# ---------------------------------------------------------------------------
-
-_DIR_MAP = {
-    RFC_IMPORT:   'RFC_IMPORT',
-    RFC_EXPORT:   'RFC_EXPORT',
-    RFC_CHANGING: 'RFC_CHANGING',
-    RFC_TABLES:   'RFC_TABLES',
-}
-
-
-# ---------------------------------------------------------------------------
-# RFCTYPE int → saprfclib type-name mapping
-# ---------------------------------------------------------------------------
-
-_RFCTYPE_NAME = {
-    0:  'RFCTYPE_CHAR',
-    1:  'RFCTYPE_DATE',
-    2:  'RFCTYPE_BCD',
-    3:  'RFCTYPE_TIME',
-    4:  'RFCTYPE_BYTE',
-    5:  'RFCTYPE_TABLE',
-    6:  'RFCTYPE_NUM',
-    7:  'RFCTYPE_FLOAT',
-    8:  'RFCTYPE_INT',
-    9:  'RFCTYPE_INT2',
-    10: 'RFCTYPE_INT1',
-    14: 'RFCTYPE_NULL',
-    17: 'RFCTYPE_STRUCTURE',
-    23: 'RFCTYPE_DECF16',
-    24: 'RFCTYPE_DECF34',
-    29: 'RFCTYPE_STRING',
-    30: 'RFCTYPE_XSTRING',
-    31: 'RFCTYPE_INT8',
-    32: 'RFCTYPE_UTCLONG',
-}
 
 
 # ---------------------------------------------------------------------------
@@ -325,73 +284,67 @@ class RFCConnection:
         except Exception as e:
             return (False, type(e).__name__, str(e))
 
+    # Connection-attribute keys SAPMAP callers read are the C-SDK / pyrfc
+    # camelCase names (sysId, partnerHost, kernelRel, ...).  saprfclib's
+    # ConnectionAttributes exposes snake_case fields (sys_id, partner_host,
+    # kernel_rel, ...), so map each canonical key from whichever spelling the
+    # backend provides — keeping get_attributes() a drop-in for the C SDK.
+    _ATTR_ALIASES = (
+        ("dest",                ("dest",)),
+        ("host",                ("host",)),
+        ("partnerHost",         ("partner_host", "partnerHost")),
+        ("sysNumber",           ("sys_number", "sysNumber")),
+        ("sysId",               ("sys_id", "sysId")),
+        ("client",              ("client",)),
+        ("user",                ("user",)),
+        ("language",            ("language",)),
+        ("isoLanguage",         ("iso_language", "isoLanguage")),
+        ("codepage",            ("codepage",)),
+        ("partnerCodepage",     ("partner_codepage", "partnerCodepage")),
+        ("rfcRole",             ("rfc_role", "rfcRole")),
+        ("type",                ("type",)),
+        ("partnerType",         ("partner_type", "partnerType")),
+        ("rel",                 ("rel",)),
+        ("partnerRel",          ("partner_rel", "partnerRel")),
+        ("kernelRel",           ("kernel_rel", "kernelRel")),
+        ("partnerBytesPerChar", ("partner_bytes_per_char", "partnerBytesPerChar")),
+        ("partnerIP",           ("partner_ip", "partnerIP")),
+        ("partnerIPv6",         ("partner_ipv6", "partnerIPv6")),
+    )
+
     def get_attributes(self):
         self._ensure_open()
         try:
             attrs = self._conn.get_connection_attributes()
         except _lib.SapRfcError as e:
             raise _translate_exception(e) from e
-        if isinstance(attrs, dict):
-            return attrs
+
+        def _read(src, name):
+            return src.get(name) if isinstance(attrs, dict) \
+                else getattr(src, name, None)
+
         result = {}
-        for field in ('dest', 'host', 'partnerHost', 'sysNumber',
-                      'sysId', 'client', 'user', 'language',
-                      'trace', 'isoLanguage', 'codepage',
-                      'partnerCodepage', 'rfcRole', 'type',
-                      'partnerType', 'rel', 'partnerRel',
-                      'kernelRel', 'cpicConvId', 'progName',
-                      'partnerBytesPerChar', 'partnerSystemCodepage',
-                      'partnerIP', 'partnerIPv6'):
-            val = getattr(attrs, field, None)
-            if val is not None and str(val).strip():
-                result[field] = str(val).strip()
+        for canonical, aliases in self._ATTR_ALIASES:
+            for name in aliases:
+                val = _read(attrs, name)
+                if val is not None and str(val).strip():
+                    result[canonical] = str(val).strip()
+                    break
         return result
 
     # -- RFC Function Invocation --
 
-    # saprfclib issue #24 — Connection.call() rejects unknown kwargs.  Both
-    # pyrfc and the C SDK silently drop extras.  We catch the ValueError,
-    # parse the rejected param names out of the message, and retry once
-    # with those kwargs removed.  Regex is anchored on saprfclib's exact
-    # phrasing so a message-format change here shows up as a test failure
-    # rather than silent misbehaviour.
-    _UNKNOWN_KWARG_RE = _re.compile(
-        r"^([^:]+): parameter\(s\) (.+?) are not in the function interface"
-    )
-
-    def _call_with_unknown_kwarg_retry(self, func_name, kwargs):
-        try:
-            return self._conn.call(func_name, **kwargs)
-        except ValueError as e:
-            m = self._UNKNOWN_KWARG_RE.match(str(e))
-            if not m:
-                raise
-            unknown = {p.strip() for p in m.group(2).split(",") if p.strip()}
-            filtered = {k: v for k, v in kwargs.items() if k not in unknown}
-            if len(filtered) == len(kwargs):
-                raise
-            logger.debug(
-                "saprfclib #24 workaround: %s rejected kwargs %s; retrying "
-                "without them", func_name, sorted(unknown))
-            return self._conn.call(func_name, **filtered)
-
     def call(self, func_name, **kwargs):
+        # saprfclib >= 0.1.2 defaults to connect(strict_params=False), so
+        # unknown kwargs are dropped like pyrfc / the C SDK, and tlv_record()
+        # encodes > 64KB bodies via the extended uint32 length form — no
+        # adapter-side workarounds are needed for either any more.
         self._ensure_open()
         try:
-            result = self._call_with_unknown_kwarg_retry(func_name, kwargs)
+            result = self._conn.call(func_name, **kwargs)
             return _normalize_result(result)
         except _lib.SapRfcError as e:
             raise _translate_exception(e) from e
-        except _struct.error as e:
-            # saprfclib _build_invoke_frame overflows 'H' (uint16) for TLV
-            # bodies > 64KB (large ABAP INSTALL_AND_RUN payloads etc.).
-            # Surface as a clean RFCError so SAPMAP's fallback chains
-            # (SXPG DB CLI, RFC_READ_TABLE, /SAPDS/RFC_ABAP_INSTALL_RUN)
-            # get a chance to run.
-            raise RFCError(
-                f"saprfclib call({func_name}) failed: TLV body exceeds "
-                f"64KB — saprfclib frame footer overflow (struct: {e})"
-            ) from e
         except Exception as e:
             tb_str = _tb.format_exc()
             logger.debug(
@@ -405,20 +358,29 @@ class RFCConnection:
         Args:
             name: type name (e.g. "TAB200")
             fields: list of (field_name, rfctype, nuc_length, uc_length)
+
+        rfctype is a numeric RFCTYPE_* constant (same contract as the C-SDK
+        adapter).  saprfclib's FieldDesc / TypeDesc take the numeric type and
+        explicit field offsets / row sizes, so we accumulate offsets and set
+        the total non-unicode / unicode row widths just like the C SDK does.
         """
         field_descs = []
+        nuc_offset = 0
+        uc_offset = 0
         for fname, ftype, nuc_len, uc_len in fields:
-            fd = _FieldDesc(
+            field_descs.append(_FieldDesc(
                 name=fname,
-                field_type=_RFCTYPE_NAME.get(ftype, 'RFCTYPE_CHAR'),
+                rfctype=ftype,
                 nuc_length=nuc_len,
+                nuc_offset=nuc_offset,
                 uc_length=uc_len,
-                nuc_offset=0,
-                uc_offset=0,
+                uc_offset=uc_offset,
                 decimals=0,
-            )
-            field_descs.append(fd)
-        return _TypeDesc(name=name, fields=field_descs)
+            ))
+            nuc_offset += nuc_len
+            uc_offset += uc_len
+        return _TypeDesc(name=name, fields=field_descs,
+                         nuc_size=nuc_offset, uc_size=uc_offset)
 
     def _make_func_desc(self, func_name, params):
         """Create a function description manually.
@@ -427,23 +389,25 @@ class RFCConnection:
             func_name: FM name
             params: list of (name, direction, rfctype, uc_length,
                     nuc_length, type_desc_handle) tuples
+
+        direction is a numeric RFC_* constant and rfctype a numeric RFCTYPE_*
+        constant (same contract as the C-SDK adapter); saprfclib's FieldDesc
+        takes both as ints directly.
         """
         param_descs = []
         for pname, direction, ptype, uc_len, nuc_len, td_handle in params:
-            dir_str = _DIR_MAP.get(direction, 'RFC_IMPORT')
-            type_str = _RFCTYPE_NAME.get(ptype, 'RFCTYPE_CHAR')
-            fd = _FieldDesc(
+            param_descs.append(_FieldDesc(
                 name=pname,
-                field_type=type_str,
+                rfctype=ptype,
                 nuc_length=nuc_len,
-                uc_length=uc_len,
                 nuc_offset=0,
+                uc_length=uc_len,
                 uc_offset=0,
                 decimals=0,
-                direction=dir_str,
+                direction=direction,
                 type_desc=td_handle,
-            )
-            param_descs.append(fd)
+                optional=True,
+            ))
         return _FunctionDesc(name=func_name, parameters=param_descs)
 
     def call_raw(self, func_name, func_desc, **kwargs):
@@ -454,15 +418,10 @@ class RFCConnection:
         """
         self._ensure_open()
         try:
-            result = self._call_with_unknown_kwarg_retry(func_name, kwargs)
+            result = self._conn.call(func_name, **kwargs)
             return _normalize_result(result)
         except _lib.SapRfcError as e:
             raise _translate_exception(e) from e
-        except _struct.error as e:
-            raise RFCError(
-                f"saprfclib call_raw({func_name}) failed: TLV body exceeds "
-                f"64KB — saprfclib frame footer overflow (struct: {e})"
-            ) from e
         except Exception as e:
             tb_str = _tb.format_exc()
             logger.debug(
