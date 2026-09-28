@@ -655,6 +655,71 @@ def test_parse_ssfs_dat_with_flags_exposes_plaintext_flag():
     assert flags["DB_CONNECT/DEFAULT_DB_PASSWORD"] is False
 
 
+def test_decode_ssfs_encrypted_value_extracts_from_wrapped_payload():
+    """After RSECCipher decrypts an SSFS record, the resulting plaintext
+    still has a wrapping envelope:  8-byte header, 4-byte val_len (BE),
+    20-byte HMAC-SHA1 tag, then val_len bytes of value.  Verified live
+    against DB_CONNECT/SYB/SADB_PASSWORD on kernel 753."""
+    from sapmap_secstore import _decode_ssfs_encrypted_value
+    header = b"\x31\xe0\xc6\xe1\x92\xf3\x35\xed"
+    val = b"siroj1978"
+    val_len = len(val).to_bytes(4, "big")
+    hmac = b"\x0f\xa9\x6c\x25" * 5   # 20 bytes, opaque
+    padding = b"\x00" * 40
+    payload = header + val_len + hmac + val + padding
+    assert _decode_ssfs_encrypted_value(payload) == "siroj1978"
+
+
+def test_decode_ssfs_encrypted_value_rejects_absurd_length():
+    """A garbled decryption (wrong key) puts random bytes at offsets 8-11
+    which would be interpreted as a huge val_len.  Must return ""
+    rather than raise or index into memory it shouldn't."""
+    from sapmap_secstore import _decode_ssfs_encrypted_value
+    payload = b"\xff" * 128   # all-ones; val_len would be 4.29 billion
+    assert _decode_ssfs_encrypted_value(payload) == ""
+
+
+def test_extract_sybase_kernel_creds_falls_back_to_default_key(monkeypatch):
+    """Systems with no SSFS_<SID>.KEY file on disk (the NPL Developer
+    Edition VM is one) still let rsecssfx decrypt records — the SAP kernel
+    falls back to the well-known default 3DES key SAPMAP already carries
+    as DEFAULT_KEY_HEX.  The extractor must try that key when the caller
+    passes ssfs_key=None, so operators can auto-recover credentials
+    without hunting for the missing key file.
+
+    We drive the fallback by monkey-patching parse_ssfs_dat to return a
+    known-plaintext record for the SADB_PASSWORD ident regardless of
+    which key was passed — that lets us assert the extractor treats
+    'no key file → default key' as an opportunistic fallback and
+    populates the password / source fields, rather than giving up."""
+    import sapmap_secstore as ss
+
+    fake_records = [
+        (ss._SSFS_SYB_SADB_USER, b"sapsa".hex().upper(), True),
+        (ss._SSFS_SYB_SADB_PASSWORD,
+         (b"\x00" * 8                # header
+          + len(b"siroj1978").to_bytes(4, "big")   # val_len
+          + b"\xaa" * 20              # HMAC
+          + b"siroj1978"              # value
+         ).hex().upper(),
+         False),
+    ]
+
+    def fake_parse(dat_bytes, ssfs_key=None, with_flags=False):
+        assert ssfs_key is not None, (
+            "extractor must supply the DEFAULT_KEY_HEX fallback when the "
+            "caller passes ssfs_key=None"
+        )
+        return fake_records if with_flags else [(i, d) for i, d, _ in fake_records]
+
+    monkeypatch.setattr(ss, "parse_ssfs_dat", fake_parse)
+    creds = ss.extract_sybase_kernel_creds(b"nonempty", ssfs_key=None)
+    assert creds["sapsa_user"]     == "sapsa"
+    assert creds["sapsa_password"] == "siroj1978"
+    assert creds["encrypted_missing_key"] is False
+    assert "SAP default" in creds["source"]
+
+
 def test_execute_sql_via_gateway_threads_db_user_and_password(monkeypatch):
     """The dispatcher must thread the caller's db_user / db_password
     through to _sybase_write_and_exec so the SSFS-extracted credentials

