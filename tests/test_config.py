@@ -473,13 +473,25 @@ def test_sybase_wrapper_locates_isql_across_ocs_versions():
     script = _build_sybase_wrapper_script("NPL", db_password="")
     # Glob for any OCS-* version, not a specific one.
     assert "/sybase/*/OCS-*/bin/isql" in script
-    # sapsa auth with -X encryption, batch mode.
-    assert "-Usapsa" in script
+    # sapsa is the default login; -X encryption fallback is inside the wrapper.
+    assert "DBUSER='sapsa'" in script
     assert "-X" in script
     # SID surfaces as -S<SID>.
     assert '-S"$SID"' in script or '-SNPL' in script
     # SYBASE env must be set from the isql path so libtcl_r.cfg resolves.
     assert "export SYBASE" in script
+
+
+def test_sybase_wrapper_accepts_custom_db_user():
+    """When SSFS extraction discovers the Sybase kernel login (e.g. sapsr3
+    or a customer-specific name), the wrapper must embed it in place of
+    the sapsa default — the isql invocation uses -U"$DBUSER"."""
+    from sap_db_sql_writers import _build_sybase_wrapper_script
+    script = _build_sybase_wrapper_script("NPL", db_password="pw",
+                                            db_user="sapsr3")
+    assert "DBUSER='sapsr3'" in script
+    # sapsa must not linger from a copy-paste.
+    assert "DBUSER='sapsa'" not in script
 
 
 def test_sybase_wrapper_embeds_password_safely():
@@ -499,8 +511,8 @@ def test_sybase_dispatcher_extracts_client_from_sql(monkeypatch):
     captured = {}
 
     def fake_writer(host, gw_port, instance_str, hostname, sid, kernel,
-                    stmts, saprouter="", db_password="", python3_path="/usr/bin/python3",
-                    client="001"):
+                    stmts, saprouter="", db_password="", db_user="sapsa",
+                    python3_path="/usr/bin/python3", client="001"):
         captured["client"] = client
         return True
 
@@ -512,3 +524,158 @@ def test_sybase_dispatcher_extracts_client_from_sql(monkeypatch):
     w._execute_sql_via_gateway("10.0.0.1", 3300, "NPL", "h", stmts,
                                 db_type="SYB", os_type="linux")
     assert captured["client"] == "200"
+
+
+# ---------------------------------------------------------------------------
+# SSFS DB_CONNECT extraction — Sybase SSO for <sid>adm (issue #26 follow-up)
+#
+# Verified live against 192.168.2.106: the SAP-on-Sybase kernel stores the
+# credentials it uses in the same SSFS_<SID>.DAT file we already read for
+# RSECTAB.  The two "user" records are plaintext (surface without a key)
+# and the two "password" records are RSECCipher-encrypted with the SSFS
+# master key.
+# ---------------------------------------------------------------------------
+
+def _fake_ssfs_dat_record(ident: str, payload: bytes,
+                          is_plaintext: bool = True,
+                          user: str = "npladm",
+                          host: str = "vhcalnplci") -> bytes:
+    """Build a synthetic SSFS_<SID>.DAT record for the parser to consume.
+
+    Layout matches parse_ssfs_dat()'s pysap-derived spec:
+      0-11   preamble "RSecSSFsData"
+      12-15  total record length, big-endian
+      16     type (1)
+      17-23  filler
+      24-87  IDENT, 64 bytes, space-padded
+      88-95  timestamp
+      96-119 user (24 bytes)
+      120-143 host (24 bytes)
+      144    is_deleted
+      145    is_stored_as_plaintext
+      146    is_binary_data
+      147-155 filler
+      156-175 HMAC-SHA1
+      176+   payload
+    """
+    total_len = 176 + len(payload)
+    rec = bytearray(total_len)
+    rec[:12] = b"RSecSSFsData"
+    rec[12:16] = total_len.to_bytes(4, "big")
+    rec[16] = 1
+    ident_b = ident.encode("ascii")
+    rec[24:24 + len(ident_b)] = ident_b
+    for i in range(24 + len(ident_b), 88):
+        rec[i] = ord(" ")
+    user_b = user.encode("ascii")
+    rec[96:96 + len(user_b)] = user_b
+    host_b = host.encode("ascii")
+    rec[120:120 + len(host_b)] = host_b
+    rec[145] = 1 if is_plaintext else 0
+    rec[176:] = payload
+    return bytes(rec)
+
+
+def test_extract_sybase_kernel_creds_plaintext_only():
+    """SSFS_<SID>.DAT with plaintext user records + encrypted password
+    records, no SSFS master key on disk: users surface, passwords do not,
+    encrypted_missing_key flag is set."""
+    from sapmap_secstore import extract_sybase_kernel_creds
+    dat = (
+        _fake_ssfs_dat_record("DB_CONNECT/SYB/SADB_USER", b"sapsa",
+                              is_plaintext=True)
+        + _fake_ssfs_dat_record("DB_CONNECT/DEFAULT_DB_USER", b"SAPSR3",
+                                is_plaintext=True)
+        + _fake_ssfs_dat_record("DB_CONNECT/SYB/SADB_PASSWORD",
+                                b"\x00" * 32,   # encrypted ciphertext
+                                is_plaintext=False)
+        + _fake_ssfs_dat_record("DB_CONNECT/DEFAULT_DB_PASSWORD",
+                                b"\x00" * 32,
+                                is_plaintext=False)
+    )
+    creds = extract_sybase_kernel_creds(dat, ssfs_key=None)
+    assert creds["sapsa_user"]   == "sapsa"
+    assert creds["sapsr3_user"]  == "SAPSR3"
+    # No key ⇒ password records stay unreadable
+    assert creds["sapsa_password"]  == ""
+    assert creds["sapsr3_password"] == ""
+    assert creds["encrypted_missing_key"] is True
+
+
+def test_extract_sybase_kernel_creds_strips_padding():
+    """SSFS plaintext payloads sometimes carry NUL / space padding — the
+    extractor must return a clean string."""
+    from sapmap_secstore import extract_sybase_kernel_creds
+    dat = _fake_ssfs_dat_record(
+        "DB_CONNECT/SYB/SADB_USER",
+        b"sapsa\x00\x00 \t",
+        is_plaintext=True,
+    )
+    creds = extract_sybase_kernel_creds(dat)
+    assert creds["sapsa_user"] == "sapsa"
+
+
+def test_extract_sybase_kernel_creds_empty_input():
+    """No SSFS bytes → empty result, no exceptions.  The caller uses this
+    when SecStore has not been mined yet."""
+    from sapmap_secstore import extract_sybase_kernel_creds
+    creds = extract_sybase_kernel_creds(b"", ssfs_key=None)
+    assert creds["sapsa_user"] == ""
+    assert creds["encrypted_missing_key"] is False
+
+
+def test_extract_sybase_kernel_creds_absent_records():
+    """A SSFS DAT that carries only non-DB_CONNECT records (e.g. only
+    SECSTORE_DB/KEY and SYSTEM_PKI) must not crash and must return the
+    empty-cred shape."""
+    from sapmap_secstore import extract_sybase_kernel_creds
+    dat = _fake_ssfs_dat_record("SYSTEM_PKI/PSE", b"\x01" * 40,
+                                 is_plaintext=False)
+    creds = extract_sybase_kernel_creds(dat)
+    assert creds["sapsa_user"] == ""
+    # No DB_CONNECT records present → nothing to decrypt → flag is False.
+    assert creds["encrypted_missing_key"] is False
+
+
+def test_parse_ssfs_dat_with_flags_exposes_plaintext_flag():
+    """The optional with_flags path is what extract_sybase_kernel_creds
+    relies on.  Round-trip: one plaintext record + one encrypted record →
+    the returned 3-tuples must carry the correct flags."""
+    from sapmap_secstore import parse_ssfs_dat
+    dat = (
+        _fake_ssfs_dat_record("DB_CONNECT/DEFAULT_DB_USER", b"SAPSR3",
+                               is_plaintext=True)
+        + _fake_ssfs_dat_record("DB_CONNECT/DEFAULT_DB_PASSWORD",
+                                b"\x00" * 32,
+                                is_plaintext=False)
+    )
+    records = parse_ssfs_dat(dat, ssfs_key=None, with_flags=True)
+    flags = {ident: is_plain for ident, _, is_plain in records}
+    assert flags["DB_CONNECT/DEFAULT_DB_USER"] is True
+    assert flags["DB_CONNECT/DEFAULT_DB_PASSWORD"] is False
+
+
+def test_execute_sql_via_gateway_threads_db_user_and_password(monkeypatch):
+    """The dispatcher must thread the caller's db_user / db_password
+    through to _sybase_write_and_exec so the SSFS-extracted credentials
+    from sapmap_exploit.py reach the wrapper on the target."""
+    import sap_db_sql_writers as w
+    captured = {}
+
+    def fake_writer(host, gw_port, instance_str, hostname, sid, kernel,
+                    stmts, saprouter="", db_password="", db_user="sapsa",
+                    python3_path="/usr/bin/python3", client="001"):
+        captured["db_password"] = db_password
+        captured["db_user"]     = db_user
+        return True
+
+    monkeypatch.setattr(w, "_sybase_write_and_exec", fake_writer)
+    w._execute_sql_via_gateway(
+        "10.0.0.1", 3300, "NPL", "h",
+        ["INSERT INTO SAPSR3.USR02 (MANDT,BNAME) VALUES ('001','X')"],
+        db_type="SYB", os_type="linux",
+        db_password="s3cret",
+        db_user="sapsr3",
+    )
+    assert captured["db_password"] == "s3cret"
+    assert captured["db_user"]     == "sapsr3"
