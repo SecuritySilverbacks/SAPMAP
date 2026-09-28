@@ -317,8 +317,7 @@ def integrate_tms_from_secstore(node: SAPNode, state: SAPMAPState,
                 ctrl = " (DOMAIN CONTROLLER)" if d.is_controller else ""
                 emit_finding(
                     "INFO", node.sid,
-                    f"CTS/TMS pair: TMSADM@{d.target_sid}.DOMAIN_"
-                    f"{d.domain} resolved — "
+                    f"CTS/TMS pair: TMSADM@{d.target_sid}.{d.domain} resolved — "
                     f"{d.target_host or '?host'}{ctrl}",
                     ref="tms.resolved",
                     meta={"target_sid": d.target_sid,
