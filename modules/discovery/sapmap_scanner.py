@@ -6784,29 +6784,51 @@ def scan_network_via_saprouter(
             saprouter=saprouter_prefix,
         )
 
-        # Attach ACL-denied port info as findings on each node
+        # Attach ACL-denied port info as an observation on each node.
+        # A partial allow (some ports reachable, some denied) is the intended
+        # design for internal / SPOC SAProuters that give users least-privilege
+        # access to a specific SAP landscape — it is not a weakness by itself,
+        # so this stays strictly informational and the remediation must never
+        # recommend widening router access (issue #56).
         acl_ports = host_result.get("acl_denied_ports", [])
+        open_ports = host_result.get("open_ports", [])
         for node in host_nodes:
             if acl_ports:
                 from sapmap_models import Finding, Severity
+                n_open = len(open_ports)
+                n_acl  = len(acl_ports)
+                open_list = ", ".join(str(p) for p in sorted(open_ports)[:20])
+                acl_list  = ", ".join(str(p) for p in sorted(acl_ports)[:20])
                 node.findings.append(Finding(
-                    name="SAProuter ACL partially blocks this host",
+                    name="SAProuter ACL scoped to specific ports",
                     attack_techniques=_attack_for("recon.saprouter_info"),
                     description=(
-                        f"SAProuter ACL denies access to {len(acl_ports)} "
-                        f"port(s): {', '.join(str(p) for p in sorted(acl_ports)[:20])}. "
-                        f"Other ports are accessible."
+                        f"saprouttab permits {n_open} port(s) and denies "
+                        f"{n_acl} port(s) for this host. "
+                        f"Allowed: {open_list}. Denied: {acl_list}. "
+                        f"A partial allow is the expected design for "
+                        f"internal / single-point-of-contact SAProuters "
+                        f"(least-privilege access to a specific landscape); "
+                        f"this observation is informational."
                     ),
                     severity=Severity.INFO,
                     remediation=(
-                        "Audit the saprouttab — the partial-allow pattern "
-                        "is unusual and often unintentional.  Either "
-                        "restrict the host fully (drop the open ports too) "
-                        "or open it fully if the use case requires it.  "
-                        "Half-open exposure surfaces in scans as a "
-                        "fingerprint of internal topology."
+                        "Partial allow is expected for SPOC / internal "
+                        "SAProuters.  Check that each allowed port is "
+                        "actually needed and that sensitive services are "
+                        "not reachable unless required — in particular "
+                        "gateway (33xx), message server (36xx / 39xx), "
+                        "sapstartsrv (5xx13 / 5xx14) and any HTTP admin "
+                        "endpoints.  Also confirm the saprouttab ends with "
+                        "an explicit deny-by-default line (`D * * *`) and "
+                        "that permit lines carry a password where one is "
+                        "expected.  Do NOT widen the ACL to \"open the host "
+                        "fully\" — that is a security regression."
                     ),
-                    detail=f"Denied ports: {', '.join(str(p) for p in sorted(acl_ports))}",
+                    detail=(
+                        f"Allowed ports: {', '.join(str(p) for p in sorted(open_ports))}. "
+                        f"Denied ports: {', '.join(str(p) for p in sorted(acl_ports))}."
+                    ),
                 ))
 
         nodes.extend(host_nodes)
