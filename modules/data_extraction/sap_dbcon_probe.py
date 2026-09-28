@@ -1438,7 +1438,7 @@ def dump_usr02_hashes(edge: DBCONConnection,
         if not loot_dir:
             loot_dir = _os.path.join(_os.getcwd(), "loot", "dbcon")
         _os.makedirs(loot_dir, exist_ok=True)
-        ts = _dt.utcnow().strftime("%Y%m%d_%H%M%S")
+        ts = _dt.now().strftime("%Y%m%d_%H%M%S")
         sid = (edge.target_sid or edge.con_name).upper()
         path = _os.path.join(
             loot_dir, f"usr02_{sid}_{edge.con_name}_{ts}.txt")
@@ -1448,7 +1448,7 @@ def dump_usr02_hashes(edge: DBCONConnection,
             f"# DBCON:      {edge.con_name}\n"
             f"# Target:     {edge.host}:{edge.port} "
             f"(SID={edge.target_sid or '?'}, schema={schema})\n"
-            f"# Dumped:     {_dt.utcnow().isoformat()}Z\n"
+            f"# Dumped:     {_dt.now().isoformat()}\n"
             f"# Format:     BNAME:MANDT:BCODE_HEX:PASSCODE_HEX:PWDSALTEDHASH\n"
             f"# Rows:       {out['count']}\n"
             f"# BCODE:      {out['hash_types']['bcode']} (hashcat -m 7900)\n"
@@ -1690,7 +1690,7 @@ def dump_auth_tables(edge: DBCONConnection,
         if not loot_dir:
             loot_dir = _os.path.join(_os.getcwd(), "loot", "dbcon")
         _os.makedirs(loot_dir, exist_ok=True)
-        ts = _dt.utcnow().strftime("%Y%m%d_%H%M%S")
+        ts = _dt.now().strftime("%Y%m%d_%H%M%S")
         sid = (edge.target_sid or edge.con_name).upper()
         sub = _os.path.join(
             loot_dir, f"auth_{sid}_{edge.con_name}_{ts}")
