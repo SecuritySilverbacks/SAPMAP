@@ -181,10 +181,20 @@ def parse_targets(target_str: str) -> list:
             logger.error(f"Invalid CIDR: {target_str}: {e}")
         return targets
 
-    # IP range (dash notation)
+    # IP range (dash notation).  Hostnames also contain hyphens
+    # (my-host.example.com, ec2-10-171-11-12.eu-central-1.compute.amazonaws.com),
+    # so only treat the input as a range when the left side of the first
+    # hyphen actually parses as an IP address.
     if "-" in target_str and not target_str.startswith("-"):
         parts = target_str.split("-")
+        left_is_ip = False
         if len(parts) == 2:
+            try:
+                ipaddress.ip_address(parts[0].strip())
+                left_is_ip = True
+            except ValueError:
+                pass
+        if left_is_ip:
             try:
                 start = ipaddress.ip_address(parts[0].strip())
                 end_part = parts[1].strip()
