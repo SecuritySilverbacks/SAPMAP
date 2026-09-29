@@ -483,9 +483,12 @@ def test_sybase_wrapper_locates_isql_across_ocs_versions():
     script = _build_sybase_wrapper_script("NPL", db_password="")
     # Glob for any OCS-* version, not a specific one.
     assert "/sybase/*/OCS-*/bin/isql" in script
-    # sapsa is the default login; -X encryption fallback is inside the wrapper.
+    # sapsa is the default login; -X encryption used unconditionally
+    # (modern SAP-on-Sybase servers always require it).
     assert "DBUSER='sapsa'" in script
     assert "-X" in script
+    # No -b flag — silently drops rows on SAP-shipped isql (verified live).
+    assert " -b " not in script
     # SID surfaces as -S<SID>.
     assert '-S"$SID"' in script or '-SNPL' in script
     # SYBASE env must be set from the isql path so libtcl_r.cfg resolves.
