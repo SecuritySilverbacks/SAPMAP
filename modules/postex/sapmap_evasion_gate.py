@@ -106,6 +106,15 @@ TIER3_TECHNIQUES: dict = {
         # <= 1 on the target host.
         Tier3Technique("sal_death_star",
                         "SAL In-Memory Hook Suppress (Death Star)"),
+        # #27 — UCON RFC allowlist disable via TH_CHANGE_PARAMETER.
+        # Flips ucon/rfc/active to 0 in shared memory; blows the
+        # runtime allowlist open until the evasion window restores
+        # the baseline.  Emits no AUM/AUW SAL event on the kernel
+        # writer path (same as every other Tier 3 param mutation) —
+        # defenders must watch the parameter itself via RZ11 /
+        # CCMS / RSPFPAR to notice.
+        Tier3Technique("ucon_rfc_disable",
+                        "UCON RFC allowlist disable (issue #27)"),
     )
 }
 

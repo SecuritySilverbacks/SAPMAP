@@ -9700,6 +9700,134 @@ def create_app(api: SAPMAPApi) -> Bottle:
              f"Tier 3: set {param}={value}", _run)
         return json.dumps({"status": "started"})
 
+    # ------------------------------------------------------------------
+    # UCON (issue #27) — read-only status + POC disable
+    # ------------------------------------------------------------------
+
+    @app.route("/api/node/<sid>/ucon_status", method="GET")
+    def node_ucon_status(sid):
+        """Read-only UCON posture check.  Returns the shape documented
+        on ``sapmap_ucon.check_ucon_status``.  Safe to call at any
+        time — no side effects, no gate needed."""
+        response.content_type = "application/json"
+        node = api.state.get_node(sid)
+        if not node:
+            return json.dumps({"error": f"Node {sid} not found"})
+        creds = node.best_credentials()
+        if creds is None or not creds.verified:
+            return json.dumps({
+                "error": "UCON status needs verified RFC credentials "
+                         "for this node"})
+        try:
+            from sapmap_ucon import check_ucon_status
+        except Exception as e:
+            return json.dumps({"error": f"sapmap_ucon unavailable: {e}"})
+        return json.dumps(check_ucon_status(node, creds))
+
+    @app.route("/api/node/<sid>/ucon_poc_disable", method="POST")
+    def node_ucon_poc_disable(sid):
+        """POC for issue #27 — flip ucon/rfc/active to 0 for
+        ``hold_seconds``, then auto-restore via the Tier 3 evasion
+        window.  Caller passes ``hold_seconds`` and optional
+        ``canary_fm`` (a Final-phase FM off the default CA, e.g.
+        ``STFC_CONNECTION``, that the caller wants exercised
+        before/after to demonstrate enforcement behaviour changed).
+
+        Refuses unless ``--allow-evasion`` is armed AND a baseline
+        has been captured — same gate as every other Tier 3
+        param-set."""
+        response.content_type = "application/json"
+        node = api.state.get_node(sid)
+        if not node:
+            return json.dumps({"error": f"Node {sid} not found"})
+        data = request.json or {}
+        try:
+            hold_seconds = float(data.get("hold_seconds") or 30.0)
+        except (TypeError, ValueError):
+            hold_seconds = 30.0
+        canary_fm = str(data.get("canary_fm") or "").strip()
+
+        def _run():
+            try:
+                from sapmap_ucon import poc_disable_ucon, UCON_PARAM
+            except Exception as e:
+                print(f"[-] {sid}: sapmap_ucon unavailable: {e}")
+                return
+            creds = node.best_credentials()
+            if creds is None or not creds.verified:
+                print(f"[!] {sid}: UCON POC needs verified RFC "
+                      f"credentials")
+                emit_finding("WARNING", sid,
+                              "UCON POC skipped — no verified RFC "
+                              "credentials",
+                              attack_capability="evasion.rsau_disable")
+                return
+            print(f"[*] {sid}: UCON POC (issue #27) — hold {hold_seconds}s"
+                  + (f", canary {canary_fm}" if canary_fm else ""))
+            out = poc_disable_ucon(api.state, node, creds,
+                                    hold_seconds=hold_seconds,
+                                    canary_fm=canary_fm)
+            if not out.get("ok"):
+                print(f"[-] {sid}: UCON POC failed — {out.get('error')}")
+                emit_finding("WARNING", sid,
+                              f"UCON POC failed: {out.get('error')}",
+                              ref="issue-27",
+                              attack_capability="evasion.rsau_disable")
+                return
+
+            def _canary_word(cr):
+                if not cr:
+                    return "n/a"
+                if cr.get("rejected_by_ucon"):
+                    return "blocked"
+                if cr.get("callable"):
+                    return "callable"
+                if cr.get("error"):
+                    return "error"
+                return "unknown"
+
+            applied = out.get("applied")
+            if applied:
+                canary_before = out.get("canary_before") or {}
+                canary_after = out.get("canary_after") or {}
+                blocked_before = bool(
+                    canary_before.get("rejected_by_ucon"))
+                blocked_after = bool(
+                    canary_after.get("rejected_by_ucon"))
+                summary = (
+                    f"UCON POC (issue #27): {UCON_PARAM} flipped "
+                    f"0-for-hold and restored.  "
+                    f"canary {canary_fm or '-'}: "
+                    f"before={_canary_word(canary_before)}, "
+                    f"after={_canary_word(canary_after)}")
+                print(f"[+] {sid}: {summary}")
+                # INFO on a clean restore.  WARNING when the operator
+                # asked for a canary and enforcement was NOT observed
+                # to change — the POC hasn't demonstrated a bypass and
+                # the operator should investigate before concluding.
+                sev = "INFO"
+                if canary_fm and blocked_before == blocked_after:
+                    sev = "WARNING"
+                emit_finding(sev, sid, summary,
+                              ref="issue-27",
+                              attack_capability="evasion.rsau_disable")
+            else:
+                after_write = out.get("live_after_write", "")
+                print(f"[!] {sid}: UCON POC — writer returned RC=0 but "
+                      f"verify-read shows {UCON_PARAM}"
+                      f"={after_write!r} (kernel did not commit)")
+                emit_finding(
+                    "WARNING", sid,
+                    f"UCON POC (issue #27): writer-ok but kernel did "
+                    f"not commit {UCON_PARAM}=0 "
+                    f"(live={after_write!r})",
+                    ref="issue-27",
+                    attack_capability="evasion.rsau_disable")
+
+        _bg(f"{sid}:ucon_poc_disable",
+             f"UCON POC (issue #27): hold {hold_seconds}s", _run)
+        return json.dumps({"status": "started"})
+
     @app.route("/api/node/<sid>/tier3_sal_uname_narrow", method="POST")
     def node_tier3_sal_uname_narrow(sid):
         """Tier 3 mutation — swap one or more SAL slots' UNAME filter
