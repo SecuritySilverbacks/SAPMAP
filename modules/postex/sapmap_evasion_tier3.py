@@ -65,7 +65,8 @@ def _read_param_live(node, creds, name: str) -> str:
 
 def tier3_set_param(state, node, param: str, value: str,
                      hold_seconds: float = 0.0,
-                     creds=None) -> dict:
+                     creds=None,
+                     technique: str = "rz11_dynamic_set") -> dict:
     """4.A.2 / 4.C.4 — dynamic kernel-parameter set via TH_CHANGE_PARAMETER.
 
     Asserts the gate, captures a baseline, then writes ``param=value``
@@ -86,9 +87,14 @@ def tier3_set_param(state, node, param: str, value: str,
 
     The change is in-memory only — no profile file rewrite, no kernel
     restart, no AUM/AUW SAL events.
+
+    ``technique`` defaults to the generic ``rz11_dynamic_set`` catalogue
+    entry.  Callers that expose a param-set wrapper with a specific
+    Tier 3 identity (e.g. ``ucon_rfc_disable``) pass their own id so
+    the gate, evasion window, and finding output all carry the
+    matching label — see ``modules/postex/sapmap_ucon.py``.
     """
     import time as _time
-    technique = "rz11_dynamic_set"
     try:
         assert_evasion_allowed(state, node, technique,
                                 require_baseline=False)
