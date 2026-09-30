@@ -1368,6 +1368,17 @@ body {
       <div class="ctx-item write-op" data-action="tier3_sal_death_star_stop"
            title="Tier 3 disarm. SIGTERM the running sap_audit_hook. Its signal handler runs detach_all() which restores every INT3 byte in the target disp+work text segment and releases ptrace cleanly. Idempotent — safe to click even when nothing is running."
            >&#10071; Disarm Virtual SAP Death Star (Tier 3 disarm)</div>
+      <!-- UCON (issue #27) — RFC-allowlist status probe + POC disable.
+           The probe is Tier-1-style read-only (no evasion gate).
+           The POC disable is Tier 3, gated behind --allow-evasion +
+           captured baseline, and reuses the same evasion_window
+           auto-restore as every other TH_CHANGE_PARAMETER technique. -->
+      <div class="ctx-item" data-action="ucon_status"
+           title="Read-only UCON posture probe (issue #27). Reads ucon/rfc/active via TH_GET_PARAMETER and RFCPHASE counts from UCONRFCSTATEHEAD + default-CA membership from UCONRFCSRVFMRT. Reports one-word posture: off / initialized-but-off / final-phase-empty / enforcing. No mutation, no gate — safe to click any time verified RFC creds are available."
+           >&#128274; Probe UCON Status (issue #27)</div>
+      <div class="ctx-item write-op" data-action="ucon_poc_disable"
+           title="Tier 3 MUTATION (issue #27). Flips ucon/rfc/active=0 via TH_CHANGE_PARAMETER for a hold window, then auto-restores via evasion_window. Optionally exercises a canary Final-phase RFM (e.g. STFC_CONNECTION off the default CA) before and after to demonstrate enforcement behaviour changed, not just the parameter value. Kernel writer emits no AUM/AUW SAL event — the whole point of the POC and the reason UCON's active state needs independent monitoring (RZ11 / CCMS / RSPFPAR)."
+           >&#127475; Disable UCON... (Tier 3 mutation — issue #27)</div>
     </div>
   </div>
   <!-- Data Extraction submenu -->
@@ -6090,6 +6101,16 @@ function showCtxMenu(e, sid) {
         && !!(mapState.evasion && mapState.evasion.allow_evasion),
     'tier3_dbtablog_purge': hasUsableAbapAccess
         && !!(mapState.evasion && mapState.evasion.allow_evasion),
+    // UCON status probe (issue #27) — read-only, no evasion gate.
+    // Just needs a verified RFC credential so it can call
+    // TH_GET_PARAMETER + RFC_READ_TABLE.
+    'ucon_status': hasUsableAbapAccess,
+    // UCON POC disable (issue #27) — Tier 3 mutation.  Same gate as
+    // every other TH_CHANGE_PARAMETER technique: --allow-evasion +
+    // captured baseline.
+    'ucon_poc_disable': hasUsableAbapAccess
+        && !!(mapState.evasion && mapState.evasion.allow_evasion)
+        && !!(mapState.evasion && mapState.evasion.baseline_captured_at),
     // Virtual SAP Death Star — Linux-only (Julian Petersohn's C hook
     // uses process_vm_readv + PTRACE_ATTACH + /proc/<pid>/exe).
     // Needs an OS-exec channel to upload + compile + launch the hook
@@ -6384,6 +6405,14 @@ function showCtxMenu(e, sid) {
         ((mapState.evasion && mapState.evasion.allow_evasion)
          ? 'DELETES rows from DBTABLOG. Captures MAX(LOGID) baseline, sleeps hold_seconds (operator runs actions during this window — all table-logged DML lands in DBTABLOG normally), then DELETEs every row with LOGID > baseline (optionally narrowed by TABNAME whitelist). DBTABLOG is delivery class L (not itself logged) — DELETE does not recurse. No DD09L touch, no DDIC reactivation, no transport object. Self-managed baseline.'
          : 'Tier 3 not armed — restart SAPMAP with --allow-evasion (see disclaimer banner).'),
+    'ucon_status':
+        'Needs a verified RFC credential — calls TH_GET_PARAMETER(ucon/rfc/active) + RFC_READ_TABLE against UCONRFCSTATEHEAD (phase counts) and UCONRFCSRVFMRT (default-CA membership). Pure read; no mutation. Reports a one-word posture (off / initialized-but-off / final-phase-empty / enforcing) so you can tell at a glance whether UCON is actually blocking anything on this node.',
+    'ucon_poc_disable':
+        ((mapState.evasion && mapState.evasion.allow_evasion && mapState.evasion.baseline_captured_at)
+         ? 'MUTATES kernel state (issue #27). Calls TH_CHANGE_PARAMETER to flip ucon/rfc/active=0 at runtime — shared memory only, no profile-file rewrite, no AUM/AUW SAL event. Blows the UCON RFC allowlist open for hold_seconds so any Final-phase RFM off the default CA becomes callable; evasion_window auto-restores the baseline on exit. Optional canary FM lets you exercise a real Final-phase RFM before + after to prove enforcement behaviour changed, not just the parameter.'
+         : ((mapState.evasion && mapState.evasion.allow_evasion)
+            ? 'Tier 3 armed but no baseline captured yet — run "Capture Evasion Baseline" on this node first.'
+            : 'Tier 3 not armed — restart SAPMAP with --allow-evasion (see disclaimer banner).')),
     'tier3_sal_death_star_launch':
         (isWindows
          ? 'Windows kernel target — the C hook uses process_vm_readv + PTRACE_ATTACH which are Linux-only. Not supported on this OS.'
@@ -6507,6 +6536,8 @@ function showCtxMenu(e, sid) {
     'tier3_sal_uname_narrow': !isAbapStack,
     'tier3_java_sal_suppress': !isJavaStack,
     'tier3_dbtablog_purge': !isAbapStack,
+    'ucon_status': !isAbapStack,
+    'ucon_poc_disable': !isAbapStack,
     // Death Star C hook uses Linux ptrace/procfs — hide on Windows targets.
     'tier3_sal_death_star_launch': isWindows,
     'tier3_sal_death_star_stop': isWindows,
@@ -8839,6 +8870,122 @@ async function ctxAction(action) {
         4000);
       await api('POST', `node/${sid}/tier3_sal_death_star_stop`);
       break;
+    case 'ucon_status': {
+      // Read-only UCON posture probe (issue #27).  GET returns the
+      // shape from sapmap_ucon.check_ucon_status; render it in an
+      // alert so the operator gets a one-shot answer without hunting
+      // through the log stream.  The server side runs the probe with
+      // verbose=True so every RFC call is echoed to the terminal.
+      flashActivity(`${sid}: UCON — probing status...`, 3000);
+      const r = await api('GET', `node/${sid}/ucon_status`);
+      if (!r || r.error) {
+        showToast('UCON status failed: ' + ((r && r.error) || 'no response'),
+                   'warning');
+        break;
+      }
+      const posture = String(r.posture || 'unknown').toUpperCase();
+      const enforcingLine = r.enforcing
+        ? '✅ enforcing (ucon/rfc/active = 1)'
+        : '⚠ not enforcing (ucon/rfc/active = ' + (r.param_value || '?') + ')';
+      // Format the per-field count with a footnote when the read
+      // failed, so the reader can see WHY it says -1.
+      const fmt = (v, key) => {
+        if (v === -1 && r.errors && r.errors[key]) {
+          return v + '  (' + r.errors[key] + ')';
+        }
+        return v;
+      };
+      let errBlock = '';
+      if (r.errors && Object.keys(r.errors).length > 0) {
+        errBlock = '\n⚠ Some reads failed — see per-field notes above '
+          + 'and the terminal for the full RFC exception.';
+      }
+      alert(
+        'UCON status — ' + sid + '\n\n'
+        + 'Posture:            ' + posture + '\n'
+        + enforcingLine + '\n'
+        + 'Initialized:        ' + (r.initialized ? 'yes' : 'no') + '\n\n'
+        + 'RFMs by phase (UCONRFCSTATEHEAD):\n'
+        + '  Logging (L):      ' + fmt(r.logging_phase_count, 'logging_phase_count') + '\n'
+        + '  Evaluation (E):   ' + fmt(r.evaluation_phase_count, 'evaluation_phase_count') + '\n'
+        + '  Active/Final (A): ' + fmt(r.final_phase_count, 'final_phase_count') + '\n\n'
+        + 'Default CA members (UCONRFCSRVFMRT): '
+        + fmt(r.ca_membership, 'ca_membership') + '\n\n'
+        + 'Notes: -1 = "could not read".  RFC_READ_TABLE caps at '
+        + '10,000 rows per call — a saturated read still means '
+        + '"many".' + errBlock);
+      break;
+    }
+    case 'ucon_poc_disable': {
+      // POC — flip ucon/rfc/active=0 for a hold window and auto-
+      // restore via the Tier 3 evasion window (issue #27).  Prompts
+      // for hold + optional canary FM; a good canary is a
+      // Final-phase RFM that is NOT on the default CA (e.g.
+      // STFC_CONNECTION set up per the empirical test), so the
+      // canary_before / canary_after report reveals whether
+      // enforcement behaviour really changed.
+      const holdRaw = prompt(
+        'UCON POC (issue #27) — hold ucon/rfc/active=0 for how many '
+        + 'seconds before auto-restore?\n\n'
+        + 'Writer: TH_CHANGE_PARAMETER (CHECK_PARAMETER=1) — shared '
+        + 'memory only.  No profile-file rewrite, no restart, no '
+        + 'AUM/AUW SAL event.\n\n'
+        + 'A verify-read fires immediately after the writer so silent '
+        + 'no-ops are surfaced.  Baseline value auto-restored on hold '
+        + 'exit or exception.',
+        '30');
+      if (!holdRaw) break;
+      const hold = parseFloat(holdRaw);
+      if (isNaN(hold) || hold < 0 || hold > 600) {
+        showToast('Hold seconds must be a number between 0 and 600',
+                   'warning');
+        break;
+      }
+      const canaryFm = prompt(
+        'Optional canary FM — a Final-phase RFM off the default CA '
+        + '(e.g. STFC_CONNECTION on a system where you removed it '
+        + 'from the CA).  We call it once BEFORE the flip and once '
+        + 'AFTER restore so the finding shows enforcement behaviour '
+        + 'changed, not just the parameter value.\n\n'
+        + 'Leave blank to skip the canary probe.', '');
+      if (canaryFm === null) break;
+      if (!confirm(
+        'RUN UCON POC disable on ' + sid + '?\n\n'
+        + 'Writer:     TH_CHANGE_PARAMETER\n'
+        + 'Param:      ucon/rfc/active\n'
+        + 'Value:      0\n'
+        + 'Hold:       ' + hold + 's\n'
+        + 'Canary FM:  ' + (canaryFm || '(none)') + '\n\n'
+        + 'Shared-memory only.  Baseline auto-restored after the '
+        + 'hold (or on exception).')) break;
+      flashActivity(
+        `${sid}: UCON POC — flipping ucon/rfc/active=0 (hold ${hold}s)...`,
+        5000);
+      await api('POST', `node/${sid}/ucon_poc_disable`,
+                 {hold_seconds: hold, canary_fm: canaryFm});
+      if (hold > 0) {
+        let uRemaining = Math.ceil(hold);
+        const uKey = '_ucon_cd_' + sid;
+        activeTasks[uKey] =
+          '\u{1F1F3} UCON off — ' + uRemaining + 's';
+        updateActivityBar();
+        const uTimer = setInterval(() => {
+          uRemaining--;
+          if (uRemaining > 0) {
+            activeTasks[uKey] =
+              '\u{1F1F3} UCON off — ' + uRemaining + 's';
+          } else if (uRemaining === 0) {
+            activeTasks[uKey] =
+              '\u{2705} UCON — restoring baseline...';
+          } else {
+            delete activeTasks[uKey];
+            clearInterval(uTimer);
+          }
+          updateActivityBar();
+        }, 1000);
+      }
+      break;
+    }
     case 'retrieve_rfcs':
       await api('POST', `node/${sid}/retrieve_rfcs`); break;
     case 'test_rfcs':
