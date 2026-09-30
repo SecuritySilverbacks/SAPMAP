@@ -70,6 +70,11 @@ _BASELINE_PARAMS = (
     "stat/level",
     "gw/logging",
     "rdisp/TRACE",
+    # UCON master switch (issue #27) — the "UCON POC disable"
+    # Tier 3 wrapper flips it to 0 and relies on this baseline
+    # for the auto-restore.  Runtime-changeable (verified NPL
+    # kernel 753 patch 16).
+    "ucon/rfc/active",
 )
 
 # Parameters confirmed NOT runtime-changeable via TH_CHANGE_PARAMETER

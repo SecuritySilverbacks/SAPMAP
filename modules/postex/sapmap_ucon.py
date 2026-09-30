@@ -77,9 +77,13 @@ def phase_label(code: str) -> str:
 # Status / detection — the "monitoring" half of issue #27
 # ---------------------------------------------------------------------------
 
-def _read_param(conn, name: str) -> str:
-    """Wrapper around TH_GET_PARAMETER that never raises — empty
-    string means "could not read"."""
+def _read_param(conn, name: str, verbose: bool = False) -> tuple:
+    """Read a profile parameter via TH_GET_PARAMETER.
+
+    Returns ``(value, error)`` — empty ``error`` on success.  The
+    caller decides how to render an error (log line, per-field
+    error, etc.).
+    """
     try:
         r = conn.call("TH_GET_PARAMETER", PARAMETER_NAME=name)
         v = (r.get("PARAMETER_VALUE")
@@ -87,41 +91,40 @@ def _read_param(conn, name: str) -> str:
               or r.get("RETURN_VALUE") or "")
         if isinstance(v, bytes):
             v = v.decode("utf-8", errors="replace")
-        return str(v).strip()
+        v = str(v).strip()
+        if verbose:
+            print(f"    TH_GET_PARAMETER {name!r} -> {v!r}")
+        return v, ""
     except Exception as e:
+        err = f"{type(e).__name__}: {str(e)[:200]}"
+        if verbose:
+            print(f"    TH_GET_PARAMETER {name!r} FAILED: {err}")
         logger.debug("TH_GET_PARAMETER(%s) failed: %s", name, e)
-        return ""
+        return "", err
 
 
-def _count_rows(conn, table: str, where: str = "") -> int:
-    """Approximate row count via RFC_READ_TABLE.
+def _count_rows(conn, table: str, where: str = "",
+                verbose: bool = False,
+                cap: int = 10000) -> tuple:
+    """Count matching rows in ``table`` via RFC_READ_TABLE.
 
-    Two calls: first a ``NO_DATA='X'`` header probe that returns
-    just the FIELDS descriptor (confirms the table is readable
-    without transferring row data); second a data pull with
-    ROWCOUNT=10000 whose ``len(DATA)`` is the reported count.
+    Narrows the SELECT to a single field (the first column of the
+    result) so the wire payload stays tiny — we don't care about
+    the row bodies, just how many match.  ``cap`` bounds the row
+    pull (RFC_READ_TABLE will only return up to that many); a
+    saturated read is still a useful posture signal.
 
-    The 10 000 cap is intentional — RFC_READ_TABLE will return at
-    most that many rows per call, and UCON tables sit comfortably
-    inside that (~20 000 classified RFMs on a full NW 7.5x system,
-    but only the *Final*-phase and CA counts really matter for
-    posture assessment, and those tend to be in the low thousands).
-    A saturated read is still a useful signal — 10 000 means
-    "many", enough to say enforcement is meaningful.
-
-    Returns ``-1`` on any error so the caller can distinguish
-    "empty" (0) from "could not read" (-1).
+    Returns ``(count, error)`` where ``error`` is "" on success.
+    Count is 0 on empty, ``cap`` when saturated, and ``-1`` when
+    the call failed (in which case ``error`` is populated).
     """
-    kw = dict(QUERY_TABLE=table, DELIMITER="|", ROWCOUNT=0,
-              NO_DATA="X")
-    try:
-        conn.call("RFC_READ_TABLE", **kw)
-    except Exception as e:
-        logger.debug("RFC_READ_TABLE(%s) header probe failed: %s",
-                      table, e)
-        return -1
-    # NO_DATA header confirmed the table is readable; now pull rows.
-    kw = dict(QUERY_TABLE=table, DELIMITER="|", ROWCOUNT=10000)
+    # Cheap trick: ask for FIELDS=[{"FIELDNAME": "<one column>"}].
+    # But we don't know the first column name a priori across all
+    # UCON tables, so instead we let the server choose the layout
+    # and just cap the ROWCOUNT.  The verbose print includes the
+    # WHERE clause so a rejection or "field not found" is
+    # attributable.
+    kw = dict(QUERY_TABLE=table, DELIMITER="|", ROWCOUNT=int(cap))
     if where:
         opts = []
         s = where
@@ -131,33 +134,55 @@ def _count_rows(conn, table: str, where: str = "") -> int:
         kw["OPTIONS"] = opts
     try:
         r = conn.call("RFC_READ_TABLE", **kw)
+        n = len(r.get("DATA") or [])
+        if verbose:
+            saturated = " (saturated at cap)" if n >= cap else ""
+            print(f"    RFC_READ_TABLE {table}"
+                  f"{' WHERE ' + where if where else ''}"
+                  f" -> {n} row(s){saturated}")
+        return n, ""
     except Exception as e:
-        logger.debug("RFC_READ_TABLE(%s) data read failed: %s",
-                      table, e)
-        return -1
-    return len(r.get("DATA") or [])
+        err = f"{type(e).__name__}: {str(e)[:200]}"
+        if verbose:
+            print(f"    RFC_READ_TABLE {table}"
+                  f"{' WHERE ' + where if where else ''}"
+                  f" FAILED: {err}")
+        logger.debug("RFC_READ_TABLE(%s) failed: %s", table, e)
+        return -1, err
 
 
-def check_ucon_status(node, creds) -> dict:
+def check_ucon_status(node, creds, verbose: bool = False) -> dict:
     """Read-only UCON posture check.
 
     Returns a dict with:
 
-    * ``ok``            — True on a clean read, False on connection error.
+    * ``ok``            — True on a clean connection, False on open
+                          failure.  Individual reads inside can still
+                          fail (see ``errors``).
     * ``param_value``   — live value of ``ucon/rfc/active`` (str).
     * ``enforcing``     — True when the param is set to "1".
     * ``initialized``   — True when a UCON configuration exists (at
                           least one row in UCONRFCSTATEHEAD).
     * ``final_phase_count`` — number of RFMs classified into Final
-                          phase (candidates for blocking).
+                          phase (candidates for blocking).  ``-1``
+                          means "could not read" — see ``errors``.
     * ``logging_phase_count`` / ``evaluation_phase_count`` — same
                           for the two lower phases.
     * ``ca_membership``  — number of RFMs currently on the default
                           CA allowlist (UCONRFCSRVFMRT).
     * ``posture``        — one-word summary: ``off``,
                           ``initialized-but-off``, ``final-phase-empty``,
-                          or ``enforcing``.
-    * ``error``          — free-text on failure paths, else "".
+                          or ``enforcing``.  ``unknown`` when the
+                          derivation couldn't be completed.
+    * ``error``          — top-level connection error, else "".
+    * ``errors``         — dict {key: message} carrying the per-read
+                          RFC error for any field that came back
+                          ``-1`` / empty.  Empty when everything read
+                          cleanly.
+
+    When ``verbose=True``, each RFC call is printed to stdout so an
+    operator watching the terminal / GUI console can see the request
+    + reply live.
 
     Defenders should watch ``param_value`` and ``final_phase_count``
     over time — the disable POC below flips ``param_value`` to 0 in-
@@ -175,41 +200,81 @@ def check_ucon_status(node, creds) -> dict:
         "ca_membership": -1,
         "posture": "unknown",
         "error": "",
+        "errors": {},
     }
     try:
         import sapmap_rfc
+        if verbose:
+            print(f"[*] {node.sid}: UCON status — opening RFC connection")
         with sapmap_rfc._get_connection(node, creds) as conn:
-            result["param_value"] = _read_param(conn, UCON_PARAM)
+            if verbose:
+                print(f"[*] {node.sid}: UCON status — connection open, "
+                      f"reading param + counts")
+            v, err = _read_param(conn, UCON_PARAM, verbose=verbose)
+            result["param_value"] = v
+            if err:
+                result["errors"]["param_value"] = err
             result["enforcing"] = result["param_value"] == "1"
-            head_rows = _count_rows(conn, "UCONRFCSTATEHEAD")
+
+            head_rows, err = _count_rows(
+                conn, "UCONRFCSTATEHEAD", verbose=verbose)
             result["initialized"] = head_rows > 0
-            result["final_phase_count"] = _count_rows(
-                conn, "UCONRFCSTATEHEAD",
-                "ACTUAL_PHASE = 'A'")
-            result["logging_phase_count"] = _count_rows(
-                conn, "UCONRFCSTATEHEAD",
-                "ACTUAL_PHASE = 'L'")
-            result["evaluation_phase_count"] = _count_rows(
-                conn, "UCONRFCSTATEHEAD",
-                "ACTUAL_PHASE = 'E'")
-            result["ca_membership"] = _count_rows(
-                conn, "UCONRFCSRVFMRT")
+            if err:
+                result["errors"]["initialized"] = err
+
+            for key, phase in (("final_phase_count", "A"),
+                                ("logging_phase_count", "L"),
+                                ("evaluation_phase_count", "E")):
+                n, err = _count_rows(
+                    conn, "UCONRFCSTATEHEAD",
+                    f"ACTUAL_PHASE = '{phase}'",
+                    verbose=verbose)
+                result[key] = n
+                if err:
+                    result[key] = -1
+                    result["errors"][key] = err
+
+            n, err = _count_rows(
+                conn, "UCONRFCSRVFMRT", verbose=verbose)
+            result["ca_membership"] = n
+            if err:
+                result["ca_membership"] = -1
+                result["errors"]["ca_membership"] = err
         result["ok"] = True
     except Exception as e:
         result["error"] = f"{type(e).__name__}: {e}"
+        if verbose:
+            print(f"[-] {node.sid}: UCON status — connection failed: "
+                  f"{result['error']}")
         return result
 
     # Derived posture — a single word so the GUI can colour the row.
-    if not result["initialized"]:
+    # Fall back to 'unknown' when the underlying reads didn't produce
+    # enough data to decide.
+    if result["initialized"] is False and "initialized" in result["errors"]:
+        result["posture"] = "unknown"
+    elif not result["initialized"]:
         result["posture"] = "off"
     elif not result["enforcing"]:
         result["posture"] = "initialized-but-off"
+    elif result["final_phase_count"] == -1:
+        # Enforcing, but we couldn't read Final-phase membership so
+        # we can't tell whether anything is actually blocked.
+        result["posture"] = "unknown"
     elif (result["final_phase_count"] or 0) <= 0:
         # Config exists and enforcement is on, but no FMs are in
         # Final phase — nothing is actually blocked.
         result["posture"] = "final-phase-empty"
     else:
         result["posture"] = "enforcing"
+
+    if verbose:
+        print(f"[+] {node.sid}: UCON status — posture={result['posture']!r} "
+              f"({'enforcing' if result['enforcing'] else 'not enforcing'})")
+        if result["errors"]:
+            print(f"[!] {node.sid}: UCON status — some reads failed:")
+            for k, msg in result["errors"].items():
+                print(f"      {k}: {msg}")
     return result
 
 
@@ -311,8 +376,27 @@ def poc_disable_ucon(state, node, creds,
         "posture_before": "unknown", "posture_after": "unknown",
     }
 
-    status_before = check_ucon_status(node, creds)
+    status_before = check_ucon_status(node, creds, verbose=True)
     out["posture_before"] = status_before["posture"]
+
+    # Safety net for baselines captured before ucon/rfc/active was
+    # added to _BASELINE_PARAMS: the general Tier 3 capture would
+    # have skipped it, and on restore tier3_set_param would try to
+    # write an empty string (kernel returns INVALID_VALUE) leaving
+    # ucon/rfc/active pinned at 0.  Read the live value NOW via
+    # the status probe above and inject it into snap.params so the
+    # restore has a real baseline to write back.
+    snap = getattr(node, "_evasion_baseline", None)
+    if snap is not None and hasattr(snap, "params"):
+        current = snap.params.get(UCON_PARAM)
+        if current is None or (isinstance(current, str)
+                                and current.startswith("__UNCAPTURED__")):
+            live = status_before.get("param_value", "")
+            if live in ("0", "1"):
+                snap.params[UCON_PARAM] = live
+                print(f"[*] {node.sid}: seeded evasion baseline with "
+                      f"{UCON_PARAM}={live!r} (was uncaptured) so "
+                      f"auto-restore has a real value to write back")
 
     if canary_fm:
         out["canary_before"] = _call_canary(node, creds, canary_fm)
@@ -340,6 +424,9 @@ def poc_disable_ucon(state, node, creds,
     if canary_fm:
         out["canary_after"] = _call_canary(node, creds, canary_fm)
 
-    status_after = check_ucon_status(node, creds)
+    status_after = check_ucon_status(node, creds, verbose=True)
     out["posture_after"] = status_after["posture"]
+    # Persist the errors dict from the last probe so the caller (GUI
+    # route) can render them if the status read had trouble.
+    out["status_errors_after"] = status_after.get("errors", {})
     return out

@@ -8874,7 +8874,8 @@ async function ctxAction(action) {
       // Read-only UCON posture probe (issue #27).  GET returns the
       // shape from sapmap_ucon.check_ucon_status; render it in an
       // alert so the operator gets a one-shot answer without hunting
-      // through the log stream.
+      // through the log stream.  The server side runs the probe with
+      // verbose=True so every RFC call is echoed to the terminal.
       flashActivity(`${sid}: UCON — probing status...`, 3000);
       const r = await api('GET', `node/${sid}/ucon_status`);
       if (!r || r.error) {
@@ -8886,18 +8887,33 @@ async function ctxAction(action) {
       const enforcingLine = r.enforcing
         ? '✅ enforcing (ucon/rfc/active = 1)'
         : '⚠ not enforcing (ucon/rfc/active = ' + (r.param_value || '?') + ')';
+      // Format the per-field count with a footnote when the read
+      // failed, so the reader can see WHY it says -1.
+      const fmt = (v, key) => {
+        if (v === -1 && r.errors && r.errors[key]) {
+          return v + '  (' + r.errors[key] + ')';
+        }
+        return v;
+      };
+      let errBlock = '';
+      if (r.errors && Object.keys(r.errors).length > 0) {
+        errBlock = '\n⚠ Some reads failed — see per-field notes above '
+          + 'and the terminal for the full RFC exception.';
+      }
       alert(
         'UCON status — ' + sid + '\n\n'
         + 'Posture:            ' + posture + '\n'
         + enforcingLine + '\n'
         + 'Initialized:        ' + (r.initialized ? 'yes' : 'no') + '\n\n'
         + 'RFMs by phase (UCONRFCSTATEHEAD):\n'
-        + '  Logging (L):      ' + r.logging_phase_count + '\n'
-        + '  Evaluation (E):   ' + r.evaluation_phase_count + '\n'
-        + '  Active/Final (A): ' + r.final_phase_count + '\n\n'
-        + 'Default CA members (UCONRFCSRVFMRT): ' + r.ca_membership + '\n\n'
-        + 'Notes: -1 in a count means "could not read".  RFC_READ_TABLE '
-        + 'caps at 10,000 rows per call.');
+        + '  Logging (L):      ' + fmt(r.logging_phase_count, 'logging_phase_count') + '\n'
+        + '  Evaluation (E):   ' + fmt(r.evaluation_phase_count, 'evaluation_phase_count') + '\n'
+        + '  Active/Final (A): ' + fmt(r.final_phase_count, 'final_phase_count') + '\n\n'
+        + 'Default CA members (UCONRFCSRVFMRT): '
+        + fmt(r.ca_membership, 'ca_membership') + '\n\n'
+        + 'Notes: -1 = "could not read".  RFC_READ_TABLE caps at '
+        + '10,000 rows per call — a saturated read still means '
+        + '"many".' + errBlock);
       break;
     }
     case 'ucon_poc_disable': {

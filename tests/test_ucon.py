@@ -166,6 +166,33 @@ def test_status_reports_connection_error_gracefully():
     assert "no route to host" in s["error"]
 
 
+def test_status_surfaces_per_read_errors_in_dict():
+    """RFC_READ_TABLE failing on a phase filter should leave count=-1
+    AND populate errors[<key>] with the exception text so the GUI can
+    show WHY the read failed."""
+    def _selective(**kw):
+        opts = kw.get("OPTIONS") or []
+        where = "".join(o.get("TEXT", "") for o in opts)
+        if "ACTUAL_PHASE = 'L'" in where:
+            raise RuntimeError("SIMULATED_TABLE_TOO_BIG")
+        return {"DATA": [{"WA": "x"}] * 3,
+                "FIELDS": [{"FIELDNAME": "FUNCNAME"}]}
+    fake = _FakeConn({
+        "TH_GET_PARAMETER": {"PARAMETER_VALUE": "1"},
+        "RFC_READ_TABLE": _selective,
+    })
+    with _patched_conn(fake):
+        s = sapmap_ucon.check_ucon_status(_node(), _creds())
+    assert s["logging_phase_count"] == -1
+    assert "logging_phase_count" in s["errors"]
+    assert "SIMULATED_TABLE_TOO_BIG" in s["errors"]["logging_phase_count"]
+    # Other reads still succeed.
+    assert s["final_phase_count"] == 3
+    # Posture stays computable because the Final-phase read worked.
+    assert s["posture"] in ("enforcing", "final-phase-empty",
+                             "initialized-but-off", "off", "unknown")
+
+
 # ---------------------------------------------------------------------------
 # poc_disable_ucon — delegates and passes the right args
 # ---------------------------------------------------------------------------

@@ -9708,7 +9708,9 @@ def create_app(api: SAPMAPApi) -> Bottle:
     def node_ucon_status(sid):
         """Read-only UCON posture check.  Returns the shape documented
         on ``sapmap_ucon.check_ucon_status``.  Safe to call at any
-        time — no side effects, no gate needed."""
+        time — no side effects, no gate needed.  Runs with
+        ``verbose=True`` so each RFC call is echoed to the operator
+        terminal."""
         response.content_type = "application/json"
         node = api.state.get_node(sid)
         if not node:
@@ -9722,7 +9724,9 @@ def create_app(api: SAPMAPApi) -> Bottle:
             from sapmap_ucon import check_ucon_status
         except Exception as e:
             return json.dumps({"error": f"sapmap_ucon unavailable: {e}"})
-        return json.dumps(check_ucon_status(node, creds))
+        print(f"[*] {sid}: UCON status probe (issue #27)")
+        result = check_ucon_status(node, creds, verbose=True)
+        return json.dumps(result)
 
     @app.route("/api/node/<sid>/ucon_poc_disable", method="POST")
     def node_ucon_poc_disable(sid):
