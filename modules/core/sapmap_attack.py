@@ -91,6 +91,7 @@ TECHNIQUES: Dict[str, Dict] = {
     "T1087":     {"name": "Account Discovery",              "tactic": "TA0007"},
     "T1087.002": {"name": "Domain Account",                 "tactic": "TA0007", "sub_of": "T1087"},
     "T1518":     {"name": "Software Discovery",             "tactic": "TA0007"},
+    "T1518.001": {"name": "Security Software Discovery",    "tactic": "TA0007", "sub_of": "T1518"},
     "T1526":     {"name": "Cloud Service Discovery",        "tactic": "TA0007"},
     "T1592":     {"name": "Gather Victim Host Information", "tactic": "TA0043"},
 
@@ -454,6 +455,24 @@ CAPABILITY_MAP: Dict[str, List[str]] = {
     # touch defensive controls without ptrace, so no T1055 — just the
     # two T1562 sub-techniques that describe what actually happens.
     "evasion.rsau_disable":      ["T1562.001", "T1562.006"],
+    # UCON RFC allowlist disable (issue #27) — TH_CHANGE_PARAMETER
+    # flips ucon/rfc/active to 0 in shared memory, blowing the RFC
+    # runtime allowlist open until the evasion window restores.
+    # T1562.001 "Disable or Modify Tools" — UCON is a defensive
+    # control being turned off wholesale.  T1562.006 "Indicator
+    # Blocking" — the disable itself emits no AUM/AUW SAL event so
+    # blocks the primary detection channel.
+    "evasion.ucon_disable":      ["T1562.001", "T1562.006"],
+
+    # ---- Discovery of the security control (Tier 1 / status) ----
+    # UCON status probe (issue #27) — TH_GET_PARAMETER(ucon/rfc/
+    # active) + RFC_READ_TABLE against UCONRFCSTATEHEAD / UCONRFCSRVFMRT.
+    # T1518.001 "Security Software Discovery" — an attacker enumerating
+    # the RFC allowlist state to know whether they must disable it
+    # before running blocked RFMs.  Same probe run by a defender
+    # confirms enforcement is still on; adversary use of the same
+    # data is the ATT&CK-relevant framing.
+    "recon.ucon_status":         ["T1518.001"],
 
     # ---- Impact ----
     # Ransapware encrypts productive table fields in place — the DB
