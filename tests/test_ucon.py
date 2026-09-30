@@ -81,14 +81,19 @@ def test_phase_label_known_and_unknown():
 # check_ucon_status posture matrix
 # ---------------------------------------------------------------------------
 
-def _fake_read_table(rows_by_where):
+def _fake_read_table(rows_by_where, page_size=5000):
     """Build a RFC_READ_TABLE stub that returns different row-counts
-    depending on the OPTIONS clause (used to fake phase filters)."""
+    depending on the OPTIONS clause.  Honours ROWSKIPS + ROWCOUNT so
+    the paginated _count_rows walks through correctly."""
     def _impl(**kw):
         opts = kw.get("OPTIONS") or []
         where = "".join(o.get("TEXT", "") for o in opts)
-        n = rows_by_where.get(where, rows_by_where.get("__default__", 0))
-        return {"DATA": [{"WA": "x"}] * n,
+        total = rows_by_where.get(where, rows_by_where.get("__default__", 0))
+        skips = int(kw.get("ROWSKIPS", 0) or 0)
+        cap = int(kw.get("ROWCOUNT", page_size) or page_size)
+        remaining = max(0, total - skips)
+        page_rows = min(remaining, cap)
+        return {"DATA": [{"WA": "x"}] * page_rows,
                 "FIELDS": [{"FIELDNAME": "FUNCNAME"}]}
     return _impl
 
