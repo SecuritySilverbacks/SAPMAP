@@ -68,6 +68,27 @@ def test_technique_registered_in_tier3_catalogue():
     assert "#27" in label
 
 
+def test_ucon_attack_capabilities_resolve_to_real_techniques():
+    """evasion.ucon_disable + recon.ucon_status must both resolve
+    to real MITRE T-IDs in the ATT&CK catalogue.  Guards against
+    typos and against dropping the capability from CAPABILITY_MAP."""
+    from sapmap_attack import techniques_for, lookup
+    poc_tids = techniques_for("evasion.ucon_disable")
+    assert poc_tids, "evasion.ucon_disable not in CAPABILITY_MAP"
+    for t in poc_tids:
+        assert lookup(t) is not None, f"{t} not in TECHNIQUES"
+    # POC disables a security control — must include T1562.001
+    # (Disable or Modify Tools).
+    assert "T1562.001" in poc_tids
+
+    status_tids = techniques_for("recon.ucon_status")
+    assert status_tids, "recon.ucon_status not in CAPABILITY_MAP"
+    for t in status_tids:
+        assert lookup(t) is not None, f"{t} not in TECHNIQUES"
+    # Status probe is Security Software Discovery.
+    assert "T1518.001" in status_tids
+
+
 def test_phase_label_known_and_unknown():
     assert sapmap_ucon.phase_label("A") == "Active/Final"
     assert sapmap_ucon.phase_label("L") == "Logging"

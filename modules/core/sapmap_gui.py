@@ -9776,7 +9776,7 @@ def create_app(api: SAPMAPApi) -> Bottle:
                 emit_finding("WARNING", sid,
                               f"UCON POC failed: {out.get('error')}",
                               ref="issue-27",
-                              attack_capability="evasion.rsau_disable")
+                              attack_capability="evasion.ucon_disable")
                 return
 
             def _canary_word(cr):
@@ -9814,7 +9814,7 @@ def create_app(api: SAPMAPApi) -> Bottle:
                     sev = "WARNING"
                 emit_finding(sev, sid, summary,
                               ref="issue-27",
-                              attack_capability="evasion.rsau_disable")
+                              attack_capability="evasion.ucon_disable")
             else:
                 after_write = out.get("live_after_write", "")
                 print(f"[!] {sid}: UCON POC — writer returned RC=0 but "
@@ -9826,7 +9826,7 @@ def create_app(api: SAPMAPApi) -> Bottle:
                     f"not commit {UCON_PARAM}=0 "
                     f"(live={after_write!r})",
                     ref="issue-27",
-                    attack_capability="evasion.rsau_disable")
+                    attack_capability="evasion.ucon_disable")
 
         _bg(f"{sid}:ucon_poc_disable",
              f"UCON POC (issue #27): hold {hold_seconds}s", _run)
@@ -10478,6 +10478,48 @@ def create_app(api: SAPMAPApi) -> Bottle:
                 sev = "WARNING"
                 msg += " | " + "; ".join(risky)
             emit_finding(sev, sid, msg)
+
+            # UCON status — read-only posture check, same probe surface
+            # as the standalone "Probe UCON Status" menu item but folded
+            # into the telemetry pass so it lands on the defender-side
+            # radar automatically (issue #27).  Emits its own finding
+            # with ATT&CK tag recon.ucon_status (T1518.001) so an
+            # attacker's enumeration and a defender's snapshot are the
+            # same query — both benefit from the same detection rule.
+            try:
+                from sapmap_ucon import check_ucon_status
+                us = check_ucon_status(node, creds, verbose=False)
+            except Exception as e:
+                us = {"ok": False, "error": f"{type(e).__name__}: {e}",
+                      "posture": "unknown"}
+            u_posture = us.get("posture", "unknown")
+            print(f"[*] {sid}: UCON posture = {u_posture}"
+                  + (f" ({us.get('error')})" if not us.get("ok") else ""))
+            if us.get("ok"):
+                pv = us.get("param_value", "?")
+                fp = us.get("final_phase_count", -1)
+                ca = us.get("ca_membership", -1)
+                u_msg = (f"UCON posture — {u_posture} "
+                          f"(ucon/rfc/active={pv}, "
+                          f"Final-phase RFMs={fp}, "
+                          f"default-CA allowlist={ca})")
+                # Bump severity when UCON is present but not
+                # actually enforcing — the operator (or a defender
+                # reading findings) should know a security control
+                # is on paper but not blocking anything.  A pristine
+                # never-initialised system stays INFO — many
+                # environments genuinely don't use UCON.
+                u_sev = "INFO"
+                if u_posture in ("initialized-but-off",
+                                  "final-phase-empty"):
+                    u_sev = "WARNING"
+                emit_finding(u_sev, sid, u_msg,
+                              attack_capability="recon.ucon_status")
+            else:
+                emit_finding(
+                    "INFO", sid,
+                    f"UCON posture probe failed: {us.get('error')}",
+                    attack_capability="recon.ucon_status")
             print(f"[+] {sid}: telemetry probe complete")
 
         _bg(f"{sid}:probe_telemetry", "Probe Telemetry", _run)
