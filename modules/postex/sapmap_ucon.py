@@ -104,9 +104,10 @@ def _read_param(conn, name: str, verbose: bool = False) -> tuple:
 
 
 # Narrow FIELDS map: pick one small, always-present column per UCON
-# table so RFC_READ_TABLE returns a tiny payload that stays well
-# under saprfclib's SAPCOMPRESS decompression bug threshold.  Field
-# names verified live on NPL 7.52 kernel 753 patch 16.
+# table so RFC_READ_TABLE returns a tiny payload — good RFC hygiene,
+# and historically the narrower read also sidestepped
+# saprfclib#44 (fixed in 0.1.7).  Field names verified live on
+# NPL 7.52 kernel 753 patch 16.
 _COUNT_FIELDS = {
     "UCONRFCSTATEHEAD": "ACTUAL_PHASE",  # 1-char domain UCONRFCPHASE
     "UCONRFCSTATERT":   "ACTUAL_PHASE",
@@ -136,26 +137,22 @@ def _count_rows_page(conn, table: str, where: str,
         return -1, f"{type(e).__name__}: {str(e)[:200]}"
 
 
-def _count_rows(conn_holder, table: str, where: str = "",
+def _count_rows(conn, table: str, where: str = "",
                 verbose: bool = False,
                 page_size: int = 5000,
                 max_pages: int = 20) -> tuple:
     """Count matching rows in ``table`` via paginated RFC_READ_TABLE.
 
     Narrows FIELDS to a single small column (see ``_COUNT_FIELDS``)
-    so the wire payload stays tiny — big TABLE returns trip a
-    SAPCOMPRESS decompression bug in the current saprfclib and
-    leave the connection unusable for follow-up reads.
+    so the wire payload stays tiny — good RFC hygiene, and the
+    original motivation (saprfclib's SAPCOMPRESS decompression bug
+    on large TABLE returns, randomstr1ng/saprfclib#44) is fixed in
+    saprfclib 0.1.7.
 
     Pagination via ROWSKIPS+ROWCOUNT walks through the whole result
     set up to ``page_size * max_pages`` rows.  Default 5000 * 20 =
     100 000 — enough for any realistic UCON table (Logging phase
     on a full NW 7.5x install is ~15 000 rows).
-
-    ``conn_holder`` is a mutable list ``[conn]`` so this helper can
-    swap in a freshly-reopened connection after a decompression
-    failure poisons the current one.  Pass ``[conn]`` — the caller
-    reads back the new handle from index 0 after this returns.
 
     Returns ``(count, error)`` — ``error`` is "" on success.
     """
@@ -163,39 +160,14 @@ def _count_rows(conn_holder, table: str, where: str = "",
     total = 0
     for page in range(max_pages):
         skips = page * page_size
-        n, err = _count_rows_page(conn_holder[0], table, where,
+        n, err = _count_rows_page(conn, table, where,
                                     field, page_size, skips,
                                     verbose)
         if err:
-            # saprfclib's decompression failures leave the socket
-            # in a mid-frame state and every subsequent call fails
-            # with "connection is unusable".  Reopen once and retry
-            # this page — a fresh handle recovers the whole probe.
             if verbose:
                 print(f"    RFC_READ_TABLE {table} page {page} "
                       f"FAILED: {err}")
-                print(f"    reopening RFC connection and retrying page")
-            try:
-                conn_holder[0].close()
-            except Exception:
-                pass
-            try:
-                # RFCConnection.open() reuses the same params; if
-                # this raises we surface the original error.
-                conn_holder[0].open()
-            except Exception as reopen_err:
-                if verbose:
-                    print(f"    reopen FAILED: {reopen_err} — "
-                          f"aborting count for {table}")
-                return -1, err
-            n, err = _count_rows_page(conn_holder[0], table, where,
-                                        field, page_size, skips,
-                                        verbose)
-            if err:
-                if verbose:
-                    print(f"    RFC_READ_TABLE {table} page {page} "
-                          f"FAILED AGAIN after reopen: {err}")
-                return -1, err
+            return -1, err
         if verbose:
             print(f"    RFC_READ_TABLE {table}"
                   f"{' WHERE ' + where if where else ''}"
@@ -266,19 +238,15 @@ def check_ucon_status(node, creds, verbose: bool = False) -> dict:
             if verbose:
                 print(f"[*] {node.sid}: UCON status — connection open, "
                       f"reading param + counts")
-            # Mutable holder so _count_rows can swap in a fresh
-            # connection after a decompression-poisoned failure.
-            holder = [conn]
 
-            v, err = _read_param(holder[0], UCON_PARAM,
-                                  verbose=verbose)
+            v, err = _read_param(conn, UCON_PARAM, verbose=verbose)
             result["param_value"] = v
             if err:
                 result["errors"]["param_value"] = err
             result["enforcing"] = result["param_value"] == "1"
 
             head_rows, err = _count_rows(
-                holder, "UCONRFCSTATEHEAD", verbose=verbose)
+                conn, "UCONRFCSTATEHEAD", verbose=verbose)
             result["initialized"] = head_rows > 0
             if err:
                 result["errors"]["initialized"] = err
@@ -287,7 +255,7 @@ def check_ucon_status(node, creds, verbose: bool = False) -> dict:
                                 ("logging_phase_count", "L"),
                                 ("evaluation_phase_count", "E")):
                 n, err = _count_rows(
-                    holder, "UCONRFCSTATEHEAD",
+                    conn, "UCONRFCSTATEHEAD",
                     f"ACTUAL_PHASE = '{phase}'",
                     verbose=verbose)
                 result[key] = n
@@ -296,7 +264,7 @@ def check_ucon_status(node, creds, verbose: bool = False) -> dict:
                     result["errors"][key] = err
 
             n, err = _count_rows(
-                holder, "UCONRFCSRVFMRT", verbose=verbose)
+                conn, "UCONRFCSRVFMRT", verbose=verbose)
             result["ca_membership"] = n
             if err:
                 result["ca_membership"] = -1
