@@ -2275,6 +2275,7 @@ body {
         <option value="ORA">Oracle (ORA)</option>
         <option value="MSS">MS SQL Server (MSS)</option>
         <option value="DB6">DB2 (DB6)</option>
+        <option value="SYB">Sybase ASE (SYB)</option>
       </select>
     </div>
     <div class="form-actions">
