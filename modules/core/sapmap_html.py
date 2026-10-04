@@ -1250,6 +1250,7 @@ body {
       <div class="ctx-item" data-action="enum_clients">&#128202; Enumerate Clients</div>
       <div class="ctx-item write-op" data-action="client_roles">&#128202; Retrieve Client Roles</div>
       <div class="ctx-item write-op" data-action="default_creds">&#9888; Check Default Accounts</div>
+      <div class="ctx-item write-op" data-action="password_spray" title="Spray harvested credentials against this node's enumerated clients (issue #69).  Pool is the union of node credentials + SecStore + DBCON + BTP destinations + SCC admin + operator wordlist.  Short-circuits on first hit per (client, user).  Default is DRY-RUN; live spray requires accept_lockout_risk.  Requires --allow-pwspray; needs 32XX ABAP dispatcher.  WARNING: hits USR02 bad-logon counter — may lock accounts.">&#128299; Spray Harvested Credentials</div>
       <div class="ctx-item" data-action="check_router_info">&#128268; Check SAProuter Info Leak</div>
       <div class="ctx-item" data-action="check_ms_info_leak" title="Message Server text/dump info disclosure.  Sends HTTP GET /msgserver/text/dump?3=1 (ms/* profile parameters) and ?8=1 (kernel release + git hash) to the MS HTTP port (81NN).  When the MS ACL is at its default (unset) the response contains the ENTIRE ms/* profile — timeouts, HTTP handler config, ACL settings, log-file paths — plus precise kernel PL and Git commit hash.  Raw dumps land in loot/msinfo/ per system; the finding is HIGH.  Fix: set ms/acl_info + ms/HTTP/acl_info (SAP Notes 1421005, 2696233).">&#128268; Check MS Info Disclosure (text/dump ACL)</div>
       <div class="ctx-item" data-action="router_scan">&#128270; Scan Internally via SAProuter</div>
@@ -5989,6 +5990,17 @@ function showCtxMenu(e, sid) {
   const hasUsableAbapAccess = isAbapStack
     && (hasVerifiedCred || hasCreatedUsers);
 
+  // Password-spraying (issue #69) — the engine targets the 32XX
+  // DIAG dispatcher directly, so it needs that port but NOT a
+  // pre-verified credential (that's what the spray is for).  Arm
+  // bit is set from /api/mode's pwspray_armed → initMode toggles
+  // body.pwspray-armed; keep the readback here so the rules dict
+  // closes over the arm state captured when the menu was opened.
+  const hasDispPort = n && (n.instances || []).some(i =>
+    Object.entries(i.ports || {}).some(
+      ([p,s]) => s === 'dispatcher' || (p >= 3200 && p <= 3299)));
+  const pwsprayArmed = document.body.classList.contains('pwspray-armed');
+
   // Enable/disable rules per action
   const rules = {
     'details':          true,                       // always available
@@ -6300,6 +6312,7 @@ function showCtxMenu(e, sid) {
     'set_instance_nr':  true,                       // always available
     'enum_clients':     true,                       // always (uses DIAG, no creds needed)
     'default_creds':    true,                       // always (uses DIAG, no creds needed)
+    'password_spray':   pwsprayArmed && hasDispPort, // #69 — needs the arm flag + a DIAG dispatcher
     'check_router_info': true,                     // always (direct TCP, no creds)
     'check_ms_info_leak': !isSaprouter,             // MS HTTP dump probe; SAProuters have no MS
     'router_scan':      true,                       // always (probes via SAProuter, no creds)
@@ -6312,6 +6325,11 @@ function showCtxMenu(e, sid) {
   const hints = {
     'rfc_system_info':  'No gateway port detected',
     'check_gw':         'No gateway port detected',
+    'password_spray':   (!pwsprayArmed
+        ? 'Password spray not armed — restart SAPMAP with --allow-pwspray (see disclaimer banner).  Lockout invariants still protect the landscape once armed; the flag is the operator\'s acknowledgement that noisy DIAG logon attempts are allowed on in-scope targets.'
+        : !hasDispPort
+            ? 'No 32XX ABAP dispatcher reachable — DIAG spray has no listener to hit.'
+            : 'Not available'),
     'betrusted':             (msSecureComms
         ? 'MS port requires TLS/SystemPKI (system/secure_communication = ON) — betrusted attack CLOSED at the wire layer.  SAPMAP has no SystemPKI client certificate signed by this landscape\'s CA to present during the TLS handshake.'
         : 'Run Check MS Betrusted first to find the MS port'),
@@ -6527,6 +6545,7 @@ function showCtxMenu(e, sid) {
     'client_roles':     !isAbapStack,
     'read_usrextid':    !isAbapStack,
     'default_creds':    !isAbapStack,
+    'password_spray':   !isAbapStack,              // #69 — only ABAP has a DIAG dispatcher to spray
     'probe_telemetry':  !isAbapStack,
     'capture_evasion_baseline': !isAbapStack,
     'probe_rsau_api': !isAbapStack,
@@ -9185,6 +9204,16 @@ async function ctxAction(action) {
     case 'default_creds':
       if (confirm('⚠️ WARNING: Checking default accounts may LOCK user accounts after failed login attempts.\n\nThis tests well-known SAP default credentials (SAP*, DDIC, TMSADM, etc.) via DIAG protocol.\n\nProceed?'))
         api('POST', `node/${sid}/check_default_creds`);
+      break;
+    case 'password_spray':
+      // Default to DRY-RUN so a confirm miss cannot burn the lockout
+      // budget; the operator must explicitly tick accept_lockout_risk
+      // in a follow-up body (PR3 ships the full config modal — for
+      // PR2 the ctx-menu entry fires the dry-run preview).
+      if (confirm('⚠️ WARNING: Password spray hits USR02 bad-logon counter and may LOCK accounts.\n\nSprays harvested credentials (SecStore + DBCON + BTP + SCC + operator wordlist) against ' + sid + '\'s enumerated clients via DIAG.\n\nThis ctx-menu entry starts a DRY-RUN (no sockets opened).  Use the Password Spray modal (PR3) for live spray.\n\nProceed?')) {
+        api('POST', `node/${sid}/password_spray`,
+            { dry_run: true, cap_per_user: 1 });
+      }
       break;
     case 'set_saprouter': showSaprouterModal(sid); break;
     case 'harvest_scc': {
@@ -18911,6 +18940,13 @@ async function initMode() {
       LOOT_TOKEN = m.loot_token;
       const item = document.getElementById('dd-browse-loot');
       if (item) item.style.display = '';
+    }
+    if (m && m.pwspray_armed) {
+      // Password-spraying armed (issue #69) — showCtxMenu reads this
+      // class to enable the 'Spray Harvested Credentials' per-node
+      // entry.  Never polled again (sapmap_mode globals are set once
+      // at startup and cannot flip at runtime).
+      document.body.classList.add('pwspray-armed');
     }
   } catch (e) {
     // /api/mode is new — if the server doesn't have it yet, silently
