@@ -508,6 +508,121 @@ CATALOG: Dict[str, Remediation] = {
         severity_if_delayed="HIGH",
     ),
 
+    "creds.password_spray": Remediation(
+        fix_summary=(
+            "Rotate every user:password SAPMAP successfully sprayed; "
+            "harden landscape-wide password policy + lockout"
+        ),
+        fix_steps=[
+            "Every HIT SAPMAP recorded in loot/spray/<run_id>/attempts.jsonl "
+            "(status SUCCESS / PASSWORD_CHANGE / NO_AUTH_LOGON) is a "
+            "credential that has leaked FROM one SAP system (or wordlist) "
+            "AND is valid ON another.  For every (sid, client, user) hit: "
+            "force a password reset via SU01 on the TARGET system, and "
+            "rotate the credential at the SOURCE store (SecStore RSECTAB "
+            "row, Java SecStoreFS entry, SSFS DB_CONNECT, BTP destination "
+            "service, OA2C profile, SCC admin pwd — whichever store "
+            "SAPMAP collected the candidate from).",
+            "If the hit was PASSWORD_CHANGE, the target account's "
+            "password had expired but was still accepted at logon — "
+            "set login/password_expiration_time to a sensible value "
+            "(90 days is a common baseline) so dormant leaked "
+            "credentials age out.  If the hit was NO_AUTH_LOGON, the "
+            "credential matched but no authorisations are assigned — "
+            "that user is a cleanup candidate (lock + delete).",
+            "Review landscape-wide password policy: set "
+            "login/min_password_lng ≥ 10, login/min_password_diff ≥ 3, "
+            "login/password_change_for_SSO = 1, "
+            "login/fails_to_user_lock ≤ 5, "
+            "login/failed_user_auto_unlock = 0 (no auto-unlock — "
+            "forces an admin review of every lockout).  Without the "
+            "landscape policy change the same reuse-match reappears "
+            "on the next sweep.",
+            "Expand the service-user hygiene list: SAPJSF, SAPCPIC, "
+            "TMSADM, SOLMAN_<*>, SMD_<*>, J2EE_<*>, WF-BATCH, CTS_<*>, "
+            "ADSUSER, CSMREG — any such user type should be "
+            "Communications (C) or Service (B), NEVER Dialog (A), so "
+            "the sprayed credential can't be reused for interactive "
+            "logon even when the password matches.",
+        ],
+        verification=[
+            "Re-run SAPMAP → Spray Harvested Credentials against the "
+            "same scope with the SAME input pool.  Every previous HIT "
+            "cell must flip to REJECTED on the next pass.",
+            "Query USR02 on each target where a hit was recorded: "
+            "GLTGV (last password-change timestamp) must post-date "
+            "the engagement window.",
+            "RSPARAM: login/fails_to_user_lock ≤ 5 and "
+            "login/failed_user_auto_unlock = 0 on every productive "
+            "ABAP system.",
+        ],
+        refs=[
+            _note(2293011),     # password-policy hardening
+            _note(1458262),     # password hashing
+            _attack("T1110.003"),
+            _attack("T1078"),
+            _attack("T1078.001"),
+        ],
+        requires_restart=False,
+        effort_minutes=180,     # scales with number of hits
+        severity_if_delayed="CRITICAL",
+    ),
+
+    "creds.password_reuse_cross_system": Remediation(
+        fix_summary=(
+            "Break landscape-wide password reuse: rotate the shared "
+            "credential on EVERY system where SAPMAP observed it"
+        ),
+        fix_steps=[
+            "SAPMAP's run report lists every (user, password) pair that "
+            "validated on MORE THAN ONE SID.  Each such row is an active "
+            "password-reuse incident: one leaked credential grants the "
+            "operator every system in that row.  For each pair: force a "
+            "SU01 password reset on EVERY SID in the row, not just the "
+            "first — a partial rotation leaves the lateral path open.",
+            "Audit the stores that fed the shared credential into "
+            "multiple systems — commonly: a copy-paste of an SM59 "
+            "destination user, a cloned role-user across clients, or a "
+            "landscape-wide service user (SAPJSF, TMSADM, SOLMAN_<*>, "
+            "ADSUSER).  Treat the pattern itself as the finding: "
+            "same user name across SIDs with the same password = "
+            "institutional reuse that will recur after you rotate.",
+            "Decouple the reused service users: give each SID its own "
+            "distinct TMSADM / SOLMAN_<*> password managed through a "
+            "central vault (SecStore + rotation runbook, or SAP "
+            "Credential Store), so a future SAPMAP sweep returns zero "
+            "cross-SID reuse rows.",
+            "If the reused credential originated in a SecStore row that "
+            "SAPMAP decrypted: ALSO follow creds.abap_secstore / "
+            "creds.scc_keystore remediation to tighten S_TABU_DIS on "
+            "RSECTAB and re-emit the destination's secret via SM59 / "
+            "OA2C_CONFIG / STRUST — rotating the password without "
+            "closing the leak point will just produce the next "
+            "reused value.",
+        ],
+        verification=[
+            "Re-run SAPMAP → Spray Harvested Credentials with the SAME "
+            "pool across the SAME SID set.  The cross-SID reuse rows "
+            "in the HIT MATRIX must drop to zero (any new row = "
+            "regression).",
+            "Diff the pre- and post- SAPMAP run reports: "
+            "`sapmap --diff pre.sapmap post.sapmap` must show the "
+            "reused-credential rows as REMOVED.",
+            "USR02.GLTGV on each affected (sid, client, user) triple "
+            "post-dates the engagement window — i.e. passwords really "
+            "did rotate.",
+        ],
+        refs=[
+            _note(2293011),     # password-policy hardening
+            _note(1485029),     # securing the secure store
+            _attack("T1078"),
+            _attack("T1552.001"),
+        ],
+        requires_restart=False,
+        effort_minutes=240,     # scales with reuse graph size
+        severity_if_delayed="CRITICAL",
+    ),
+
     "creds.pse_loot": Remediation(
         fix_summary=(
             "Regenerate every PSE / SSO2 ticket signing key the operator "

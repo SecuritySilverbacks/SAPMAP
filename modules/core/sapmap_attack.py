@@ -93,6 +93,7 @@ TECHNIQUES: Dict[str, Dict] = {
     "T1518":     {"name": "Software Discovery",             "tactic": "TA0007"},
     "T1518.001": {"name": "Security Software Discovery",    "tactic": "TA0007", "sub_of": "T1518"},
     "T1526":     {"name": "Cloud Service Discovery",        "tactic": "TA0007"},
+    "T1654":     {"name": "Log Enumeration",                "tactic": "TA0007"},
     "T1592":     {"name": "Gather Victim Host Information", "tactic": "TA0043"},
 
     # Initial Access
@@ -135,6 +136,8 @@ TECHNIQUES: Dict[str, Dict] = {
     "T1003":     {"name": "OS Credential Dumping",          "tactic": "TA0006"},
     "T1110":     {"name": "Brute Force",                    "tactic": "TA0006"},
     "T1110.001": {"name": "Password Guessing",              "tactic": "TA0006", "sub_of": "T1110"},
+    "T1110.003": {"name": "Password Spraying",              "tactic": "TA0006", "sub_of": "T1110"},
+    "T1110.004": {"name": "Credential Stuffing",            "tactic": "TA0006", "sub_of": "T1110"},
     "T1552":     {"name": "Unsecured Credentials",          "tactic": "TA0006"},
     "T1552.001": {"name": "Credentials In Files",           "tactic": "TA0006", "sub_of": "T1552"},
     "T1552.004": {"name": "Private Keys",                   "tactic": "TA0006", "sub_of": "T1552"},
@@ -312,6 +315,28 @@ CAPABILITY_MAP: Dict[str, List[str]] = {
     # LPE) is Credentials in Files (T1552.001) with a Valid Accounts
     # (T1078) follow-through when the hashes get cracked.
     "creds.wd_icmauth":          ["T1552.001", "T1078"],
+
+    # Password spraying (issue #69) — spray a handful of pre-known
+    # credentials (previously decrypted from the various cred stores
+    # on the landscape, or operator-supplied) across many (system,
+    # client, user) tuples looking for reuse / improper client copy.
+    # T1110.003 is the primary technique; T1078 covers the "valid
+    # account found" outcome; T1078.001 overlaps when the pool
+    # happens to include default accounts.
+    "creds.password_spray":          ["T1110.003", "T1078", "T1078.001"],
+    # Distinct capability for the "same user, different SID or client"
+    # reuse hit — lights different ATT&CK cells so operators can tell
+    # 'spray hit a default cred' apart from 'spray proved cross-system
+    # reuse'.  T1552.001 acknowledges the spray pool came from
+    # decrypted secure storage.
+    "creds.password_reuse_cross_system": ["T1078", "T1552.001"],
+    # Purple-mode-only capability emitted when the operator asks spray
+    # to pair each attempt with its expected SM21 / SAL signal + the
+    # observed USR02 counter delta (defender-detection validation).
+    # T1654 (Log Enumeration) acknowledges that we read audit logs as
+    # the attacker — distinguishes 'we attacked' from 'we attacked
+    # AND measured defender response'.
+    "creds.password_spray_purple_telemetry": ["T1110.003", "T1654"],
 
     # ---- Lateral Movement ----
     "lateral.rfc_propagate":     ["T1021", "T1078"],
