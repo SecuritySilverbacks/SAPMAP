@@ -121,22 +121,34 @@ def test_write_routes_omit_pool_get():
 # Arm-gate helper refusal
 # ---------------------------------------------------------------------------
 
-def test_pwspray_armed_or_refuse_refuses_when_off():
-    """The _pwspray_armed_or_refuse helper is nested inside create_app
-    but we can exercise its behaviour via the sapmap_mode flag and the
-    documented 403 contract.  Source pin: the refusal body carries
-    the ``pwspray_not_armed`` error key and a non-empty message —
-    the frontend toasts on 403 bodies that carry an ``error`` key."""
+def test_central_pwspray_gate_hook_refuses_when_off():
+    """PR3 consolidated the per-route arm check into a central
+    before_request hook (parallel to _readonly_gate).  Pin the shape:
+    hook named _pwspray_gate, raises HTTPResponse with status=403,
+    body carries ``pwspray_not_armed`` error key, routes come from
+    the PWSPRAY_ROUTES frozenset."""
     src = (REPO_ROOT / "modules" / "core" / "sapmap_gui.py").read_text(
         encoding="utf-8")
+    assert "def _pwspray_gate():" in src, (
+        "PR3 must define a central _pwspray_gate before_request hook "
+        "so new destructive routes inherit the arm-gate refusal "
+        "without needing per-handler boilerplate")
     assert '"error": "pwspray_not_armed"' in src, (
-        "Arm-gate helper must emit the pwspray_not_armed error key "
-        "so the frontend toast handler can distinguish it from the "
-        "existing read_only_mode refusal")
-    assert "response.status = 403" in src
+        "The hook must emit pwspray_not_armed so the frontend toast "
+        "handler can distinguish it from the read_only_mode refusal")
+    assert "status=403" in src
     # Must be gated by sapmap_mode.is_pwspray_armed, not by any
     # heuristic read of state.
     assert "from sapmap_mode import is_pwspray_armed" in src
+    # And the hook must fire AFTER _readonly_gate so --read-only wins
+    # for routes that are both WRITE and PWSPRAY (lower-friction
+    # operator UX).
+    readonly_at = src.find("def _readonly_gate():")
+    pwspray_at = src.find("def _pwspray_gate():")
+    assert readonly_at > 0 and pwspray_at > readonly_at, (
+        "_pwspray_gate must be registered AFTER _readonly_gate so "
+        "Bottle fires the readonly refusal first on routes that are "
+        "both WRITE and PWSPRAY under --read-only")
 
 
 # ---------------------------------------------------------------------------
@@ -364,33 +376,34 @@ def test_pwspray_refusal_body_carries_route_field():
     emitted so a shared frontend 403 handler can key on it."""
     src = (REPO_ROOT / "modules" / "core" / "sapmap_gui.py").read_text(
         encoding="utf-8")
-    # Find the refusal json.dumps block (there is exactly one in
-    # _pwspray_armed_or_refuse) and assert it contains the route key.
+    # Find the refusal json.dumps block inside the central
+    # _pwspray_gate before_request hook (PR3 consolidation of the
+    # original PR2 _pwspray_armed_or_refuse closure) and assert it
+    # emits the route key.
     assert '"route": rule' in src, (
         "The pwspray 403 body must emit a 'route' field matching the "
         "read-only hook's {error, message, route} shape")
 
 
-def test_get_pool_route_arm_gated():
-    """GET /api/actions/password_spray/pool must call the arm-gate
-    helper too — unarmed sessions should NOT get the source
-    breakdown + per-source counts (reconnaissance of harvest state).
-    Verifies the fix for lens-A finding #4."""
+def test_get_pool_route_arm_gated_centrally():
+    """GET /api/actions/password_spray/pool must be arm-gated — PR3
+    consolidated per-route closures into a central _pwspray_gate
+    before_request hook keyed off a PWSPRAY_ROUTES frozenset.  Pin:
+    the route string is in that frozenset so the hook refuses it with
+    403 when not armed."""
     src = (REPO_ROOT / "modules" / "core" / "sapmap_gui.py").read_text(
         encoding="utf-8")
     import re
-    # Isolate actions_password_spray_pool's handler body.
-    m = re.search(
-        r"@app\.route\(\"/api/actions/password_spray/pool\", "
-        r"method=\"GET\"\)\s*\n\s*def actions_password_spray_pool\(\):"
-        r"(.*?)@app\.route",
-        src, re.DOTALL)
-    assert m, "actions_password_spray_pool handler not found"
+    m = re.search(r"PWSPRAY_ROUTES = frozenset\(\{(.*?)\}\)",
+                  src, re.DOTALL)
+    assert m, "PWSPRAY_ROUTES frozenset not found — PR3 should have " \
+              "introduced it as part of the central arm-gate hook"
     body = m.group(1)
-    assert "_pwspray_armed_or_refuse()" in body, (
-        "GET /api/actions/password_spray/pool must call "
-        "_pwspray_armed_or_refuse() like the sibling POST routes — "
-        "otherwise unarmed callers see per-source credential counts.")
+    assert '"/api/actions/password_spray/pool",' in body, (
+        "GET /api/actions/password_spray/pool must be listed in "
+        "PWSPRAY_ROUTES so the central before_request hook refuses "
+        "it with 403 when the engine is not armed — otherwise unarmed "
+        "callers see per-source credential counts")
 
 
 # ---------------------------------------------------------------------------

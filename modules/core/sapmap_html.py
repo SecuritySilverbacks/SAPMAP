@@ -36,6 +36,12 @@ html, body { height: 100%; overflow: hidden; }
    Class is toggled on <body> by initMode() after polling /api/mode.
    Backend still enforces via a 403 hook, this is the UX layer. */
 body.read-only .write-op { display: none !important; }
+
+/* Password-spray armed strip (issue #69, PR3).  PR2's initMode flips
+   body.pwspray-armed at page load from /api/mode's pwspray_armed
+   field; the strip only appears when the flag is on, and
+   independently of the Tier 3 evasion strip. */
+body.pwspray-armed #pwspray-armed-bar { display: flex; }
 body {
   font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
   background: #0d1117; color: #e6edf3; font-size: 13px;
@@ -914,6 +920,7 @@ body {
       <div class="dd-header">Landscape-wide</div>
       <div class="dd-item" onclick="scanAllVulns()" style="color:#f0883e">&#128270; Scan for All Vulnerabilities</div>
       <div class="dd-item write-op" onclick="showAutoPwnModal()" style="color:#f85149;font-weight:bold">&#9889; AutoPwn</div>
+      <div class="dd-item write-op" onclick="showPwsprayModal()" style="color:#ffa657" title="Spray harvested credentials (issue #69) across every ABAP system on the landscape.  Pool is the union of node credentials + SecStore + DBCON + BTP destinations + SCC admin + operator wordlist.  Requires --allow-pwspray.  WARNING: hits USR02 bad-logon counter — may lock accounts.">&#128299; Spray Harvested Credentials&hellip;</div>
       <div class="dd-item write-op" onclick="propagateAll()">&#128640; Auto-Propagate All</div>
       <div class="dd-item" onclick="testAllRFCs()">&#129514; Test All RFC Destinations</div>
       <div class="dd-item write-op" onclick="cleanupAll()">&#129529; Cleanup All Users</div>
@@ -1019,6 +1026,14 @@ body {
 <div id="evasion-armed-bar" style="display:none;align-items:center;gap:8px;background:linear-gradient(90deg,#3a0808 0%,#1a0e0e 100%);border-bottom:2px solid #f85149;padding:6px 16px;font-size:13px;font-weight:600;color:#ff9b9b;text-shadow:0 0 6px #f8514980" title="Tier 3 active-evasion techniques are armed for this session.  SAL filter narrow, kernel-param dynamic-set, STAD/DBTABLOG suppression, NWA log-config flip etc. will RUN when invoked.  Toggle off in Settings to re-arm gate.">
   <span style="font-weight:700;color:#f85149;text-transform:uppercase;font-size:11px;letter-spacing:1px;padding:2px 8px;border:1px solid #f8514980;border-radius:3px;background:#f8514915">⚡ Tier 3 Armed</span>
   <span id="evasion-armed-text">Active-evasion techniques unlocked for this session.  Every Tier 3 entry point snapshots a baseline and restores on exit.</span>
+</div>
+<!-- Password-spray armed strip (issue #69).  Toggled by CSS off
+     body.pwspray-armed which PR2's initMode flips at page load from
+     /api/mode's pwspray_armed field.  Amber palette to distinguish
+     from the red Tier 3 bar; both strips can be visible at once. -->
+<div id="pwspray-armed-bar" style="display:none;align-items:center;gap:8px;background:linear-gradient(90deg,#3a2808 0%,#1a140e 100%);border-bottom:2px solid #ffa657;padding:6px 16px;font-size:13px;font-weight:600;color:#ffd4a8;text-shadow:0 0 6px #ffa65780" title="Password spraying is armed for this session.  The engine still enforces every lockout invariant (per-user cap, SAP*/DDIC skip list, landscape-wide locked-user cache, cross-target circuit breaker, pw_sha256_prefix audit JSONL); this flag is the operator's acknowledgement that noisy DIAG logon attempts are allowed on in-scope targets.">
+  <span style="font-weight:700;color:#ffa657;text-transform:uppercase;font-size:11px;letter-spacing:1px;padding:2px 8px;border:1px solid #ffa65780;border-radius:3px;background:#ffa65715">&#128299; Pw-Spray Armed</span>
+  <span>Password-spraying unlocked for this session.  Risk-tier is lockout, not performance — SAP*/DDIC skipped, cap &le; 2, landscape-wide lock cache active.</span>
 </div>
 
 <!-- Critical-finding banner (rendered by renderFindings()) -->
@@ -1442,6 +1457,7 @@ body {
   <div class="ctx-item" data-action="map_add_system">&#10133; Add System Manually</div>
   <div class="ctx-sep"></div>
   <div class="ctx-item write-op" data-action="map_autopwn" style="color:#f85149;font-weight:bold">&#9889; AutoPwn</div>
+  <div class="ctx-item write-op" data-action="map_password_spray" style="color:#ffa657" title="Spray harvested credentials across every ABAP system on the landscape (issue #69).  Requires --allow-pwspray.  WARNING: hits USR02 bad-logon counter — may lock accounts.">&#128299; Spray Harvested Credentials&hellip;</div>
   <div class="ctx-item write-op" data-action="map_propagate_all">&#128640; Auto-Propagate All</div>
   <div class="ctx-item write-op" data-action="map_cleanup_all">&#129529; Cleanup All Users</div>
   <div class="ctx-item" data-action="map_scan_all_vulns" style="color:#f0883e">&#128270; Scan for All Vulnerabilities</div>
@@ -2979,6 +2995,157 @@ body {
 
     <!-- Scrollable log -->
     <div class="autopwn-log" id="apwn-log"></div>
+  </div>
+</div>
+
+<!-- Password-spray config modal (issue #69, PR3).  Operator opens
+     via Actions dropdown or map ctx-menu.  Dry-run by default; live
+     spray requires a secondary accept-risk tick.  Cap slider is
+     hard-capped at 2 (the engine enforces it too).  Operator wordlist
+     textarea posts to the PR2 /pool/wordlist route in append mode
+     before the sweep fires. -->
+<div class="modal-overlay" id="pwspray-config-modal">
+  <div class="modal" style="max-width:720px;width:95vw;max-height:90vh;overflow-y:auto">
+    <h3 style="color:#ffa657">&#128299; Spray Harvested Credentials</h3>
+    <div style="font-size:11px;color:#8b949e;margin-bottom:12px;line-height:1.4">
+      Reuse-finder, not brute-forcer.  Pool is the union of harvested credentials
+      (SecStore, DBCON, BTP destinations, SCC admin) plus any operator wordlist
+      below.  Short-circuits on first hit per (sid, client, user).  Default is
+      DRY-RUN — toggle the accept-risk tick for a live run.
+    </div>
+
+    <div style="margin-bottom:10px">
+      <label style="display:block;font-size:12px;color:#c9d1d9;margin-bottom:4px">Scope</label>
+      <label style="font-size:12px;margin-right:12px">
+        <input type="radio" name="pws-scope" value="landscape" checked>
+        Whole landscape
+      </label>
+      <label style="font-size:12px">
+        <input type="radio" name="pws-scope" value="single">
+        Single SID
+      </label>
+      <input type="text" id="pws-scope-sid" placeholder="SID" style="margin-left:6px;width:80px;background:#0d1117;color:#c9d1d9;border:1px solid #30363d;border-radius:3px;padding:2px 4px;font-size:12px">
+    </div>
+
+    <div style="margin-bottom:10px;display:flex;align-items:center;gap:10px">
+      <label style="font-size:12px;color:#c9d1d9">Cap per user:</label>
+      <input type="range" id="pws-cap" min="1" max="2" step="1" value="1" style="width:120px">
+      <span id="pws-cap-val" style="font-size:12px;color:#ffa657;font-weight:600">1</span>
+      <span style="font-size:11px;color:#8b949e">(hard-capped at 2 — engine will floor to 1 when policy unknown)</span>
+    </div>
+
+    <div style="margin-bottom:10px">
+      <label style="font-size:12px;color:#c9d1d9">
+        <input type="checkbox" id="pws-dry-run" checked>
+        Dry-run (resolve pool + target matrix, no sockets opened)
+      </label>
+    </div>
+    <div style="margin-bottom:10px">
+      <label style="font-size:12px;color:#c9d1d9">
+        <input type="checkbox" id="pws-accept-risk">
+        I accept the lockout risk (required to disable dry-run)
+      </label>
+    </div>
+    <div style="margin-bottom:10px">
+      <label style="font-size:12px;color:#c9d1d9">
+        <input type="checkbox" id="pws-include-prod">
+        Include production-flagged nodes (default: skip)
+      </label>
+    </div>
+    <div style="margin-bottom:10px">
+      <label style="font-size:12px;color:#c9d1d9">
+        <input type="checkbox" id="pws-accept-prod-risk">
+        I accept the production lockout risk (required to include production)
+      </label>
+    </div>
+
+    <div style="margin-top:14px;margin-bottom:4px;font-size:12px;color:#c9d1d9;font-weight:600">
+      Operator wordlist (optional)
+    </div>
+    <div style="font-size:11px;color:#8b949e;margin-bottom:6px;line-height:1.4">
+      Append to the session pool.  One <code>user:password</code> pair per line;
+      <code>#</code> comments and blank lines are skipped.  Dedup is case-insensitive on username.
+      Session-only &mdash; never written to <code>.sapmap</code>.
+    </div>
+    <textarea id="pws-wordlist" rows="6" style="width:100%;font-family:monospace;font-size:12px;background:#0d1117;color:#c9d1d9;border:1px solid #30363d;border-radius:4px;padding:8px" placeholder="# user:password&#10;DDIC:19920706&#10;SAP*:06071992"></textarea>
+
+    <div style="margin-top:12px;padding:10px;background:#1a140e;border:1px solid #ffa657;border-radius:4px;font-size:12px;color:#ffd4a8">
+      <strong>Preview</strong> shows pool + target matrix + per-target budget before any sockets open.
+      <strong>Start Spray</strong> launches the sweep in a background thread; follow progress in the panel on the right.
+    </div>
+
+    <div class="form-actions" style="margin-top:12px">
+      <button class="btn" onclick="pwsprayPreview()">Preview (dry resolve)</button>
+      <button class="btn btn-primary" style="background:#f0883e" onclick="pwsprayLaunch()">Start Spray</button>
+      <button class="btn" onclick="closeModal('pwspray-config-modal')">Cancel</button>
+    </div>
+    <div id="pws-preview-result" style="margin-top:12px"></div>
+  </div>
+</div>
+
+<!-- Password-spray progress panel — docked right.  Clones the
+     AutoPwn panel structure (phases + stats + bar + log).  Phase keys
+     mirror sapmap_pwspray.PHASE_ORDER. -->
+<div class="autopwn-panel" id="pwspray-progress-panel" style="border-left-color:#ffa657">
+  <div style="display:flex;align-items:center;justify-content:space-between;padding:10px 16px;border-bottom:1px solid #30363d;background:#161b22">
+    <h3 style="margin:0;font-size:14px;color:#ffa657">&#128299; Password Spray</h3>
+    <div style="display:flex;gap:6px;align-items:center">
+      <button class="btn btn-danger" onclick="stopPwspray()" id="pws-stop-btn" style="font-size:10px;padding:2px 10px">STOP</button>
+      <button class="btn" onclick="closePwsprayPanel()" id="pws-close-btn" style="font-size:10px;padding:2px 10px;display:none">&#10005; Close</button>
+    </div>
+  </div>
+  <div class="autopwn-panel-body">
+    <div id="pws-scope-label" style="font-size:12px;color:#ffa657;font-weight:600;margin-bottom:8px">(idle)</div>
+    <div class="autopwn-phases" id="pws-phases">
+      <div class="autopwn-phase" id="pws-ph-collect_pool"><div class="autopwn-phase-icon">&#128230;</div><div class="autopwn-phase-label">Pool</div><div class="autopwn-phase-sub" id="pws-ph-collect_pool-sub"></div></div>
+      <span class="autopwn-arrow">&gt;</span>
+      <div class="autopwn-phase" id="pws-ph-profile_probe"><div class="autopwn-phase-icon">&#128269;</div><div class="autopwn-phase-label">Probe</div><div class="autopwn-phase-sub" id="pws-ph-profile_probe-sub"></div></div>
+      <span class="autopwn-arrow">&gt;</span>
+      <div class="autopwn-phase" id="pws-ph-spray"><div class="autopwn-phase-icon">&#128299;</div><div class="autopwn-phase-label">Spray</div><div class="autopwn-phase-sub" id="pws-ph-spray-sub"></div></div>
+      <span class="autopwn-arrow">&gt;</span>
+      <div class="autopwn-phase" id="pws-ph-report"><div class="autopwn-phase-icon">&#128203;</div><div class="autopwn-phase-label">Report</div><div class="autopwn-phase-sub" id="pws-ph-report-sub"></div></div>
+    </div>
+    <div class="autopwn-stats">
+      <div class="autopwn-stat"><div class="autopwn-stat-val" id="pws-st-targets">0</div><div class="autopwn-stat-label">Targets</div></div>
+      <div class="autopwn-stat"><div class="autopwn-stat-val" id="pws-st-attempts">0</div><div class="autopwn-stat-label">Attempts</div></div>
+      <div class="autopwn-stat"><div class="autopwn-stat-val" id="pws-st-hits" style="color:#f85149">0</div><div class="autopwn-stat-label">Hits</div></div>
+      <div class="autopwn-stat"><div class="autopwn-stat-val" id="pws-st-locks" style="color:#ffa657">0</div><div class="autopwn-stat-label">Locks</div></div>
+    </div>
+    <div style="display:flex;align-items:center;gap:8px">
+      <div class="autopwn-bar-track" style="flex:1">
+        <div class="autopwn-bar-fill" id="pws-bar" style="width:0%;background:linear-gradient(90deg,#ffa657,#f0883e)"></div>
+      </div>
+      <span id="pws-pct" style="font-size:11px;color:#8b949e;min-width:36px;text-align:right">0%</span>
+    </div>
+    <div class="autopwn-log" id="pws-log"></div>
+    <div style="margin-top:8px;display:flex;gap:6px;flex-wrap:wrap">
+      <button class="btn" onclick="showPwsprayResults()" style="font-size:11px">Show Hits</button>
+      <button class="btn" onclick="showPwsprayHistory()" style="font-size:11px">History</button>
+      <button class="btn" onclick="pwsprayResetHistory()" style="font-size:11px;color:#f85149">Reset History</button>
+    </div>
+  </div>
+</div>
+
+<!-- Password-spray results modal (HIT MATRIX + Defender View stub).
+     Defender View body is a placeholder — PR4 fills it with the
+     expected SAL/SM21 event classes + observed USR02 counter deltas. -->
+<div class="modal-overlay" id="pwspray-results-modal">
+  <div class="modal" style="max-width:960px;width:95vw;max-height:90vh;overflow-y:auto">
+    <h3 style="color:#ffa657">&#128299; Password Spray Results</h3>
+    <div style="display:flex;gap:4px;border-bottom:1px solid #30363d;margin-bottom:12px">
+      <button class="btn" id="pws-tab-matrix" onclick="pwsprayShowTab('matrix')" style="border-bottom:2px solid #ffa657">Hit Matrix</button>
+      <button class="btn" id="pws-tab-defender" onclick="pwsprayShowTab('defender')">Defender View</button>
+    </div>
+    <div id="pws-tab-body-matrix"></div>
+    <div id="pws-tab-body-defender" style="display:none;font-size:12px;color:#8b949e;line-height:1.5">
+      Defender View (purple mode) &mdash; expected SIEM signals + observed
+      USR02 counter deltas.  <em>Placeholder for PR4.</em>  Until PR4 lands
+      a run with <code>purple_mode=true</code> populates each node's
+      <code>spray_purple_signals</code> list which this tab will render.
+    </div>
+    <div class="form-actions" style="margin-top:12px">
+      <button class="btn" onclick="closeModal('pwspray-results-modal')">Close</button>
+    </div>
   </div>
 </div>
 
@@ -17276,7 +17443,10 @@ async function launchAutoPwn() {
   ['scanned','vulnerable','pwned','users'].forEach(k =>
     document.getElementById('apwn-st-' + k).textContent = '0');
 
-  // Show progress panel (docked right — map stays visible)
+  // Show progress panel (docked right — map stays visible).  Close
+  // the sibling pwspray panel first since both docked panels share
+  // the same fixed-position rectangle.
+  try { closePwsprayPanel(); } catch (_) {}
   document.getElementById('autopwn-progress-panel').classList.add('visible');
 
   // Fire the backend
@@ -17396,6 +17566,428 @@ async function stopAutoPwn() {
 function closeAutoPwnPanel() {
   document.getElementById('autopwn-progress-panel').classList.remove('visible');
   if (_apwnPollTimer) { clearTimeout(_apwnPollTimer); _apwnPollTimer = null; }
+}
+
+/* =========================================================================
+ * Password spraying (issue #69, PR3) — config modal, launcher, poller,
+ * results modal, side-panel renderer.  Clones the AutoPwn panel pattern
+ * so the two polling drivers can live side-by-side without conflicting.
+ * ========================================================================= */
+
+let _pwsprayPollTimer = null;
+let _pwsprayLastRenderedRun = null;
+
+function showPwsprayModal() {
+  if (!document.body.classList.contains('pwspray-armed')) {
+    alert('Password spray is not armed.\n\nRestart SAPMAP with --allow-pwspray to enable it.  The engine still enforces every lockout invariant once armed — this flag is the operator\'s acknowledgement that noisy DIAG logon attempts are allowed on in-scope targets.');
+    return;
+  }
+  // Reset modal state
+  document.querySelector('input[name="pws-scope"][value="landscape"]').checked = true;
+  document.getElementById('pws-scope-sid').value = '';
+  document.getElementById('pws-cap').value = 1;
+  document.getElementById('pws-cap-val').textContent = '1';
+  document.getElementById('pws-dry-run').checked = true;
+  document.getElementById('pws-accept-risk').checked = false;
+  document.getElementById('pws-include-prod').checked = false;
+  document.getElementById('pws-accept-prod-risk').checked = false;
+  document.getElementById('pws-wordlist').value = '';
+  document.getElementById('pws-preview-result').innerHTML = '';
+  document.getElementById('pwspray-config-modal').classList.add('visible');
+  const slider = document.getElementById('pws-cap');
+  slider.oninput = () => {
+    document.getElementById('pws-cap-val').textContent = slider.value;
+  };
+}
+
+function _pwsprayCollectConfig() {
+  const scope = document.querySelector('input[name="pws-scope"]:checked').value;
+  const singleSid = (document.getElementById('pws-scope-sid').value || '').trim();
+  if (scope === 'single' && !singleSid) {
+    alert('Pick a SID for single-scope spray.');
+    return null;
+  }
+  return {
+    single_sid: scope === 'single' ? singleSid : '',
+    include_production: document.getElementById('pws-include-prod').checked,
+    accept_production_risk:
+      document.getElementById('pws-accept-prod-risk').checked,
+    cap_per_user: parseInt(document.getElementById('pws-cap').value, 10) || 1,
+    dry_run: document.getElementById('pws-dry-run').checked,
+    accept_lockout_risk: document.getElementById('pws-accept-risk').checked,
+    wordlist_text: document.getElementById('pws-wordlist').value || '',
+  };
+}
+
+async function _pwsprayPushWordlistIfAny(cfg) {
+  const text = (cfg.wordlist_text || '').trim();
+  if (!text) return {ok: true, skipped: true};
+  const r = await fetch('/api/actions/password_spray/pool/wordlist', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({raw_text: text, mode: 'append'}),
+  });
+  return r.json();
+}
+
+async function pwsprayPreview() {
+  const cfg = _pwsprayCollectConfig();
+  if (!cfg) return;
+  const wordlistResult = await _pwsprayPushWordlistIfAny(cfg);
+  if (wordlistResult && wordlistResult.error) {
+    alert('Wordlist upload failed: ' + wordlistResult.error);
+    return;
+  }
+  const r = await fetch('/api/actions/password_spray/preview', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({
+      single_sid: cfg.single_sid,
+      include_production: cfg.include_production,
+      cap_per_user: cfg.cap_per_user,
+    }),
+  });
+  const d = await r.json();
+  const dst = document.getElementById('pws-preview-result');
+  if (!d || d.error) {
+    const err = (d && d.error) || 'unknown error';
+    dst.innerHTML = '<div style="color:#f85149;font-size:12px">Preview failed: '
+      + _escapeHtml(String(err)) + '</div>';
+    return;
+  }
+  // Every attacker-reachable field below MUST pass through
+  // _escapeHtml before concatenation — the pool-source keys
+  // (`k`) and the per-target cap_source / host / clients / sid
+  // can all originate from scanner-populated or operator-pasted
+  // state that is not guaranteed static HTML.  Defence-in-depth
+  // over the lens-C review findings.
+  const breakdown = Object.entries(d.source_breakdown || {})
+    .map(([k, v]) => '<span style="margin-right:8px"><code>'
+      + _escapeHtml(k) + '</code>: ' + _escapeHtml(String(v)) + '</span>')
+    .join('') || '<em>none</em>';
+  const perTarget = (d.per_target || []).map(t =>
+    '<tr><td>' + _escapeHtml(t.sid || '')
+    + '</td><td>' + _escapeHtml(String(t.host || '')) + ':'
+      + _escapeHtml(String(t.dispatcher_port || ''))
+    + '</td><td>' + (t.clients || []).map(c =>
+        _escapeHtml(String(c))).join(', ')
+    + '</td><td>' + _escapeHtml(String(t.cap_per_user || ''))
+      + ' <span style="color:#8b949e">('
+      + _escapeHtml(t.cap_source || '') + ')</span>'
+    + '</td><td style="text-align:right">'
+      + _escapeHtml(String(t.estimated_attempts_upper_bound || 0))
+    + '</td></tr>'
+  ).join('');
+  const skipped = (d.skipped || []).map(s =>
+    '<li><code>' + _escapeHtml(s.sid || '') + '</code>: '
+      + _escapeHtml(s.reason || '') + '</li>'
+  ).join('');
+  dst.innerHTML =
+    '<div style="padding:10px;background:#0d1117;border:1px solid #30363d;border-radius:4px;font-size:12px;color:#c9d1d9">'
+    + '<div style="margin-bottom:6px"><strong>Pool:</strong> '
+      + _escapeHtml(String(d.pool_size || 0)) + ' candidate(s) '
+    + '<span style="color:#8b949e">('
+      + _escapeHtml(String(d.operator_wordlist_entries || 0))
+      + ' from operator wordlist)</span></div>'
+    + '<div style="margin-bottom:6px"><strong>Sources:</strong> ' + breakdown + '</div>'
+    + '<div style="margin-bottom:6px"><strong>Targets:</strong> '
+      + _escapeHtml(String(d.targets_eligible || 0)) + ' eligible, '
+    + _escapeHtml(String(d.targets_ineligible || 0))
+      + ' skipped. <strong>Estimated attempts:</strong> '
+      + _escapeHtml(String(d.estimated_attempts_upper_bound || 0)) + '</div>'
+    + (perTarget ? '<table style="width:100%;font-size:11px;margin-top:6px;border-collapse:collapse">'
+      + '<thead><tr style="color:#8b949e;text-align:left"><th>SID</th><th>Host:Port</th><th>Clients</th><th>Cap</th><th style="text-align:right">Attempts</th></tr></thead>'
+      + '<tbody>' + perTarget + '</tbody></table>' : '')
+    + (skipped ? '<div style="margin-top:6px;color:#8b949e"><strong>Skipped:</strong><ul style="margin:4px 0 0 16px">' + skipped + '</ul></div>' : '')
+    + '</div>';
+}
+
+async function pwsprayLaunch() {
+  const cfg = _pwsprayCollectConfig();
+  if (!cfg) return;
+  if (!cfg.dry_run && !cfg.accept_lockout_risk) {
+    alert('A live spray requires ticking "I accept the lockout risk".\n\nWithout that tick the engine refuses live attempts; use the dry-run default to preview the pool + target matrix without opening sockets.');
+    return;
+  }
+  if (cfg.include_production && !cfg.accept_production_risk) {
+    alert('Including production-flagged nodes requires a second tick: "I accept the production lockout risk".\n\nProduction accounts lock the same way non-production ones do; the extra tick is the second-factor acknowledgement.');
+    return;
+  }
+  if (!cfg.dry_run) {
+    const scope = cfg.single_sid ? 'single:' + cfg.single_sid : 'landscape';
+    if (!confirm('LIVE PASSWORD SPRAY against ' + scope + '.\n\n'
+                 + 'Cap per user: ' + cfg.cap_per_user + '\n'
+                 + 'This hits USR02 bad-logon counter and MAY LOCK ACCOUNTS.\n\n'
+                 + 'Proceed?')) return;
+  }
+  const wordlistResult = await _pwsprayPushWordlistIfAny(cfg);
+  if (wordlistResult && wordlistResult.error) {
+    alert('Wordlist upload failed: ' + wordlistResult.error);
+    return;
+  }
+  const r = await fetch('/api/actions/password_spray', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({
+      single_sid: cfg.single_sid,
+      include_production: cfg.include_production,
+      accept_production_risk: cfg.accept_production_risk,
+      cap_per_user: cfg.cap_per_user,
+      dry_run: cfg.dry_run,
+      accept_lockout_risk: cfg.accept_lockout_risk,
+    }),
+  });
+  const d = await r.json();
+  if (!r.ok || (d && d.error)) {
+    alert('Launch failed: ' + ((d && (d.message || d.error)) || r.statusText));
+    return;
+  }
+  closeModal('pwspray-config-modal');
+  _pwsprayShowProgressPanel(d);
+  _pwsprayPollStatus();
+}
+
+function _pwsprayShowProgressPanel(launchResult) {
+  // Both panels are docked-right at the same fixed-position
+  // rectangle (.autopwn-panel) — close the sibling before opening
+  // so a running sweep's panel isn't invisibly covered.
+  try { closeAutoPwnPanel(); } catch (_) {}
+  const panel = document.getElementById('pwspray-progress-panel');
+  const label = document.getElementById('pws-scope-label');
+  label.textContent = (launchResult.dry_run ? 'DRY-RUN' : 'LIVE')
+    + ' — scope: ' + launchResult.scope
+    + ' — cap: ' + launchResult.cap_per_user;
+  // Reset the aborted-run colour from any previous run.
+  label.style.color = '#ffa657';
+  document.getElementById('pws-stop-btn').style.display = '';
+  document.getElementById('pws-close-btn').style.display = 'none';
+  // Reset phase classes
+  ['collect_pool', 'profile_probe', 'spray', 'report'].forEach(k => {
+    const el = document.getElementById('pws-ph-' + k);
+    if (el) el.classList.remove('active', 'done');
+    const sub = document.getElementById('pws-ph-' + k + '-sub');
+    if (sub) sub.textContent = '';
+  });
+  // Reset stats + bar + log
+  ['targets', 'attempts', 'hits', 'locks'].forEach(k => {
+    const el = document.getElementById('pws-st-' + k);
+    if (el) el.textContent = '0';
+  });
+  document.getElementById('pws-bar').style.width = '0%';
+  document.getElementById('pws-pct').textContent = '0%';
+  document.getElementById('pws-log').innerHTML = '';
+  panel.classList.add('visible');
+}
+
+async function _pwsprayPollStatus() {
+  try {
+    const r = await fetch('/api/actions/password_spray/status');
+    const st = await r.json();
+    if (st.error) throw new Error(st.error);
+    const phaseOrder = ['idle', 'collect_pool', 'profile_probe', 'spray', 'report', 'done'];
+    const currentIdx = phaseOrder.indexOf(st.phase);
+    ['collect_pool', 'profile_probe', 'spray', 'report'].forEach(k => {
+      const el = document.getElementById('pws-ph-' + k);
+      if (!el) return;
+      el.classList.remove('active', 'done');
+      const pIdx = phaseOrder.indexOf(k);
+      if (pIdx < currentIdx) el.classList.add('done');
+      else if (pIdx === currentIdx) el.classList.add('active');
+    });
+    if (st.phase_progress && st.phase_progress[1] > 0) {
+      const sub = document.getElementById('pws-ph-' + st.phase + '-sub');
+      if (sub) sub.textContent = st.phase_progress[0] + '/' + st.phase_progress[1];
+    }
+    document.getElementById('pws-st-targets').textContent =
+      st.targets_done + ' / ' + st.targets_total;
+    document.getElementById('pws-st-attempts').textContent =
+      st.attempts_done + ' / ' + st.attempts_total;
+    document.getElementById('pws-st-hits').textContent = st.hits;
+    document.getElementById('pws-st-locks').textContent = st.locks;
+    const total = st.attempts_total || 1;
+    const pct = Math.min(100, Math.round(100 * (st.attempts_done || 0) / total));
+    document.getElementById('pws-bar').style.width = pct + '%';
+    document.getElementById('pws-pct').textContent = pct + '%';
+    // Replace log tail (status carries the last 200 lines).
+    const logEl = document.getElementById('pws-log');
+    logEl.innerHTML = (st.log_tail || []).map(l =>
+      '<div class="cl-info">' + _escapeHtml(l) + '</div>'
+    ).join('');
+    logEl.scrollTop = logEl.scrollHeight;
+    if (st.finished || !st.running) {
+      document.getElementById('pws-stop-btn').style.display = 'none';
+      document.getElementById('pws-close-btn').style.display = '';
+      ['collect_pool', 'profile_probe', 'spray', 'report'].forEach(k => {
+        const el = document.getElementById('pws-ph-' + k);
+        if (el) { el.classList.remove('active'); el.classList.add('done'); }
+      });
+      // Surface the aborted reason to the operator so cascade_abort
+      // / user_stop / dry_run_default_active don't look like a
+      // normal clean finish.  Attach to the scope label since the
+      // header is where the operator reads the run meta.
+      if (st.aborted) {
+        const label = document.getElementById('pws-scope-label');
+        if (label) {
+          const prior = label.textContent.split(' — aborted:')[0];
+          label.textContent = prior + ' — aborted: ' + st.aborted;
+          label.style.color = '#f85149';
+        }
+      }
+      return;    // Early return — no more polling.
+    }
+  } catch (e) {
+    // Transient fetch errors just skip this tick.
+  }
+  _pwsprayPollTimer = setTimeout(_pwsprayPollStatus, 800);
+}
+
+function stopPwspray() {
+  // Reuses the global stop channel — same path AutoPwn's STOP uses.
+  fetch('/api/scan/stop', {method: 'POST'});
+}
+
+function closePwsprayPanel() {
+  document.getElementById('pwspray-progress-panel').classList.remove('visible');
+  if (_pwsprayPollTimer) { clearTimeout(_pwsprayPollTimer); _pwsprayPollTimer = null; }
+}
+
+function _escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => (
+    {'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[c]
+  ));
+}
+
+function pwsprayShowTab(tab) {
+  const matrixBtn = document.getElementById('pws-tab-matrix');
+  const defBtn = document.getElementById('pws-tab-defender');
+  const matrixBody = document.getElementById('pws-tab-body-matrix');
+  const defBody = document.getElementById('pws-tab-body-defender');
+  if (tab === 'matrix') {
+    matrixBtn.style.borderBottom = '2px solid #ffa657';
+    defBtn.style.borderBottom = 'none';
+    matrixBody.style.display = '';
+    defBody.style.display = 'none';
+  } else {
+    defBtn.style.borderBottom = '2px solid #ffa657';
+    matrixBtn.style.borderBottom = 'none';
+    matrixBody.style.display = 'none';
+    defBody.style.display = '';
+  }
+}
+
+async function showPwsprayResults() {
+  const r = await fetch('/api/actions/password_spray/runs');
+  const d = await r.json();
+  const runs = (d && d.runs) || [];
+  const latest = runs[0];
+  _pwsprayLastRenderedRun = latest;
+  const body = document.getElementById('pws-tab-body-matrix');
+  if (!latest) {
+    body.innerHTML = '<div style="color:#8b949e;font-size:12px">No runs yet.  Launch a spray from the Actions dropdown or the map ctx-menu.</div>';
+  } else {
+    body.innerHTML = _renderHitMatrix(latest);
+  }
+  pwsprayShowTab('matrix');
+  document.getElementById('pwspray-results-modal').classList.add('visible');
+}
+
+function _renderHitMatrix(run) {
+  const hits = (run.hits || []);
+  const scope = (run.config_snapshot && run.config_snapshot.scope_filter) || {};
+  const scopeLabel = scope.single_sid ? ('single:' + scope.single_sid) : 'landscape';
+  const header =
+    '<div style="font-size:12px;color:#8b949e;margin-bottom:8px">'
+    + '<strong>Run:</strong> <code>' + _escapeHtml(run.run_id || '?') + '</code>'
+    + ' &nbsp; <strong>Scope:</strong> ' + _escapeHtml(scopeLabel)
+    + ' &nbsp; <strong>Started:</strong> ' + _escapeHtml(run.started_at || '')
+    + ' &nbsp; <strong>Attempts:</strong> ' + (run.attempts_done || 0)
+    + ' &nbsp; <strong>Hits:</strong> ' + hits.length
+    + ' &nbsp; <strong>Locks:</strong> ' + ((run.locked_users || []).length)
+    + ' &nbsp; <strong>Aborted:</strong> ' + _escapeHtml(run.aborted || '—')
+    + '</div>';
+  if (!hits.length) {
+    return header + '<div style="color:#8b949e;font-size:12px;padding:20px;text-align:center">No hits on this run.</div>';
+  }
+  const rows = hits.map(h => {
+    const sevColor = h.result === 'SUCCESS' ? '#f85149'
+      : (h.result === 'PASSWORD_CHANGE' ? '#f0883e' : '#58a6ff');
+    return '<tr>'
+      + '<td style="border-left:3px solid ' + sevColor + ';padding-left:8px"><code>'
+        + _escapeHtml(h.sid || '?') + '</code></td>'
+      + '<td><code>' + _escapeHtml(h.client || '?') + '</code></td>'
+      + '<td><code>' + _escapeHtml(h.user || '?') + '</code></td>'
+      + '<td style="color:' + sevColor + ';font-weight:600">' + _escapeHtml(h.result || '?') + '</td>'
+      + '<td style="font-size:11px;color:#8b949e">' + _escapeHtml(h.source_kind || '') + '</td>'
+      + '<td style="font-size:11px;color:#8b949e">' + _escapeHtml(h.source_sid || '') + '</td>'
+      + '</tr>';
+  }).join('');
+  return header
+    + '<table style="width:100%;font-size:12px;border-collapse:collapse">'
+    + '<thead><tr style="color:#8b949e;text-align:left">'
+    + '<th style="padding:4px 8px">SID</th>'
+    + '<th>Client</th>'
+    + '<th>User</th>'
+    + '<th>Result</th>'
+    + '<th>Source kind</th>'
+    + '<th>Source SID</th>'
+    + '</tr></thead><tbody>' + rows + '</tbody></table>';
+}
+
+async function showPwsprayHistory() {
+  const r = await fetch('/api/actions/password_spray/runs');
+  const d = await r.json();
+  const runs = (d && d.runs) || [];
+  const body = document.getElementById('pws-tab-body-matrix');
+  if (!runs.length) {
+    body.innerHTML = '<div style="color:#8b949e;font-size:12px">No runs yet.</div>';
+  } else {
+    const rows = runs.map(r =>
+      '<tr>'
+      + '<td style="padding:4px 8px"><code>' + _escapeHtml(r.run_id || '?') + '</code></td>'
+      + '<td>' + _escapeHtml(r.started_at || '') + '</td>'
+      + '<td>' + _escapeHtml(r.finished_at || '') + '</td>'
+      + '<td style="text-align:right">' + (r.attempts_done || 0) + '</td>'
+      + '<td style="text-align:right;color:#f85149;font-weight:600">' + ((r.hits || []).length) + '</td>'
+      + '<td style="text-align:right;color:#ffa657">' + ((r.locked_users || []).length) + '</td>'
+      + '<td>' + _escapeHtml(r.aborted || '—') + '</td>'
+      + '</tr>'
+    ).join('');
+    body.innerHTML =
+      '<table style="width:100%;font-size:12px;border-collapse:collapse">'
+      + '<thead><tr style="color:#8b949e;text-align:left">'
+      + '<th style="padding:4px 8px">Run ID</th><th>Started</th><th>Finished</th>'
+      + '<th style="text-align:right">Attempts</th>'
+      + '<th style="text-align:right">Hits</th>'
+      + '<th style="text-align:right">Locks</th>'
+      + '<th>Aborted</th>'
+      + '</tr></thead><tbody>' + rows + '</tbody></table>';
+  }
+  pwsprayShowTab('matrix');
+  document.getElementById('pwspray-results-modal').classList.add('visible');
+}
+
+async function pwsprayResetHistory() {
+  if (!confirm('Reset password-spray history?\n\n'
+               + 'This clears the per-triple attempt counter, the landscape-wide locked-user cache, '
+               + 'AND the per-run summary list from SAPMAP\'s memory.\n\n'
+               + 'It does NOT un-lock accounts on the target systems — that still has to happen in SU01.\n\n'
+               + 'Continue?')) return;
+  if (!confirm('REALLY reset?  Clearing the lockout cache lets the next spray re-attempt banned users.\n\n'
+               + 'Only confirm if you have ALREADY unlocked those accounts in SU01.')) return;
+  const r = await fetch('/api/actions/password_spray/reset_history', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({confirm: true, i_accept: true}),
+  });
+  const d = await r.json();
+  if (!r.ok || (d && d.error)) {
+    alert('Reset failed: ' + ((d && (d.message || d.error)) || r.statusText));
+    return;
+  }
+  alert('Reset done.  Cleared: '
+        + d.counter_cleared + ' counter entries, '
+        + d.locked_cleared + ' locked users, '
+        + d.runs_cleared + ' run summaries.');
 }
 
 async function analyzeChains() {
@@ -18791,6 +19383,7 @@ document.getElementById('map-ctx-menu').addEventListener('click', function(e) {
   switch (item.getAttribute('data-action')) {
     case 'map_add_system': showAddSystemModal(); break;
     case 'map_autopwn': showAutoPwnModal(); break;
+    case 'map_password_spray': showPwsprayModal(); break;
     case 'map_propagate_all': propagateAll(); break;
     case 'map_cleanup_all': cleanupAll(); break;
     case 'map_scan_all_vulns': scanAllVulns(); break;
