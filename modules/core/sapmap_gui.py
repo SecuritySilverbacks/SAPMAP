@@ -953,6 +953,82 @@ def _bg(key: str, label: str, fn):
     threading.Thread(target=_wrapper, daemon=True).start()
 
 
+def parse_pwspray_wordlist(raw_text: str,
+                            existing_pairs,
+                            *,
+                            mode: str = "append"):
+    """Parse an operator-supplied pwspray wordlist blob into a list of
+    ``(username, password)`` tuples (issue #69).
+
+    Line format: ``user:password``.  Blank lines and lines starting with
+    ``#`` are silently skipped (comment-friendly).  Within-batch dedup
+    is on the ``(username.upper(), password)`` key.  ``mode='append'``
+    merges into ``existing_pairs`` (further deduping across the join);
+    ``mode='replace'`` returns only the newly-parsed pairs.
+
+    Factored out of the HTTP route body so it can be unit-tested
+    without spinning up Bottle (the actual store assignment stays in
+    the route — this helper is pure).
+
+    Returns ``(merged_pairs, summary_dict)`` where summary_dict carries
+    added / skipped_blank_or_comment / skipped_malformed /
+    duplicates_vs_existing / total_in_store counts (no cleartext).
+    """
+    parsed = []
+    skipped_blank = 0
+    skipped_malformed = 0
+    seen_batch = set()
+    for raw in (raw_text or "").splitlines():
+        line = raw.strip()
+        if not line:
+            skipped_blank += 1
+            continue
+        if line.startswith("#"):
+            skipped_blank += 1
+            continue
+        if ":" not in line:
+            skipped_malformed += 1
+            continue
+        u, _, p = line.partition(":")
+        u = u.strip()
+        p = p.strip()
+        if not u or not p:
+            skipped_malformed += 1
+            continue
+        key = (u.upper(), p)
+        if key in seen_batch:
+            continue
+        seen_batch.add(key)
+        parsed.append((u, p))
+
+    if mode == "replace":
+        merged = list(parsed)
+        added = len(parsed)
+        duplicates_vs_existing = 0
+    else:
+        merged = [(u, p) for (u, p) in (existing_pairs or [])]
+        existing_keys = set((u.upper(), p) for (u, p) in merged)
+        added = 0
+        duplicates_vs_existing = 0
+        for (u, p) in parsed:
+            key = (u.upper(), p)
+            if key in existing_keys:
+                duplicates_vs_existing += 1
+                continue
+            existing_keys.add(key)
+            merged.append((u, p))
+            added += 1
+
+    summary = {
+        "added": added,
+        "skipped_blank_or_comment": skipped_blank,
+        "skipped_malformed": skipped_malformed,
+        "duplicates_vs_existing": duplicates_vs_existing,
+        "total_in_store": len(merged),
+    }
+    return merged, summary
+
+
 def _set_wd_port_protocol(node, wd_port: int, https: bool) -> None:
     """Flip a WD port's service label between ``wd_http`` and ``wd_https``.
 
@@ -2099,6 +2175,21 @@ class SAPMAPApi:
         # service binding's ``client_credentials`` grant — see
         # tools/btp_ssh_bridge/README.md.  Process-memory only.
         self.btp_proxy_auth_token: str = ""
+        # Operator-supplied password-spray wordlist (issue #69).
+        # List of (username, password) tuples merged into the pool
+        # alongside credentials harvested from node stores.  Process-
+        # memory only — NEVER serialised to .sapmap, wiped on process
+        # exit.  Entries are consumed by sapmap_pwspray.spray_single_node
+        # / spray_landscape via SprayConfig.manual_wordlist.
+        self.pwspray_wordlist: list = []
+        # Serialises the read-modify-write of pwspray_wordlist that the
+        # POST wordlist route performs.  Bottle runs each request on
+        # its own thread (ThreadingMixIn in sapmap.py), so without this
+        # lock two concurrent uploads can both snapshot the pre-image
+        # and the second write silently clobbers the first batch's
+        # additions.  Keep the critical section tiny — the parser
+        # itself is pure.
+        self.pwspray_wordlist_lock = threading.Lock()
 
     def start_scan(self, config):
         if self.scan_running:
@@ -2510,6 +2601,13 @@ def create_app(api: SAPMAPApi) -> Bottle:
         "/api/node/<sid>/wd_admin_probe_defaults",
         "/api/node/<sid>/wd_extract_icmauth",
         "/api/node/<sid>/check_default_creds",
+        # Password-spraying (issue #69) — hits USR02 bad-logon
+        # counter and risks lockout.  The pool/wordlist POST is also
+        # a mutation (session store); the GET /api/actions/password_
+        # spray/pool stays out of this set so operators in --read-only
+        # mode can still inspect what has been loaded.
+        "/api/node/<sid>/password_spray",
+        "/api/actions/password_spray/pool/wordlist",
         # SCC destructive / auth
         "/api/scc/<host>/probe_creds",
         "/api/scc/<host>/pull_mappings",
@@ -2716,8 +2814,17 @@ def create_app(api: SAPMAPApi) -> Bottle:
             is_read_only as _ro,
             is_loot_browser_enabled as _lb,
             loot_browser_token as _lb_tok,
+            is_pwspray_armed as _pws,
         )
-        payload = {"read_only": _ro(), "loot_browser": _lb()}
+        payload = {
+            "read_only": _ro(),
+            "loot_browser": _lb(),
+            # Password-spraying arm bit (issue #69).  initMode() flips
+            # body.pwspray-armed on this flag so the per-node ctx-menu
+            # entry can enable itself.  Backend still gates every
+            # pwspray route independently (403 pwspray_not_armed).
+            "pwspray_armed": _pws(),
+        }
         if _lb():
             # The GUI is served from the same origin, so handing the
             # token back here is fine — anyone who can reach /api/mode
@@ -16554,6 +16661,316 @@ def create_app(api: SAPMAPApi) -> Bottle:
 
         _bg(f"{sid}:default_creds", "Check Default Accounts", _run)
         return json.dumps({"status": "started"})
+
+    # ------------------------------------------------------------------
+    # Password spraying (issue #69) — per-node + landscape pool routes.
+    # Arm gate: --allow-pwspray at startup (sapmap_mode.is_pwspray_armed).
+    # The engine ships every lockout-safety invariant (per-user cap,
+    # SAP*/DDIC skip list, landscape-wide locked-user cache, cross-
+    # target circuit breaker, pw_sha256_prefix audit JSONL) regardless;
+    # the arm flag is only the operator's acknowledgement that noisy
+    # logon attempts are allowed on in-scope targets.
+    # ------------------------------------------------------------------
+
+    def _pwspray_armed_or_refuse():
+        """Return (True, None) when the operator has armed password
+        spraying, else (False, <JSON-encoded 403 response body>) so the
+        caller can ``return`` straight away.  Mirrors read-only mode's
+        ``{error, message, route}`` shape — the frontend already
+        toasts on 403 bodies that carry an ``error`` key, and the
+        ``route`` field matches what the readonly before_request hook
+        emits so a future shared 403 handler can key on it uniformly."""
+        from sapmap_mode import is_pwspray_armed
+        if is_pwspray_armed():
+            return True, None
+        response.status = 403
+        try:
+            rule = request.route.rule if request.route else request.path
+        except Exception:
+            rule = request.path
+        return False, json.dumps({
+            "error": "pwspray_not_armed",
+            "message": (
+                "Password spray is disabled. Restart SAPMAP with "
+                "--allow-pwspray to arm it — the engine still enforces "
+                "the per-user cap, landscape-wide locked-user cache "
+                "and cross-target circuit breaker regardless, this "
+                "flag is the operator's acknowledgement that noisy "
+                "DIAG logon attempts are allowed on in-scope targets."),
+            "route": rule,
+        })
+
+    @app.route("/api/node/<sid>/password_spray", method="POST")
+    def node_password_spray(sid):
+        response.content_type = "application/json"
+        armed, refusal = _pwspray_armed_or_refuse()
+        if not armed:
+            return refusal
+        node = api.state.get_node(sid)
+        if not node:
+            response.status = 404
+            return json.dumps({"error": f"Node {sid} not found"})
+
+        # Pre-flight structural checks so the operator sees the refusal
+        # synchronously, not later as a background finding.
+        system_type = (node.system_type or "").upper()
+        if "ABAP" not in system_type:
+            response.status = 400
+            return json.dumps({
+                "error": "not_abap",
+                "message": (f"Node {sid} is not an ABAP stack "
+                            f"(system_type={node.system_type!r}); "
+                            f"password spray targets the DIAG dispatcher."),
+            })
+        host = node.ip or node.hostname
+        if not host:
+            response.status = 400
+            return json.dumps({
+                "error": "no_host",
+                "message": f"Node {sid} has no IP or hostname",
+            })
+        disp_port = None
+        for inst in node.instances:
+            for port, svc in (inst.ports or {}).items():
+                if svc == "dispatcher" or (3200 <= port <= 3299):
+                    disp_port = port
+                    break
+            if disp_port:
+                break
+        if not disp_port:
+            response.status = 400
+            return json.dumps({
+                "error": "no_dispatcher",
+                "message": (f"Node {sid} has no 32XX dispatcher port — "
+                            f"DIAG has no listener to spray."),
+            })
+
+        # Operator opt-in to live spray.  Dry-run default per engine
+        # contract (sapmap_pwspray.spray_landscape); live spray refuses
+        # unless BOTH dry_run=False AND accept_lockout_risk=True.
+        body = request.json or {}
+        dry_run = bool(body.get("dry_run", True))
+        accept_risk = bool(body.get("accept_lockout_risk", False))
+        try:
+            cap_per_user = int(body.get("cap_per_user", 1))
+        except (TypeError, ValueError):
+            cap_per_user = 1
+        cap_per_user = max(1, min(2, cap_per_user))
+        operator_wordlist = list(api.pwspray_wordlist or [])
+
+        task_key = f"{sid}:password_spray"
+        task_label = (f"Password spray {sid} "
+                      f"({'DRY-RUN' if dry_run else 'LIVE'}, "
+                      f"cap={cap_per_user})")
+
+        def _run():
+            import sapmap_stop
+            try:
+                from sapmap_pwspray import (
+                    spray_single_node, SprayConfig,
+                )
+            except ImportError as e:
+                print(f"[-] {sid}: sapmap_pwspray not available: {e}")
+                return
+
+            cfg = SprayConfig(
+                dry_run=dry_run,
+                accept_lockout_risk=accept_risk,
+                cap_per_user=cap_per_user,
+                manual_wordlist=[(u, p) for (u, p) in operator_wordlist],
+            )
+
+            def _on_attempt(att):
+                # SprayAttempt fields are `user` and `result` (see
+                # sapmap_pwspray.py:142) — this label is the operator's
+                # live view of the spray, so getting the field names
+                # right is a MEDIUM finding worth guarding against.
+                try:
+                    _task_update(
+                        task_key,
+                        (f"{task_label} — user={att.user} "
+                         f"client={att.client} result={att.result}"))
+                except Exception:
+                    pass
+
+            print(f"[*] {sid}: Password spray starting on "
+                  f"{host}:{disp_port} ({task_label.lower()})")
+            if operator_wordlist:
+                print(f"[*] {sid}: operator wordlist contributes "
+                      f"{len(operator_wordlist)} candidate(s)")
+            try:
+                run_result = spray_single_node(
+                    node, api.state, cfg,
+                    cancel_check=sapmap_stop.is_stop_requested,
+                    on_attempt=_on_attempt,
+                )
+            except Exception as e:
+                print(f"[-] {sid}: password spray failed: {e}")
+                try:
+                    emit_finding(
+                        "WARNING", sid,
+                        f"Password spray failed: {e}",
+                        ref="pwspray.exception",
+                        attack_capability="creds.password_spray")
+                except Exception:
+                    pass
+                return
+
+            # SprayRun summary surface (per sapmap_pwspray.py:213).
+            # The dataclass carries .hits (list of dicts, one per
+            # SUCCESS / PASSWORD_CHANGE / NO_AUTH_LOGON), .attempts_done
+            # (int), .locked_users (list of unames), .skipped (list of
+            # {sid, reason}) and .aborted (string, '' when clean).
+            attempts = int(getattr(run_result, "attempts_done", 0) or 0)
+            hits_list = list(getattr(run_result, "hits", []) or [])
+            hits = len(hits_list)
+            locked = len(list(getattr(run_result, "locked_users", []) or []))
+            skipped = list(getattr(run_result, "skipped", []) or [])
+            # Surface skipped-this-sid reasons: production_opt_in_required
+            # (operator marked node is_production=True), ucon_blocked,
+            # policy_probe_failed, etc.  Collapsing them to a single
+            # WARNING finding beats silently emitting 'no hits'.
+            skipped_reasons = sorted({
+                r.get("reason", "")
+                for r in skipped
+                if r.get("sid") == sid and r.get("reason")
+            })
+
+            print(f"[+] {sid}: password spray done — "
+                  f"{attempts} attempt(s), {hits} hit(s), "
+                  f"{locked} lockout(s)"
+                  + (f", skipped={','.join(skipped_reasons)}"
+                     if skipped_reasons else ""))
+            try:
+                if hits:
+                    emit_finding(
+                        "CRITICAL", sid,
+                        (f"Password spray landed {hits} live account(s) "
+                         f"across {attempts} attempt(s) "
+                         f"({'dry-run' if dry_run else 'live'})"),
+                        ref="pwspray.hits",
+                        attack_capability="creds.password_spray")
+                elif getattr(run_result, "aborted", ""):
+                    emit_finding(
+                        "WARNING", sid,
+                        (f"Password spray aborted: "
+                         f"{run_result.aborted}"),
+                        ref="pwspray.aborted",
+                        attack_capability="creds.password_spray")
+                elif skipped_reasons and attempts == 0:
+                    # Pre-flight engine refusal (production flag,
+                    # UCON block, missing policy, no 32XX seen from
+                    # the engine's angle).  WARNING, not INFO —
+                    # 'no hits' would read as a clean sweep.
+                    emit_finding(
+                        "WARNING", sid,
+                        (f"Password spray refused on this node: "
+                         f"{', '.join(skipped_reasons)}"),
+                        ref="pwspray.skipped",
+                        attack_capability="creds.password_spray")
+                else:
+                    emit_finding(
+                        "INFO", sid,
+                        (f"Password spray ran — no hits "
+                         f"({attempts} attempt(s), {locked} lockout(s))"),
+                        ref="pwspray.no_hits",
+                        attack_capability="creds.password_spray")
+            except Exception:
+                pass
+
+        _bg(task_key, task_label, _run)
+        return json.dumps({
+            "status": "started",
+            "sid": sid,
+            "host": host,
+            "dispatcher_port": disp_port,
+            "dry_run": dry_run,
+            "cap_per_user": cap_per_user,
+            "wordlist_entries": len(operator_wordlist),
+        })
+
+    @app.route("/api/actions/password_spray/pool/wordlist", method="POST")
+    def actions_password_spray_pool_wordlist():
+        """Operator wordlist intake (issue #69).  Accepts one credential
+        pair per line in the form ``user:password``; ``#`` comments and
+        blank lines are skipped.  Mode ``append`` (default) merges onto
+        the existing session store; ``replace`` wipes it first.  The
+        wordlist lives on the API controller as a list of (user, pw)
+        tuples — process-memory only, NEVER serialised to .sapmap.
+        Returns a summary (no cleartext echoed back)."""
+        response.content_type = "application/json"
+        armed, refusal = _pwspray_armed_or_refuse()
+        if not armed:
+            return refusal
+        body = request.json or {}
+        raw_text = (body.get("raw_text") or "").strip()
+        mode = (body.get("mode") or "append").strip().lower()
+        if mode not in ("append", "replace"):
+            response.status = 400
+            return json.dumps({
+                "error": "bad_mode",
+                "message": "mode must be 'append' or 'replace'",
+            })
+
+        # Serialise the read-modify-write — see
+        # SAPMAPApi.pwspray_wordlist_lock for why.
+        with api.pwspray_wordlist_lock:
+            merged, summary = parse_pwspray_wordlist(
+                raw_text, api.pwspray_wordlist or [], mode=mode)
+            api.pwspray_wordlist = merged
+
+        print(f"[*] pwspray wordlist: mode={mode} "
+              f"added={summary['added']} "
+              f"skipped_blank={summary['skipped_blank_or_comment']} "
+              f"skipped_malformed={summary['skipped_malformed']} "
+              f"dup_vs_existing={summary['duplicates_vs_existing']} "
+              f"total_in_store={summary['total_in_store']}")
+
+        return json.dumps({"ok": True, "mode": mode, **summary})
+
+    @app.route("/api/actions/password_spray/pool", method="GET")
+    def actions_password_spray_pool():
+        """Return a summary of the resolved spray pool: counts broken
+        down by source, number of operator-supplied wordlist entries,
+        and whether the engine would skip wd_admin / scc / dbcon by
+        default.  NEVER echoes passwords; usernames are returned only
+        for the operator wordlist (which is already in the operator's
+        hand) and omitted for every other source.  Arm-gated to match
+        the sibling destructive routes — unarmed sessions get a 403
+        with the ``armed=false`` hint instead of a reconnaissance-
+        friendly source-breakdown dump."""
+        response.content_type = "application/json"
+        armed, refusal = _pwspray_armed_or_refuse()
+        if not armed:
+            return refusal
+        wordlist = list(api.pwspray_wordlist or [])
+        try:
+            from sapmap_pwspray import landscape_password_pool
+            pool = landscape_password_pool(
+                api.state, manual_wordlist=wordlist)
+        except Exception as e:
+            pool = []
+            print(f"[-] pwspray pool resolve failed: {e}")
+
+        source_counts = {}
+        verified_count = 0
+        for cand in pool:
+            sk = getattr(cand, "source_kind", "unknown") or "unknown"
+            source_counts[sk] = source_counts.get(sk, 0) + 1
+            if getattr(cand, "verified_somewhere", False):
+                verified_count += 1
+
+        from sapmap_mode import is_pwspray_armed
+        return json.dumps({
+            "ok": True,
+            "armed": is_pwspray_armed(),
+            "total_candidates": len(pool),
+            "verified_somewhere": verified_count,
+            "source_breakdown": source_counts,
+            "operator_wordlist_entries": len(wordlist),
+            "operator_wordlist_users": sorted(set(
+                u for (u, _p) in wordlist)),
+        })
 
     @app.route("/api/node/<sid>/client_roles", method="POST")
     def node_client_roles(sid):
