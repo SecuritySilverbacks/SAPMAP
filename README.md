@@ -92,7 +92,7 @@ SAPMAP discovers SAP systems on a network, maps RFC connections between them, ex
 - **Automatic credential import** — Confirmed credentials are added to the system for further exploitation
 
 ### Exploitation
-- **Gateway SAPXPG exploit** — Unauthenticated OS command execution via the 10KBLAZE technique (P1→P2→P3→P4 protocol chain)
+- **Gateway SAPXPG exploit** — Unauthenticated OS command execution via `STARTED_PRG=sapxpg` abuse of permissive `reginfo` / `secinfo` ACLs (SAP Note 1408081 / CVE-2019-0330; P1→P2→P3→P4 protocol chain)
 - **dpmon virtual SAP\* user creation (kernel ≥ 790, ABAP)** — Chains GW SAPXPG → `dpmon` → SAP\* one-time password → BAPI_USER_CREATE1 with SAP_ALL.  DB-agnostic alternative to the SQL-INSERT writer chain: single dpmon invocation vs ~40 SAPXPG chunks, kernel-blessed (SAP Note 3303172, won't be patched out), bypasses SCC4 client lock / DBCO routing edge cases.  Available on Phase 2 of AutoPwn and via the right-click context menu
 - **CVE-2025-31324 (VisualComposer metadatauploader)** — Unauth Java JSP webshell deployment with chunked-base64 file write, OS-aware command wrapping (cmd.exe / /bin/sh), session-resilient shell tracking
 - **CVE-2026-58240 (MS ASCS_GW rogue registration, SAP Note 3759472)** — Unauthenticated MS `ASCS_GW_LOGON` (opcode 82) write path.  Register a rogue "ASCS gateway" host/port in the Message Server's `gAscsGw` struct — the MS broadcasts our forged entry to every subscribed application server, polluting the trust list of the whole landscape.  Check + confirm-gated register + verified STATUS-based cleanup, with automatic detection of `system/secure_communication = ON` (compensating control that blocks the plaintext path).  Kernel fix at 9.16 PL100 / 9.18 PL032 / 9.19 PL017 / 9.20 PL007.  First confirmed end-to-end exploit against kernel 9.16 PL75 (Sept 2026)
@@ -235,7 +235,7 @@ The OA2C reader uses a three-tier resilience chain: `DDIF_FIELDINFO_GET` for col
 
 | Capability | SAP Note(s) | What it closes |
 |---|---|---|
-| 10KBlaze Gateway SAPXPG OS exec | **1408081** (also 1421005, 821875) | Unauth gateway-registered server abuse (`gw/sec_info`, `gw/reg_info`) |
+| Gateway SAPXPG OS exec (CVE-2019-0330) | **1408081** (also 1421005, 821875) | Unauth gateway-registered server abuse (`gw/sec_info`, `gw/reg_info`) |
 | Message Server betrusted (CVE-2020-6207) | **2890213** | Unauth internal MS port abuse / ACL bypass |
 | Message Server text/dump info disclosure | **1421005** + **2696233** | `ms/acl_info` (internal 36NN) + `ms/HTTP/acl_info` (81NN) — closes `/msgserver/text/dump` + `/msgserver/text/logon` to anonymous callers |
 | MS ASCS_GW rogue registration (CVE-2026-58240) | **3759472** | Unauth `ASCS_GW_LOGON` opcode 82 write — kernel binary patch, no workaround |
@@ -246,7 +246,7 @@ The OA2C reader uses a three-tier resilience chain: `DDIF_FIELDINFO_GET` for col
 
 Beyond the named CVEs, the highest-leverage configuration changes:
 
-- **`secinfo` and `reginfo` deny-by-default** on the Gateway. The 10KBlaze path dies if `gw/sec_info` and `gw/reg_info` are properly populated. Empty or `P TP=* USER=* HOST=* USER-HOST=*` is fatal.
+- **`secinfo` and `reginfo` deny-by-default** on the Gateway. The Gateway SAPXPG unauth-RCE path dies if `gw/sec_info` and `gw/reg_info` are properly populated. Empty or `P TP=* USER=* HOST=* USER-HOST=*` is fatal.
 - **`gw/sim_mode = 0`** (not 1). Simulation mode logs but allows — the same path SAPMAP exploits.
 - **`ms/acl_info` populated and enforced**. SAPMAP's MS betrusted path needs an open internal port (`39NN`).
 - **Restrict `RFC_ABAP_INSTALL_AND_RUN`** via auth check (`S_DEVELOP RFC_ABAP_INSTALL_AND_RUN`) for non-developer service users. SAPMAP uses it for OA2C reading, RSECTAB decryption, DBTABLOG purge, and several LPE paths.
@@ -259,7 +259,7 @@ Beyond the named CVEs, the highest-leverage configuration changes:
 **Network-level** (out-of-band, invisible to SAP-side evasion):
 
 - High-volume short connections to SAP ports (`32NN`, `33NN`, `36NN`, `50NNN`, `30NNN`, `39NN`) from a single source within seconds — SAPMAP's `--fast` mode probes a whole landscape in under a minute.
-- NI-protocol packets to port `33NN` from non-app-server IPs — 10KBlaze SAPXPG.
+- NI-protocol packets to port `33NN` from non-app-server IPs — Gateway SAPXPG unauth RCE.
 - HTTP POST to `/developmentserver/metadatauploader` (CVE-2025-31324) or `/CTCWebService/CTCWebServiceBean` (RECON).
 - User-agent `SAPMAP/1.0` in ICM HTTP logs (most modules), or default Python `urllib` UAs.
 - Repeated SAProuter `NI_ROUTE` requests to internal hosts from a single source.
@@ -1107,9 +1107,9 @@ Tests 16 well-known default SAP credentials via DIAG protocol (dispatcher port 3
 
 ## Exploitation
 
-### Gateway SAPXPG Exploit (Unauthenticated) — 10KBlaze / CVE-2020-6207
+### 10KBLAZE Full Chain (MS Betrusted → Gateway SAPXPG, Unauthenticated) — CVE-2020-6207
 
-The 10KBLAZE technique exploits the unauthenticated SAP Message Server internal port to register a fake application server, which injects the attacker's IP into the SAP Gateway's trusted host list. Once trusted as "internal", the attacker can execute OS commands via the SAPXPG external program interface without authentication.
+The 10KBLAZE technique exploits the unauthenticated SAP Message Server internal port to register a fake application server, which injects the attacker's IP into the SAP Gateway's trusted host list. Once trusted as "internal", the attacker can execute OS commands via the SAPXPG external program interface without authentication.  (The *direct* Gateway SAPXPG `reginfo` / `secinfo` abuse — CVE-2019-0330 / SAP Note 1408081 — is a distinct, simpler attack path implemented in `sap_gw_xpg_standalone.py`.)
 
 **Attack chain:**
 
@@ -2032,7 +2032,7 @@ Actions marked **⚠** are exploitation / destructive — they only run when the
 | `standard_scan` | `target` | Standard-depth port + service scan on an existing node (lighter than `deep_scan`) |
 | `deep_scan` | `target` | Full SAPology vulnerability scan |
 | `rfc_system_info` | `target` | Unauthenticated SID probe — fills `sid` / `system_type` from V6 / V2 / Chipik responses |
-| `check_gw` | `target` | Check SAP Gateway SAPXPG (10KBlaze) reachability |
+| `check_gw` | `target` | Check SAP Gateway SAPXPG unauth-RCE reachability (direct reginfo/secinfo abuse — SAP Note 1408081) |
 | `check_ms` | `target` | Check if MS internal port is unprotected (CVE-2020-6207) |
 | `check_cve_31324` | `target` | Check CVE-2025-31324 (VisualComposer JSP RCE) |
 | `check_cve_6287` | `target` | Check CVE-2020-6287 (RECON) |
