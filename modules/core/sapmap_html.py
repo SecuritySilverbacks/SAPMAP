@@ -3170,8 +3170,15 @@ body {
       <button class="btn" id="pws-tab-matrix" onclick="pwsprayShowTab('matrix')" style="border-bottom:2px solid #ffa657">Hit Matrix</button>
       <button class="btn" id="pws-tab-defender" onclick="pwsprayShowTab('defender')">Defender View</button>
     </div>
-    <div id="pws-tab-body-matrix"></div>
-    <div id="pws-tab-body-defender" style="display:none"></div>
+    <!-- WKWebView (pywebview on macOS) defaults every element to
+         -webkit-user-select:none unless explicitly re-enabled; the
+         rest of the SAPMAP GUI follows the same explicit-opt-in
+         pattern (e.g. .console-body, .detail-panel).  Operators
+         need to copy user/password-sha / SIEM hints / timestamps
+         out of these tables into a report (operator feedback
+         2026-10-05). -->
+    <div id="pws-tab-body-matrix" style="user-select:text;-webkit-user-select:text;cursor:text"></div>
+    <div id="pws-tab-body-defender" style="display:none;user-select:text;-webkit-user-select:text;cursor:text"></div>
     <div class="form-actions" style="margin-top:12px">
       <button class="btn" onclick="closeModal('pwspray-results-modal')">Close</button>
     </div>

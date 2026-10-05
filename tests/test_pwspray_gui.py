@@ -230,6 +230,26 @@ def test_ctx_action_switch_opens_pwspray_modal_pre_scoped():
     assert "dry_run" not in case_body
 
 
+def test_results_modal_tab_bodies_are_text_selectable():
+    """pywebview on macOS runs on WKWebView, which defaults every
+    element to -webkit-user-select:none.  The Hit Matrix + Defender
+    View tables carry operator-reportable data (user/sha/timestamps/
+    SIEM hints) that must be copy-paste-able into blue-team reports
+    (operator feedback 2026-10-05).  Pin: both tab-body divs set
+    explicit user-select + webkit-user-select to text."""
+    src = _html_src()
+    import re as _re
+    for tab in ("pws-tab-body-matrix", "pws-tab-body-defender"):
+        m = _re.search(
+            r'<div id="' + tab + r'"([^>]*)>', src)
+        assert m, f"{tab} div not found"
+        attrs = m.group(1)
+        assert "user-select:text" in attrs, (
+            f"{tab} missing user-select:text")
+        assert "-webkit-user-select:text" in attrs, (
+            f"{tab} missing -webkit-user-select:text")
+
+
 def test_show_pwspray_modal_accepts_single_sid_seed():
     """showPwsprayModal takes an optional {single_sid} that pre-
     selects the 'single'-scope radio and fills #pws-scope-sid.  The
