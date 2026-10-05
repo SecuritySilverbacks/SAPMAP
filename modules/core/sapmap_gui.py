@@ -17264,6 +17264,32 @@ def create_app(api: SAPMAPApi) -> Bottle:
             return json.dumps({"error": "No systems on the map"})
 
         data = request.json or {}
+        # Password-spray AutoPwn integration (issue #69, PR5).
+        # Silently coerce include_password_spray to False when the
+        # kernel arm bit is off — AutoPwn keeps running without the
+        # spray phase instead of 403ing the whole run.  phase3b
+        # itself re-checks the arm bit as defence-in-depth.
+        from sapmap_mode import is_pwspray_armed as _is_pw_armed
+        _pw_armed = _is_pw_armed()
+        _wanted_pw = bool(data.get("include_password_spray", False))
+        _effective_pw = _wanted_pw and _pw_armed
+        if _wanted_pw and not _pw_armed:
+            print("[!] AutoPwn: include_password_spray=true but "
+                  "--allow-pwspray not passed — spray phase skipped")
+            # Also surface via emit_finding so the fallout is visible
+            # in the engagement report AND /api/findings (not just
+            # terminal stdout — PR5 adversarial review MED #3).
+            try:
+                emit_finding(
+                    "WARNING", "landscape",
+                    "AutoPwn: include_password_spray requested but "
+                    "kernel is not armed (--allow-pwspray); spray "
+                    "phase was skipped.  Restart SAPMAP with the "
+                    "flag + re-run AutoPwn to enable phase3b.",
+                    ref="autopwn.pwspray_coerced",
+                    attack_capability="creds.password_spray")
+            except Exception:
+                pass
         from sapmap_autopwn import AutoPwnConfig, autopwn_run
         cfg = AutoPwnConfig(
             max_waves=int(data.get("max_waves", 5)),
@@ -17277,6 +17303,13 @@ def create_app(api: SAPMAPApi) -> Bottle:
                 data.get("include_icmad_detection", True)),
             include_router_info_detection=bool(
                 data.get("include_router_info_detection", True)),
+            include_password_spray=_effective_pw,
+            pwspray_cap_per_user=max(1, min(2, int(
+                data.get("pwspray_cap_per_user", 1) or 1))),
+            pwspray_abort_on_lockout=bool(
+                data.get("pwspray_abort_on_lockout", True)),
+            pwspray_purple_mode=bool(
+                data.get("pwspray_purple_mode", False)),
         )
 
         def _run():
@@ -17667,6 +17700,15 @@ def create_app(api: SAPMAPApi) -> Bottle:
         counter_cleared = len(api.state.spray_attempts_counter or {})
         locked_cleared = len(api.state.pwspray_locked_users or {})
         runs_cleared = len(api.state.spray_runs or [])
+        # Per-node idempotency triples (PR5): wipe too so the next
+        # spray can retry triples that were tested-and-recorded by
+        # a prior wave.  Count distinct triples so the operator can
+        # see the scope of the reset.
+        triples_cleared = 0
+        for _n in (api.state.nodes or {}).values():
+            triples_cleared += len(
+                _n._pwspray_tested_triples or set())
+            _n._pwspray_tested_triples = set()
         api.state.spray_attempts_counter = {}
         api.state.pwspray_locked_users = {}
         api.state.spray_runs = []
@@ -17679,7 +17721,8 @@ def create_app(api: SAPMAPApi) -> Bottle:
         except Exception:
             pass
         print(f"[!] pwspray: reset_history — counter={counter_cleared} "
-              f"locked={locked_cleared} runs={runs_cleared}")
+              f"locked={locked_cleared} runs={runs_cleared} "
+              f"triples={triples_cleared}")
         try:
             emit_finding(
                 "HIGH", "landscape",
@@ -17696,6 +17739,7 @@ def create_app(api: SAPMAPApi) -> Bottle:
             "ok": True,
             "counter_cleared": counter_cleared,
             "locked_cleared": locked_cleared,
+            "triples_cleared": triples_cleared,
             "runs_cleared": runs_cleared,
         })
 

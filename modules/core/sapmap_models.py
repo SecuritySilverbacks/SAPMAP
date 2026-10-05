@@ -937,6 +937,14 @@ class SAPNode:
     # its expected SAL class/number + the observed USR02 counter
     # delta.  Drives the "Defender View" tab in the results modal.
     spray_purple_signals: list = field(default_factory=list)
+    # Per-node idempotency set (issue #69, PR5) — keyed as
+    # ``"client|user|pw_sha256_prefix"`` strings.  Written by the
+    # engine on every real attempt (hit / miss / locked) so a
+    # multi-wave AutoPwn doesn't re-fire the same triple on the
+    # next wave — the per-user cap and the lockout budget would
+    # otherwise effectively multiply by wave_count.  Persisted via
+    # to_dict as a sorted list; from_dict converts back to a set.
+    _pwspray_tested_triples: set = field(default_factory=set)
 
     # Computed helpers
     def has_access(self) -> bool:
@@ -1123,6 +1131,8 @@ class SAPNode:
             "lockout_profile": dict(self.lockout_profile or {}),
             "spray_last_run": dict(self.spray_last_run or {}),
             "spray_purple_signals": list(self.spray_purple_signals or []),
+            "_pwspray_tested_triples": sorted(
+                self._pwspray_tested_triples or set()),
         }
 
     @classmethod
@@ -1264,6 +1274,8 @@ class SAPNode:
             lockout_profile=dict(d.get("lockout_profile", {})),
             spray_last_run=dict(d.get("spray_last_run", {})),
             spray_purple_signals=list(d.get("spray_purple_signals", [])),
+            _pwspray_tested_triples=set(
+                d.get("_pwspray_tested_triples", []) or []),
         )
         return node
 

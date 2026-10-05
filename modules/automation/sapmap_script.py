@@ -80,6 +80,8 @@ Supported actions:
     check_all_cve_6287, check_all_cve_22536, check_all_router_info,
     check_all_ms_info_disclosure,
     check_all_snc, check_all_vulns,
+    # Password spraying (--allow-pwspray required; dry_run default)
+    password_spray,
     # State management
     save_state, load_state,
     # Tier 3 evasion (--allow-evasion + --confirm required)
@@ -627,6 +629,53 @@ def _map_step(step: dict) -> tuple:
                 step.get("include_icmad_detection", True)),
             "include_router_info_detection": bool(
                 step.get("include_router_info_detection", True)),
+            # Password-spray AutoPwn integration (issue #69, PR5).
+            # Silently coerced to False by the backend when
+            # --allow-pwspray is not set, so a shared playbook can
+            # keep this on without breaking unarmed sessions.
+            "include_password_spray": bool(
+                step.get("include_password_spray", False)),
+            "pwspray_cap_per_user": int(
+                step.get("pwspray_cap_per_user", 1) or 1),
+            "pwspray_abort_on_lockout": bool(
+                step.get("pwspray_abort_on_lockout", True)),
+            "pwspray_purple_mode": bool(
+                step.get("pwspray_purple_mode", False)),
+        }, True)
+
+    # -----------------------------------------------------------------
+    # Password spraying (issue #69, PR5)
+    # -----------------------------------------------------------------
+    if action == "password_spray":
+        # Landscape-wide DIAG logon spray against every ABAP system
+        # on the map.  Requires --allow-pwspray at startup (backend
+        # returns 403 pwspray_not_armed otherwise).  Dry-run is the
+        # SAFE default so a playbook can preview the pool + target
+        # matrix without opening sockets.
+        #
+        # Knobs (all optional):
+        #   dry_run:              bool (default True)
+        #   accept_lockout_risk:  bool (default False — must be True
+        #                               AND dry_run=False for live)
+        #   single_sid:           str  (default "" = whole landscape)
+        #   include_production:   bool (default False)
+        #   accept_production_risk: bool (default False — required
+        #                                 for include_production=True)
+        #   cap_per_user:         int  (default 1; clamped [1, 2])
+        #   purple_mode:          bool (default False — adds USR02
+        #                               baseline + readback + writes
+        #                               purple_report.{md,html} loot)
+        return ("POST", "/api/actions/password_spray", {
+            "dry_run": bool(step.get("dry_run", True)),
+            "accept_lockout_risk": bool(
+                step.get("accept_lockout_risk", False)),
+            "single_sid": (step.get("single_sid") or "").strip(),
+            "include_production": bool(
+                step.get("include_production", False)),
+            "accept_production_risk": bool(
+                step.get("accept_production_risk", False)),
+            "cap_per_user": int(step.get("cap_per_user", 1) or 1),
+            "purple_mode": bool(step.get("purple_mode", False)),
         }, True)
 
     # -----------------------------------------------------------------
@@ -1224,6 +1273,8 @@ _ACTION_LABELS = {
     "mint_btp_token":             "Minting BTP token",
     # AutoPwn
     "autopwn":                    "Running AutoPwn convergence loop",
+    # Password spraying (issue #69, PR5).
+    "password_spray":             "Running password spray",
     # Node metadata overrides
     "set_type":                   "Setting system type",
     "set_db_type":                "Setting DB type",

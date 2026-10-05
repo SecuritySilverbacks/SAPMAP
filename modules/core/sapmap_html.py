@@ -2766,6 +2766,41 @@ body {
     <label class="autopwn-cb"><input type="checkbox" id="apwn-lpe"> OS Privilege Escalation (LPE)</label>
     <label class="autopwn-cb"><input type="checkbox" id="apwn-btp" checked> BTP / Cloud lateral movement</label>
 
+    <!-- Password-spray AutoPwn integration (issue #69, PR5).  Yellow-
+         warn section so the operator can't miss that this phase hits
+         USR02's bad-logon counter.  Requires --allow-pwspray at
+         startup; without it the backend silently coerces
+         include_password_spray=False and the AutoPwn run proceeds
+         minus the spray phase.  Grey this entire block when the
+         frontend knows the kernel is unarmed. -->
+    <div id="apwn-pwspray-group" style="margin-top:10px;padding:10px;background:#1a1208;border:1px solid #5a4a20;border-radius:6px">
+      <div style="font-size:11px;color:#d29922;margin-bottom:6px;font-weight:600">
+        &#128299; Password spraying &mdash; opt-in, lockout risk
+      </div>
+      <label class="autopwn-cb" style="color:#ffd4a8">
+        <input type="checkbox" id="apwn-pwspray">
+        Include Password Spray <span style="color:#8b949e">(NOISY, risks lockout)</span>
+      </label>
+      <div class="form-row" style="margin-top:6px">
+        <label style="color:#ffd4a8">Cap per user</label>
+        <select id="apwn-pwspray-cap" style="width:80px">
+          <option value="1" selected>1</option>
+          <option value="2">2</option>
+        </select>
+      </div>
+      <label class="autopwn-cb" style="color:#ffd4a8">
+        <input type="checkbox" id="apwn-pwspray-abort-on-lockout" checked>
+        Abort on first lockout <span style="color:#8b949e">(halts phase, flips _propagate_locked_out)</span>
+      </label>
+      <label class="autopwn-cb" style="color:#ffd4a8">
+        <input type="checkbox" id="apwn-pwspray-purple">
+        &#128302; Purple mode <span style="color:#8b949e">(baseline + readback + blue-team report)</span>
+      </label>
+      <div id="apwn-pwspray-unarmed-hint" style="display:none;margin-top:6px;font-size:10px;color:#f85149">
+        Kernel is unarmed &mdash; restart SAPMAP with <code>--allow-pwspray</code> to enable the spray phase.  Toggles above are forced OFF regardless.
+      </div>
+    </div>
+
     <div class="form-row" style="margin-top:12px">
       <label>Max waves</label>
       <select id="apwn-max-waves" style="width:80px">
@@ -17417,6 +17452,20 @@ let _apwnPollTimer = null;
 function showAutoPwnModal() {
   const nodeCount = Object.keys(mapState.nodes || {}).length;
   if (nodeCount < 1) { alert('No systems on the map.'); return; }
+  // Password-spray group (issue #69, PR5) is kernel-arm-gated.
+  // When body.pwspray-armed is OFF the four toggles are forced
+  // disabled + unchecked and the hint line appears.  The backend
+  // ALSO coerces to False so a tampered browser can't bypass.
+  const pwsprayArmed = document.body.classList.contains('pwspray-armed');
+  ['apwn-pwspray', 'apwn-pwspray-cap',
+   'apwn-pwspray-abort-on-lockout', 'apwn-pwspray-purple'].forEach(id => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.disabled = !pwsprayArmed;
+    if (!pwsprayArmed && (el.type === 'checkbox')) el.checked = false;
+  });
+  const hint = document.getElementById('apwn-pwspray-unarmed-hint');
+  if (hint) hint.style.display = pwsprayArmed ? 'none' : '';
   document.getElementById('autopwn-config-modal').classList.add('visible');
 }
 
@@ -17434,6 +17483,15 @@ async function launchAutoPwn() {
     include_btp: document.getElementById('apwn-btp').checked,
     include_icmad_detection: document.getElementById('apwn-det-icmad').checked,
     include_router_info_detection: document.getElementById('apwn-det-router').checked,
+    // Password-spray AutoPwn integration (issue #69, PR5).
+    include_password_spray:
+      document.getElementById('apwn-pwspray').checked,
+    pwspray_cap_per_user: parseInt(
+      document.getElementById('apwn-pwspray-cap').value, 10) || 1,
+    pwspray_abort_on_lockout:
+      document.getElementById('apwn-pwspray-abort-on-lockout').checked,
+    pwspray_purple_mode:
+      document.getElementById('apwn-pwspray-purple').checked,
   };
 
   // Reset progress UI
