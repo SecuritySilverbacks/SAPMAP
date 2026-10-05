@@ -651,6 +651,7 @@ def check_sprayed_credentials(
     inter_attempt_sleep_range: Tuple[float, float] = DEFAULT_SLEEP_RANGE,
     on_result: Optional[Callable[[dict], None]] = None,
     try_login_fn: Optional[Callable] = None,
+    tested_triples: Optional[Set[str]] = None,
 ) -> List[dict]:
     """Spray ``candidates`` against ``(host, port, each client)`` under
     the given lockout cap.  Generalisation of
@@ -753,6 +754,26 @@ def check_sprayed_credentials(
             if early_exit_on_hit and uname_up in hit_users_per_client.get(
                     client, set()):
                 continue
+            # Idempotency: skip triples the caller has already fired
+            # in a prior invocation (issue #69, PR5).  Protects
+            # multi-wave AutoPwn from re-burning the per-user cap on
+            # the same (client, user, pw) combination across waves.
+            # Full sha256 so a leaked .sapmap can't brute-force the
+            # pool from the 32-bit prefix (PR5 review LOW #11).
+            if tested_triples is not None:
+                _tt_full_sha = hashlib.sha256(
+                    cand.password.encode("utf-8")).hexdigest()
+                _tt_key = f"{client}|{uname_up}|{_tt_full_sha}"
+                if _tt_key in tested_triples:
+                    _emit({"kind": "skipped", "user": cand.username,
+                           "password": cand.password, "client": client,
+                           "result": "SKIPPED", "detail": "",
+                           "pw_sha256_prefix": _sha256_prefix(
+                               cand.password),
+                           "source_kind": cand.source_kind,
+                           "source_sid": cand.source_sid,
+                           "skipped_reason": "already_tested_triple"})
+                    continue
             # Per-user cap on this client
             akey = f"{client}|{uname_up}"
             if attempts.get(akey, 0) >= cap_per_user:
@@ -1162,6 +1183,28 @@ def spray_landscape(
             run.attempts_done += 1
             _status.attempts_done = run.attempts_done
             kind = row.get("kind")
+            # Idempotency record (issue #69, PR5) — remember every
+            # fired triple so a next-wave AutoPwn phase3b doesn't
+            # retry.  Record on every outcome that actually dialed
+            # (hit / miss / locked / plain wrong-password), but
+            # NOT 'skipped' (those were skip-list / cap / lock
+            # cache decisions that never opened a socket) so a
+            # reset_history + retry can still reach the skipped
+            # candidates.
+            # Key uses the FULL sha256 (not the 8-char prefix) —
+            # a leaked .sapmap would otherwise expose 32 bits of
+            # entropy per weak password, trivially brute-forceable
+            # offline (PR5 adversarial review LOW #11).
+            if kind != "skipped":
+                _full_sha = hashlib.sha256(
+                    (row.get("password") or "").encode("utf-8")
+                ).hexdigest()
+                _triple_key = (
+                    f"{attempt.client}|{(attempt.user or '').upper()}|"
+                    f"{_full_sha}")
+                if node._pwspray_tested_triples is None:
+                    node._pwspray_tested_triples = set()
+                node._pwspray_tested_triples.add(_triple_key)
             if kind == "hit":
                 hit = {"sid": target.sid, "client": row.get("client"),
                        "user": row.get("user"),
@@ -1221,6 +1264,17 @@ def spray_landscape(
             early_exit_on_hit=config.early_exit_on_hit,
             on_result=_on_result,
             try_login_fn=try_login_fn,
+            # Idempotency READ (issue #69, PR5): triples that were
+            # fired on this node in a prior wave are skipped so a
+            # multi-wave AutoPwn doesn't eat the per-user cap again.
+            # Pass the SAME set reference the _on_result writer
+            # mutates — the engine reads BEFORE firing, so an entry
+            # added later in this loop doesn't block the current
+            # attempt (candidates for one user are tried in order,
+            # cap_per_user still limits the per-call budget).
+            tested_triples=(node._pwspray_tested_triples
+                            if node._pwspray_tested_triples
+                            else None),
         )
         # Node summary tooltip
         node.spray_last_run = {
