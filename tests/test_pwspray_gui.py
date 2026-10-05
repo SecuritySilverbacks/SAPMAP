@@ -206,14 +206,42 @@ def test_ctx_menu_entry_carries_write_op_class():
     assert "ctx-item" in classes
 
 
-def test_ctx_action_switch_dispatches_password_spray():
-    """Click handler routes data-action=password_spray through
-    api('POST', 'node/${sid}/password_spray').  Dry-run default is
-    the invariant: a confirm miss cannot burn the lockout budget."""
+def test_ctx_action_switch_opens_pwspray_modal_pre_scoped():
+    """Per-node ctx entry opens the Password Spray config modal
+    pre-scoped to this node's SID — rather than firing a dry-run
+    POST behind a confirm (operator feedback 2026-10-05).
+
+    The modal already defaults to dry-run (pws-dry-run checked),
+    so the invariant "a mis-click cannot burn the lockout budget"
+    is preserved via showPwsprayModal's own reset."""
     src = _html_src()
     assert "case 'password_spray':" in src
-    assert "api('POST', `node/${sid}/password_spray`," in src
-    assert "dry_run: true" in src
+    assert "showPwsprayModal({ single_sid: sid });" in src, (
+        "ctx entry must open the config modal pre-scoped to the "
+        "right-clicked SID, not fire a bare POST")
+    # Negative pin: no stray dry-run POST short-cut on this case.
+    # Grep is intentionally scoped to the ctxAction switch body.
+    import re as _re
+    m = _re.search(
+        r"case 'password_spray':(.*?)break;", src, _re.DOTALL)
+    assert m
+    case_body = m.group(1)
+    assert "api('POST'" not in case_body
+    assert "dry_run" not in case_body
+
+
+def test_show_pwspray_modal_accepts_single_sid_seed():
+    """showPwsprayModal takes an optional {single_sid} that pre-
+    selects the 'single'-scope radio and fills #pws-scope-sid.  The
+    top-nav Actions entry calls showPwsprayModal() with no args
+    (seedSid=='' → landscape scope); the per-node ctx entry calls
+    it with {single_sid: sid}."""
+    src = _html_src()
+    assert "function showPwsprayModal(opts)" in src
+    assert "opts.single_sid" in src
+    # The scope radio is seeded via a computed value, not hard-coded
+    # to 'landscape' any more.
+    assert "const scopeVal = seedSid ? 'single' : 'landscape';" in src
 
 
 # ---------------------------------------------------------------------------
