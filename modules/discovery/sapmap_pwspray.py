@@ -40,6 +40,8 @@ import json
 import logging
 import os
 import random
+import re
+import tempfile
 import time
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
@@ -89,6 +91,59 @@ MAX_CAP_PER_USER = 2
 DEFAULT_SLEEP_RANGE: Tuple[float, float] = (0.3, 0.9)
 # Inter-node sleep range (seconds, uniform random).
 DEFAULT_INTER_NODE_SLEEP: Tuple[float, float] = (1.0, 2.0)
+
+# Purple-mode DIAG terminal name — a deliberately-identifiable string
+# so SOC SIEM correlation rules on the Terminal field can latch onto
+# the spray run.  ``SprayConfig.effective_terminal()`` returns this
+# when purple_mode is on; the signal rows + the purple_report + the
+# engagement report all cite exactly this string so blue-team queries
+# are one grep away.  rsau/ip_only=0 is still required on the target
+# for the Terminal column to make it into SAL.
+PURPLE_SPRAY_TERMINAL = "sapmap-spray-purple"
+
+# SAL audit-class 00 message numbers that a DIAG logon attempt may
+# raise, keyed by the result code SAPMAP's try_login classifier
+# returns.  Numbers are from SAP's AUT10 catalog; the human-readable
+# message column is reproduced for the purple report.  Lists are
+# worst-first — some SAP releases emit the fallback number instead
+# of the canonical one.
+SAL_LOGON_SIGNALS = {
+    "SUCCESS": {
+        "sal_numbers": ["AU1"],
+        "label": "Logon successful",
+        "sm21_hint": "User <USER> logged on",
+    },
+    "PASSWORD_CHANGE": {
+        "sal_numbers": ["AU1", "AU6"],
+        "label": "Logon with expired password / change prompt",
+        "sm21_hint": "User <USER> change password at logon",
+    },
+    "NO_AUTH_LOGON": {
+        "sal_numbers": ["AU7"],
+        "label": "No authorization for logon",
+        "sm21_hint": "No authorization for logon by user <USER>",
+    },
+    "WRONG_PASSWORD": {
+        "sal_numbers": ["AU2"],
+        "label": "Wrong password",
+        "sm21_hint": "Wrong password for user <USER>",
+    },
+    "USER_LOCKED": {
+        "sal_numbers": ["AUM"],
+        "label": "User <USER> is locked",
+        "sm21_hint": "User <USER> is locked (bad logon counter)",
+    },
+    "USER_NOT_EXIST": {
+        "sal_numbers": ["AU6"],
+        "label": "Unknown user",
+        "sm21_hint": "User <USER> does not exist",
+    },
+    "SNC_REQUIRED": {
+        "sal_numbers": [],
+        "label": "SNC enforced — no SAL event (TLS layer refused)",
+        "sm21_hint": "",
+    },
+}
 
 
 # ---------------------------------------------------------------------------
@@ -225,6 +280,15 @@ class SprayRun:
     aborted: str = ""                        # 'user_stop' / 'cascade_abort' / ''
     loot_path: str = ""
     purple_report_generated: bool = False
+    # Purple-mode USR02 baseline (issue #69, PR4).  Marked True only
+    # when the baseline + readback RFC_READ_TABLE calls both succeeded
+    # on at least one target.  When False, the Defender View modal
+    # explains why (UCON block / missing S_TABU_DIS / no verified
+    # cred) and renders the expected-signal rows WITHOUT observed
+    # deltas — the SOC can still correlate SAL events even if SAPMAP
+    # can't readback USR02.
+    purple_baseline_available: bool = False
+    purple_baseline_error: str = ""
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -812,6 +876,8 @@ def spray_landscape(
     telemetry_probe_fn: Optional[Callable[[object], dict]] = None,
     loot_dir_fn: Optional[Callable[[str], str]] = None,
     on_attempt: Optional[Callable[[SprayAttempt], None]] = None,
+    usr02_probe_fn: Optional[Callable] = None,
+    purple_report_fn: Optional[Callable] = None,
 ) -> SprayRun:
     """Orchestrator — sequential outer target loop, inner spray engine
     per (target × clients × candidates).  Consults the landscape-wide
@@ -908,6 +974,76 @@ def spray_landscape(
     skip_users = _effective_skip_users(config.opt_in_users)
     pre_locked = {u.upper() for u in (state.pwspray_locked_users or {}).keys()}
 
+    # Purple-mode USR02 baseline (issue #69, PR4).
+    # Key: f"{sid}|{client}|{user_upper}" -> {"locnt": int, "uflag": str,
+    #                                            "ustyp": str, "ts": iso}
+    # Populated BEFORE the per-target loop (one RFC_READ_TABLE per
+    # (sid, client) batched over unique users) so the spray attempts
+    # ride on an already-dialled connection.  Only reads USR02; does
+    # NOT touch anything that would increment LOCNT.
+    purple_baseline: dict = {}
+    purple_readback: dict = {}
+    purple_mode = bool(config.purple_mode) and not config.dry_run
+    unique_pool_users: Set[str] = set()
+    # Accumulate per-target failures so an operator-visible summary
+    # shows every failure reason — overwriting the single string per
+    # target silently drops multi-failure history (PR4 adversarial
+    # review MED #4).
+    baseline_errors: List[str] = []
+    if purple_mode:
+        _set_phase("baseline")
+        # Collect unique users (post-filter) so we don't read USR02
+        # for SAP*/DDIC/etc. — defeats the clean-SIEM-signal purpose.
+        for cand in pool:
+            uu = (cand.username or "").upper()
+            if not uu or uu in skip_users or uu in pre_locked:
+                continue
+            unique_pool_users.add(uu)
+        _set_phase_progress(0, max(1, len(targets)))
+        if usr02_probe_fn is None:
+            # No injected probe → default to the sapmap_rfc helper.
+            usr02_probe_fn = _default_usr02_probe
+        baseline_hits = 0
+        for bi, target in enumerate(targets):
+            node = (state.nodes or {}).get(target.sid)
+            if node is None:
+                continue
+            creds = node.best_credentials()
+            if creds is None:
+                baseline_errors.append(
+                    f"{target.sid}: no verified credentials")
+                continue
+            for client in target.clients:
+                try:
+                    rows = usr02_probe_fn(
+                        node, creds, client, sorted(unique_pool_users))
+                except Exception as e:
+                    baseline_errors.append(
+                        f"{target.sid}/{client}: {e}")
+                    continue
+                for u, info in (rows or {}).items():
+                    key = f"{target.sid}|{client}|{u.upper()}"
+                    purple_baseline[key] = {
+                        "locnt": int(info.get("locnt", 0) or 0),
+                        "uflag": str(info.get("uflag", "")),
+                        "ustyp": str(info.get("ustyp", "")),
+                        "ts": datetime.utcnow().isoformat(),
+                    }
+                    baseline_hits += 1
+            _set_phase_progress(bi + 1, max(1, len(targets)))
+        run.purple_baseline_available = baseline_hits > 0
+        run.purple_baseline_error = "; ".join(baseline_errors)
+        _append_log(
+            f"purple baseline: {baseline_hits} USR02 row(s) read "
+            f"across {len(targets)} target(s)"
+            + (f" (errors: {len(baseline_errors)})"
+               if baseline_errors else ""))
+        # Progress through to spray phase; status indicator keeps
+        # 'baseline' marked .done because PHASE_ORDER ordering kicks in.
+        if targets:
+            _set_phase("spray")
+            _set_phase_progress(0, len(targets))
+
     for ti, target in enumerate(targets):
         if cancel_check and cancel_check():
             run.aborted = run.aborted or "user_stop"
@@ -930,13 +1066,20 @@ def spray_landscape(
             node, config.cap_per_user,
             probe_fn=(None if config.dry_run else telemetry_probe_fn))
         cap_for_this_target = budget["cap_per_user"]
-        node.lockout_profile = {
+        # MERGE (not replace) so any audit-profile keys an upstream
+        # probe already stashed (e.g. rsau_enable, rsau_ip_only from
+        # a future rsau probe path) survive.  PR4 ships without the
+        # rsau fields on signal rows — adding them is a follow-up
+        # since no code populates those keys today.
+        _lp = dict(node.lockout_profile or {})
+        _lp.update({
             "fails_to_user_lock": budget.get("fails_to_user_lock"),
             "cap_computed": cap_for_this_target,
             "cap_source": budget.get("cap_source", ""),
             "probed_at": datetime.utcnow().isoformat(),
             "warnings": list(budget.get("warnings", [])),
-        }
+        })
+        node.lockout_profile = _lp
 
         if config.dry_run:
             # Preview mode — don't open sockets; just record what we
@@ -968,6 +1111,54 @@ def spray_landscape(
                 except Exception:
                     logger.debug("on_attempt callback raised",
                                  exc_info=True)
+            # Purple-mode signal row (issue #69, PR4).  Written at
+            # attempt time with everything we know; readback phase
+            # fills in observed USR02 delta.  NO cleartext — the
+            # join key to attempts.jsonl is (ts, pw_sha256_prefix).
+            if purple_mode and attempt.result not in ("SKIPPED",):
+                uu = (attempt.user or "").upper()
+                base_key = (
+                    f"{target.sid}|{attempt.client}|{uu}")
+                baseline_row = purple_baseline.get(base_key)
+                sig_catalog = SAL_LOGON_SIGNALS.get(
+                    attempt.result, {})
+                signal_row = {
+                    "run_id": config.run_id,
+                    "ts": attempt.ts,
+                    "sid": target.sid,
+                    "host": target.host,
+                    "client": attempt.client,
+                    "user": attempt.user,
+                    "pw_sha256_prefix": attempt.pw_sha256_prefix,
+                    "source_kind": attempt.source_kind,
+                    "source_sid": attempt.source_sid,
+                    "result": attempt.result,
+                    "terminal": attempt.terminal,
+                    "sal_class": "00",
+                    "sal_numbers": list(
+                        sig_catalog.get("sal_numbers", [])),
+                    "sal_label": sig_catalog.get("label", ""),
+                    "sm21_hint": sig_catalog.get(
+                        "sm21_hint", "").replace(
+                            "<USER>", attempt.user or ""),
+                    "baseline_locnt": (
+                        baseline_row.get("locnt")
+                        if baseline_row else None),
+                    "baseline_ustyp": (
+                        baseline_row.get("ustyp")
+                        if baseline_row else ""),
+                    "readback_locnt": None,
+                    "delta_locnt": None,
+                    # sal_will_fire / terminal_will_land require
+                    # rsau/enable + rsau/ip_only from the kernel
+                    # audit profile.  No code populates those keys
+                    # today — PR4 adversarial review HIGH #2 / #11
+                    # removed the misleading False defaults; a
+                    # future PR extends the telemetry probe to
+                    # populate them + the Defender View re-adds
+                    # the grey-out when accurate.
+                }
+                _append_purple_signal(node, signal_row)
             run.attempts_done += 1
             _status.attempts_done = run.attempts_done
             kind = row.get("kind")
@@ -1049,7 +1240,69 @@ def spray_landscape(
         if ti < len(targets) - 1:
             _jittered_sleep(DEFAULT_INTER_NODE_SLEEP)
 
+    # Purple-mode USR02 readback (issue #69, PR4).  Re-read LOCNT
+    # per (sid, client, user) that had a baseline, compute delta,
+    # and backfill the signal rows that _on_result already appended
+    # to node.spray_purple_signals.
+    if purple_mode and run.purple_baseline_available:
+        _set_phase("readback")
+        _set_phase_progress(0, max(1, len(targets)))
+        for ri, target in enumerate(targets):
+            node = (state.nodes or {}).get(target.sid)
+            if node is None:
+                continue
+            creds = node.best_credentials()
+            if creds is None:
+                continue
+            for client in target.clients:
+                try:
+                    rows = usr02_probe_fn(
+                        node, creds, client,
+                        sorted(unique_pool_users))
+                except Exception as e:
+                    logger.debug(
+                        "usr02 readback failed on %s/%s: %s",
+                        target.sid, client, e)
+                    continue
+                for u, info in (rows or {}).items():
+                    rb_key = f"{target.sid}|{client}|{u.upper()}"
+                    purple_readback[rb_key] = {
+                        "locnt": int(info.get("locnt", 0) or 0),
+                        "uflag": str(info.get("uflag", "")),
+                        "ts": datetime.utcnow().isoformat(),
+                    }
+            _set_phase_progress(ri + 1, max(1, len(targets)))
+        # Backfill the signal rows accumulated during spray.
+        for n in (state.nodes or {}).values():
+            for sig in (n.spray_purple_signals or []):
+                if sig.get("run_id") != config.run_id:
+                    continue
+                rb_key = (f"{sig.get('sid','')}|{sig.get('client','')}|"
+                          f"{(sig.get('user','') or '').upper()}")
+                rb = purple_readback.get(rb_key)
+                if rb is not None:
+                    sig["readback_locnt"] = rb.get("locnt")
+                    base = sig.get("baseline_locnt")
+                    if base is not None:
+                        sig["delta_locnt"] = (
+                            int(rb.get("locnt", 0) or 0) - int(base or 0))
+
     _set_phase("report")
+    # Purple-mode report writer — materialise loot/spray/<run_id>/
+    # purple_report.{md,html} from the collected signal rows.
+    # NEVER writes cleartext — only pw_sha256_prefix.
+    if (purple_mode and run.loot_path
+            and not config.dry_run):
+        try:
+            writer = purple_report_fn or write_purple_report
+            writer(run, state, run.loot_path)
+            run.purple_report_generated = True
+            _append_log(
+                f"purple_report written to {run.loot_path}")
+        except Exception as e:
+            logger.error("purple report write failed", exc_info=True)
+            _append_log(f"purple_report FAILED: {e}")
+
     run.finished_at = datetime.utcnow().isoformat()
     state.spray_runs.append(run.to_dict())
     _finalise_status(run)
@@ -1084,6 +1337,402 @@ def spray_single_node(
 # Helpers
 # ---------------------------------------------------------------------------
 
+# SAP BNAME charset — alphanumerics plus ``_./@#$-`` (12-char max).
+# Everything outside this set is rejected before interpolation so a
+# wordlist line like ``A','DDIC`` can't inject into the WHERE clause
+# (OpenSQL injection → USR02 leak + baseline-integrity poisoning).
+_BNAME_RE = re.compile(r"^[A-Z0-9_./@#$-]{1,12}$")
+# SAP MANDT (client) — always 3 digits.
+_MANDT_RE = re.compile(r"^[0-9]{3}$")
+
+# Batch size for USR02 reads.  Each quoted 12-char BNAME = 14 chars,
+# plus a comma per item.  3 users = 14*3 + 2 commas = 44 chars for
+# the IN-list, plus 'MANDT = \'000\' AND BNAME IN ()' = 29 chars →
+# 73 chars worst case.  read_table split-on-whitespace handles 73
+# cleanly (last token is the ')').  5-per-batch overflowed with
+# margin to spare (12-char max BNAMEs produced ~85 chars) — PR4
+# adversarial review HIGH #3.
+_USR02_BATCH_SIZE = 3
+
+
+def _append_purple_signal(node, row, *, max_run_ids: int = 3):
+    """Append a signal row to ``node.spray_purple_signals`` and
+    bound the per-node list by the N most-recent distinct run_ids
+    (default 3) — otherwise the list grows unbounded across runs
+    and bloats the .sapmap state file (PR4 adversarial review
+    LOW #7).
+
+    Evicts in-place from the oldest run_id side so the current
+    run's rows are always preserved.
+    """
+    if node.spray_purple_signals is None:
+        node.spray_purple_signals = []
+    node.spray_purple_signals.append(row)
+    # Fast path: if we're still inside one run, no eviction needed.
+    seen_ids = []
+    for sig in node.spray_purple_signals:
+        rid = sig.get("run_id", "")
+        if rid and rid not in seen_ids:
+            seen_ids.append(rid)
+    if len(seen_ids) <= max_run_ids:
+        return
+    # Drop rows for the oldest run_ids (keep the latest max_run_ids).
+    keep = set(seen_ids[-max_run_ids:])
+    node.spray_purple_signals[:] = [
+        s for s in node.spray_purple_signals
+        if s.get("run_id") in keep]
+
+
+def _md_escape_cell(value) -> str:
+    """Return a Markdown-table-safe cell value.  Strips the four
+    characters that break a GFM table row: ``|``, ``\\n``, ``\\r``,
+    and ``\\`` (which otherwise escapes the next pipe).  Also
+    removes backticks so an inline-code-span cell can't be closed
+    mid-cell by operator input.  Keeps everything else verbatim.
+
+    PR4 adversarial review MED #9 — the Markdown rows previously
+    inlined raw strings, so a username containing ``|`` or
+    `` ` `` would break the table or re-open the code span.
+    """
+    s = "" if value is None else str(value)
+    for bad in ("|", "\n", "\r", "\\", "`"):
+        s = s.replace(bad, "")
+    return s
+
+
+def _default_usr02_probe(node, creds, client, users):
+    """Default USR02.LOCNT/UFLAG/USTYP reader (issue #69, PR4).
+
+    Returns ``{USER_UPPER: {"locnt": int, "uflag": str, "ustyp": str}}``.
+    Empty dict on any failure (UCON block, missing S_TABU_DIS, no
+    pyrfc, …) — purple mode degrades to 'baseline unavailable'
+    rather than crashing the sweep.
+
+    Injected into ``spray_landscape`` via ``usr02_probe_fn``; tests
+    pass a stub so the engine runs without pyrfc / an SDK.
+
+    Both ``client`` and each username are charset-validated BEFORE
+    being interpolated into the ABAP WHERE clause — an operator
+    wordlist line like ``A','DDIC:pw`` would otherwise widen the
+    IN-list and leak USR02 metadata for out-of-scope users (PR4
+    adversarial review MED #1 / #8).
+    """
+    try:
+        import sapmap_rfc
+    except Exception:
+        logger.debug("sapmap_rfc not importable — purple baseline off")
+        return {}
+    # Reject a malformed client up-front.  SAP mandants are always
+    # 3 digits; a non-matching value is operator error (or injection).
+    if not _MANDT_RE.match(str(client or "")):
+        logger.debug("USR02 probe: refusing malformed client %r", client)
+        return {}
+    # Charset-whitelist each BNAME.  Keep the dropped-count visible
+    # in debug logs for diagnosis without inflating the SprayRun.
+    safe_users = []
+    dropped = 0
+    for u in users:
+        uu = (u or "").upper().strip()
+        if _BNAME_RE.match(uu):
+            safe_users.append(uu)
+        else:
+            dropped += 1
+    if dropped:
+        logger.debug(
+            "USR02 probe: dropped %d malformed BNAME(s) on %s/%s",
+            dropped, getattr(node, "sid", "?"), client)
+    out: dict = {}
+    for i in range(0, len(safe_users), _USR02_BATCH_SIZE):
+        batch = safe_users[i:i + _USR02_BATCH_SIZE]
+        # BNAMEs are already upper + charset-validated — safe to
+        # single-quote without further escaping.
+        bnames = ",".join(f"'{u}'" for u in batch)
+        where = (
+            f"MANDT = '{client}' AND BNAME IN ({bnames})")
+        try:
+            rows = sapmap_rfc.read_table(
+                node, "USR02",
+                fields=["MANDT", "BNAME", "UFLAG", "LOCNT", "USTYP"],
+                where=where,
+                creds=creds,
+                max_rows=len(batch),
+                quiet=True,
+            )
+        except Exception as e:
+            logger.debug("USR02 read failed on %s/%s: %s",
+                         node.sid, client, e)
+            continue
+        for row in rows or []:
+            u = (row.get("BNAME", "") or "").upper().strip()
+            if not u:
+                continue
+            try:
+                locnt = int((row.get("LOCNT", "0") or "0").strip() or 0)
+            except (TypeError, ValueError):
+                locnt = 0
+            out[u] = {
+                "locnt": locnt,
+                "uflag": (row.get("UFLAG", "") or "").strip(),
+                "ustyp": (row.get("USTYP", "") or "").strip(),
+            }
+    return out
+
+
+def write_purple_report(run, state, out_dir):
+    """Materialise ``purple_report.md`` + ``purple_report.html`` under
+    ``loot/spray/<run_id>/`` (issue #69, PR4).
+
+    Blue-team deliverable: enumerates for the SOC exactly what their
+    SIEM should have seen (SAL class 00 numbers per attempt, SM21
+    hints, USR02.LOCNT deltas, Terminal spoof value).  **NEVER
+    writes cleartext passwords** — the signal rows carry only
+    ``pw_sha256_prefix`` and the attempts.jsonl audit file is the
+    sole source of per-attempt detail.
+
+    Returns the written file paths.  Raises on filesystem errors
+    so the operator sees the failure rather than silently losing
+    the deliverable.
+    """
+    os.makedirs(out_dir, exist_ok=True)
+
+    # Collect all signal rows for this run from every node.
+    rows: List[dict] = []
+    for node in (state.nodes or {}).values():
+        for sig in (node.spray_purple_signals or []):
+            if sig.get("run_id") == run.run_id:
+                rows.append(sig)
+    # Chronological order so a SOC can scroll alongside their SIEM.
+    rows.sort(key=lambda r: (r.get("ts", ""), r.get("sid", "")))
+
+    sids = sorted({r.get("sid", "") for r in rows if r.get("sid")})
+    attempts = len(rows)
+    hits = sum(1 for r in rows if r.get("result") in (
+        "SUCCESS", "PASSWORD_CHANGE", "NO_AUTH_LOGON"))
+    locks = sum(1 for r in rows if r.get("result") == "USER_LOCKED")
+    with_delta = sum(
+        1 for r in rows
+        if r.get("delta_locnt") is not None and r["delta_locnt"] > 0)
+
+    # ---- Markdown ----
+    md: List[str] = []
+    md.append(f"# Password Spray — Purple-Mode Report")
+    md.append("")
+    md.append(f"- **Run ID**: `{run.run_id}`")
+    md.append(f"- **Started**: {run.started_at}")
+    md.append(f"- **Finished**: {run.finished_at or '(in progress)'}")
+    md.append(f"- **Scope**: `{run.config_snapshot.get('scope_filter', {})}`")
+    md.append(f"- **Terminal spoof**: `{PURPLE_SPRAY_TERMINAL}`")
+    md.append(
+        f"- **USR02 baseline available**: "
+        f"{'yes' if run.purple_baseline_available else 'no'}")
+    if run.purple_baseline_error:
+        md.append(f"- **Baseline error**: `{run.purple_baseline_error}`")
+    md.append("")
+    md.append("## Summary")
+    md.append("")
+    md.append(f"- Attempts: **{attempts}**")
+    md.append(f"- Hits (SUCCESS / PASSWORD_CHANGE / NO_AUTH_LOGON): "
+              f"**{hits}**")
+    md.append(f"- Lockouts observed: **{locks}**")
+    md.append(f"- Attempts with observed USR02 delta: **{with_delta}**")
+    md.append(f"- Targets reached: **{len(sids)}** "
+              f"(`{', '.join(sids)}`)" if sids else "- No targets.")
+    md.append("")
+    md.append("## Blue-team checklist — did your SIEM see this?")
+    md.append("")
+    md.append("The following signatures SHOULD have landed in SAL / SM21 "
+              "/ ICM.  Use this run ID + the Terminal field to pull the "
+              "events out of your SIEM and verify your detection "
+              "coverage.")
+    md.append("")
+    md.append(
+        "| Source | Correlation hint |")
+    md.append(
+        "| --- | --- |")
+    md.append(
+        "| SAL (RSAU) class 00 | `AU2` (wrong password), `AU6` "
+        "(unknown user), `AU7` (no auth), `AUM` (user locked) |")
+    md.append(
+        f"| SAL Terminal field | `{PURPLE_SPRAY_TERMINAL}` "
+        "(when `rsau/ip_only=0`) |")
+    md.append(
+        "| SM21 | `Wrong password for user <USER>`, "
+        "`User <USER> is locked`, `User <USER> does not exist` |")
+    md.append(
+        "| USR02.LOCNT | delta per (client, user) — replayable "
+        "day-after via one `RFC_READ_TABLE` |")
+    md.append(
+        "| SecurityBridge pre-built rules | `Password Spray Attack`, "
+        "`Account Lockout Chain`, `Service Account Reuse` |")
+    md.append("")
+    md.append("## Per-attempt signal rows")
+    md.append("")
+    md.append(
+        "| TS | SID | Client | User | Result | SAL 00-N | USR02 "
+        "baseline | USR02 readback | &Delta; | PW sha256 prefix |")
+    md.append(
+        "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |")
+    for r in rows:
+        delta = r.get("delta_locnt")
+        # Every operator-reachable cell runs through _md_escape_cell
+        # so a username / sid containing ``|`` or `` ` `` can't
+        # break the table or close an inline-code span (PR4
+        # adversarial review MED #9).
+        md.append(
+            f"| {_md_escape_cell(r.get('ts',''))} | "
+            f"`{_md_escape_cell(r.get('sid',''))}` | "
+            f"`{_md_escape_cell(r.get('client',''))}` | "
+            f"`{_md_escape_cell(r.get('user',''))}` | "
+            f"**{_md_escape_cell(r.get('result',''))}** | "
+            f"`{_md_escape_cell(','.join(r.get('sal_numbers') or []))}` | "
+            f"{r.get('baseline_locnt') if r.get('baseline_locnt') is not None else '—'} | "
+            f"{r.get('readback_locnt') if r.get('readback_locnt') is not None else '—'} | "
+            f"{('+' + str(delta)) if (delta is not None and delta > 0) else (str(delta) if delta is not None else '—')} | "
+            f"`{_md_escape_cell(r.get('pw_sha256_prefix',''))}` |")
+    md.append("")
+    md.append(
+        f"_This file is a blue-team deliverable — no cleartext "
+        f"passwords.  Join to `attempts.jsonl` by `(ts, "
+        f"pw_sha256_prefix)` when SOC needs the full audit trail._")
+
+    md_text = "\n".join(md) + "\n"
+    md_path = os.path.join(out_dir, "purple_report.md")
+
+    # ---- HTML (self-contained) ----
+    import html as _html
+    html_rows: List[str] = []
+    for r in rows:
+        delta = r.get("delta_locnt")
+        delta_cell = (
+            f"<span style='color:#f85149'>+{delta}</span>"
+            if (delta is not None and delta > 0)
+            else (str(delta) if delta is not None else "&mdash;"))
+        html_rows.append(
+            "<tr>"
+            f"<td>{_html.escape(r.get('ts',''))}</td>"
+            f"<td><code>{_html.escape(r.get('sid',''))}</code></td>"
+            f"<td><code>{_html.escape(r.get('client',''))}</code></td>"
+            f"<td><code>{_html.escape(r.get('user',''))}</code></td>"
+            f"<td><strong>{_html.escape(r.get('result',''))}</strong></td>"
+            f"<td><code>{_html.escape(','.join(r.get('sal_numbers') or []))}</code></td>"
+            f"<td>{r.get('baseline_locnt') if r.get('baseline_locnt') is not None else '&mdash;'}</td>"
+            f"<td>{r.get('readback_locnt') if r.get('readback_locnt') is not None else '&mdash;'}</td>"
+            f"<td>{delta_cell}</td>"
+            f"<td><code>{_html.escape(r.get('pw_sha256_prefix',''))}</code></td>"
+            "</tr>")
+
+    html_doc = f"""<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>SAPMAP — Password Spray Purple Report ({_html.escape(run.run_id)})</title>
+<style>
+  body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI",
+          sans-serif; color: #c9d1d9; background: #0d1117;
+          padding: 24px; max-width: 1200px; margin: 0 auto; }}
+  h1 {{ color: #ffa657; }}
+  h2 {{ color: #58a6ff; margin-top: 28px; }}
+  .kpis {{ display: flex; gap: 10px; margin: 16px 0; }}
+  .kpi {{ background: #161b22; border: 1px solid #30363d;
+          border-radius: 6px; padding: 10px 14px; min-width: 140px; }}
+  .kpi .v {{ font-size: 22px; font-weight: 700; }}
+  .kpi .l {{ font-size: 11px; color: #8b949e; text-transform: uppercase; }}
+  table {{ width: 100%; border-collapse: collapse; font-size: 12px; }}
+  th, td {{ padding: 4px 8px; border-bottom: 1px solid #21262d;
+            text-align: left; }}
+  th {{ color: #8b949e; }}
+  code {{ background: #010409; padding: 1px 4px; border-radius: 3px; }}
+  .meta {{ color: #8b949e; font-size: 12px; }}
+  .footer {{ color: #6e7681; font-size: 11px; margin-top: 32px;
+             border-top: 1px solid #21262d; padding-top: 12px; }}
+</style>
+</head>
+<body>
+<h1>&#128299; Password Spray — Purple-Mode Report</h1>
+<p class="meta">
+  <strong>Run</strong> <code>{_html.escape(run.run_id)}</code> &middot;
+  <strong>Started</strong> {_html.escape(run.started_at)} &middot;
+  <strong>Finished</strong> {_html.escape(run.finished_at or '(in progress)')} &middot;
+  <strong>Terminal spoof</strong> <code>{_html.escape(PURPLE_SPRAY_TERMINAL)}</code>
+</p>
+<p class="meta">
+  USR02 baseline available: <strong>{'yes' if run.purple_baseline_available else 'no'}</strong>
+  {('&mdash; ' + _html.escape(run.purple_baseline_error)) if run.purple_baseline_error else ''}
+</p>
+<div class="kpis">
+  <div class="kpi"><div class="v">{attempts}</div><div class="l">Attempts</div></div>
+  <div class="kpi"><div class="v" style="color:#f85149">{hits}</div><div class="l">Hits</div></div>
+  <div class="kpi"><div class="v" style="color:#ffa657">{locks}</div><div class="l">Lockouts</div></div>
+  <div class="kpi"><div class="v" style="color:#58a6ff">{with_delta}</div><div class="l">USR02 &Delta;&gt;0</div></div>
+  <div class="kpi"><div class="v">{len(sids)}</div><div class="l">Targets</div></div>
+</div>
+<h2>Blue-team checklist — did your SIEM see this?</h2>
+<table>
+<tr><th>Source</th><th>Correlation hint</th></tr>
+<tr><td>SAL (RSAU) class 00</td><td><code>AU2</code> (wrong password), <code>AU6</code> (unknown user), <code>AU7</code> (no auth), <code>AUM</code> (user locked)</td></tr>
+<tr><td>SAL Terminal field</td><td><code>{_html.escape(PURPLE_SPRAY_TERMINAL)}</code> (when <code>rsau/ip_only=0</code>)</td></tr>
+<tr><td>SM21</td><td><code>Wrong password for user &lt;USER&gt;</code>, <code>User &lt;USER&gt; is locked</code>, <code>User &lt;USER&gt; does not exist</code></td></tr>
+<tr><td>USR02.LOCNT</td><td>delta per (client, user) &mdash; replayable day-after via one <code>RFC_READ_TABLE</code></td></tr>
+<tr><td>SecurityBridge pre-built rules</td><td><code>Password Spray Attack</code>, <code>Account Lockout Chain</code>, <code>Service Account Reuse</code></td></tr>
+</table>
+<h2>Per-attempt signal rows</h2>
+<table>
+<thead>
+<tr>
+<th>TS</th><th>SID</th><th>Client</th><th>User</th><th>Result</th>
+<th>SAL 00-N</th><th>USR02 baseline</th><th>USR02 readback</th>
+<th>&Delta;</th><th>PW sha256 prefix</th>
+</tr>
+</thead>
+<tbody>
+{''.join(html_rows)}
+</tbody>
+</table>
+<p class="footer">
+  Blue-team deliverable &mdash; no cleartext passwords.  Join to
+  <code>attempts.jsonl</code> by <code>(ts, pw_sha256_prefix)</code>
+  when SOC needs the full audit trail.
+</p>
+</body>
+</html>
+"""
+    html_path = os.path.join(out_dir, "purple_report.html")
+    # Atomic commit (PR4 adversarial review MED #5): write both files
+    # to tempfiles under the same directory, then os.replace() each
+    # to its final name ONLY after both files are flushed to disk.
+    # If any write raises mid-way, the temp files are removed and no
+    # partial purple_report.{md,html} is left on disk.
+    md_tmp = tempfile.NamedTemporaryFile(
+        mode="w", encoding="utf-8",
+        dir=out_dir, prefix=".purple_report.md.", suffix=".tmp",
+        delete=False)
+    html_tmp = tempfile.NamedTemporaryFile(
+        mode="w", encoding="utf-8",
+        dir=out_dir, prefix=".purple_report.html.", suffix=".tmp",
+        delete=False)
+    try:
+        md_tmp.write(md_text)
+        md_tmp.flush()
+        md_tmp.close()
+        html_tmp.write(html_doc)
+        html_tmp.flush()
+        html_tmp.close()
+        os.replace(md_tmp.name, md_path)
+        os.replace(html_tmp.name, html_path)
+    except Exception:
+        # Clean up any partial tempfiles before re-raising so the
+        # caller sees a clean 'no deliverable written' state.
+        for _p in (md_tmp.name, html_tmp.name):
+            try:
+                if os.path.exists(_p):
+                    os.remove(_p)
+            except Exception:
+                pass
+        raise
+
+    return {"md": md_path, "html": html_path, "rows": len(rows)}
+
+
 def _default_loot_dir(run_id: str) -> str:
     """Resolve ``loot/spray/<run_id>/`` using the shared loot helper
     when importable; falls back to a scratch dir under /tmp if the
@@ -1117,7 +1766,9 @@ PHASE_ORDER = [
     "idle",
     "collect_pool",
     "profile_probe",
+    "baseline",     # purple-mode: read USR02.LOCNT per (sid, client, user)
     "spray",
+    "readback",    # purple-mode: re-read USR02.LOCNT, compute deltas
     "report",
     "done",
 ]
