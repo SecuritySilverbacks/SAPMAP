@@ -842,6 +842,21 @@ def spray_landscape(
         },
     )
 
+    # Seed the status singleton (issue #69, PR3) so the GUI's progress
+    # panel can show the run as it unfolds.  SINGLE-WRITER invariant:
+    # this thread (the one _bg spawned) owns _status for the duration.
+    scope_label = "landscape"
+    if scope_filter and scope_filter.get("single_sid"):
+        scope_label = f"single:{scope_filter['single_sid']}"
+    _reset_status(
+        run_id=config.run_id,
+        scope=scope_label,
+        dry_run=bool(config.dry_run),
+        cap_per_user=int(config.cap_per_user),
+        started_at=run.started_at,
+    )
+    _set_phase("collect_pool")
+
     # Dry-run safety: refuse at the SERVICE boundary when the operator
     # didn't tick accept_lockout_risk.  Preview is still useful — pool
     # + target matrix are returned via the GUI's preview route, not
@@ -850,6 +865,7 @@ def spray_landscape(
         run.aborted = "dry_run_default_active"
         run.finished_at = datetime.utcnow().isoformat()
         state.spray_runs.append(run.to_dict())
+        _finalise_status(run)
         return run
 
     pool = landscape_password_pool(
@@ -859,16 +875,25 @@ def spray_landscape(
         include_scc=config.include_scc,
         manual_wordlist=config.manual_wordlist,
     )
+    _append_log(f"pool: {len(pool)} candidate(s)")
+    _set_phase("profile_probe")
     tm = build_target_matrix(state, scope_filter=scope_filter)
     targets: List[SprayTarget] = tm["eligible"]
     for node, reason in tm["ineligible"]:
         run.skipped.append({"sid": node.sid, "reason": reason})
+    _status.targets_total = len(targets)
+    _append_log(f"targets: {len(targets)} eligible, "
+                f"{len(tm['ineligible'])} skipped")
 
     # Early totals estimate (upper bound) so progress UI has a
     # denominator.  Doesn't account for short-circuit / skip-list —
     # actual attempts_done will be lower.
     run.attempts_total = sum(
         len(t.clients) * len(pool) for t in targets)
+    _status.attempts_total = run.attempts_total
+    if targets:
+        _set_phase("spray")
+        _set_phase_progress(0, len(targets))
 
     # Loot dir — real runs land under loot/spray/<run_id>/; dry runs
     # skip filesystem touches entirely.
@@ -944,6 +969,7 @@ def spray_landscape(
                     logger.debug("on_attempt callback raised",
                                  exc_info=True)
             run.attempts_done += 1
+            _status.attempts_done = run.attempts_done
             kind = row.get("kind")
             if kind == "hit":
                 hit = {"sid": target.sid, "client": row.get("client"),
@@ -952,6 +978,10 @@ def spray_landscape(
                        "source_sid": row.get("source_sid"),
                        "result": row.get("result")}
                 run.hits.append(hit)
+                _status.hits = len(run.hits)
+                _append_log(
+                    f"HIT {target.sid}/{row.get('client')} user="
+                    f"{row.get('user')} src={row.get('source_kind')}")
                 _upgrade_or_append_credential(node, dict(
                     username=row["user"], password=row["password"],
                     client=row["client"], instance_nr="",
@@ -979,6 +1009,10 @@ def spray_landscape(
                     row.get("user", ""))
                 if row.get("user") not in run.locked_users:
                     run.locked_users.append(row["user"])
+                _status.locks = len(run.locked_users)
+                _append_log(
+                    f"LOCK {target.sid}/{row.get('client')} user="
+                    f"{row.get('user')}")
             elif kind == "skipped":
                 run.skipped.append({"sid": target.sid,
                                     "user": row.get("user"),
@@ -1009,12 +1043,16 @@ def spray_landscape(
         # bans the user on every remaining target.
         pre_locked = {u.upper() for u in (
             state.pwspray_locked_users or {}).keys()}
+        _bump_targets_done()
+        _set_phase_progress(_status.targets_done, len(targets))
         # Inter-node pause.
         if ti < len(targets) - 1:
             _jittered_sleep(DEFAULT_INTER_NODE_SLEEP)
 
+    _set_phase("report")
     run.finished_at = datetime.utcnow().isoformat()
     state.spray_runs.append(run.to_dict())
+    _finalise_status(run)
     return run
 
 
@@ -1059,3 +1097,125 @@ def _default_loot_dir(run_id: str) -> str:
     base = ensure_loot_dir(f"spray/{run_id}")
     os.makedirs(base, exist_ok=True)
     return base
+
+
+# ---------------------------------------------------------------------------
+# Status singleton (issue #69, PR3)
+#
+# Mirrors the AutoPwn status pattern (sapmap_autopwn._status):
+#  - process-global singleton written by the orchestrator thread
+#  - read by Bottle request threads serving GET /status
+#  - no lock needed because writers are always SINGLE-WRITER (the one
+#    _bg thread spawned by the launch route)
+#
+# Phase order drives the progress panel.  Keep this in sync with the
+# frontend's phaseOrder array; the strings are the canonical phase
+# names across backend + frontend + script-runner.
+# ---------------------------------------------------------------------------
+
+PHASE_ORDER = [
+    "idle",
+    "collect_pool",
+    "profile_probe",
+    "spray",
+    "report",
+    "done",
+]
+
+
+@dataclass
+class PwSprayStatus:
+    """Operator-facing snapshot of the currently-running (or last-
+    completed) spray.  Serialised directly into the /status payload
+    — don't add fields the GUI shouldn't see."""
+    running: bool = False
+    finished: bool = False
+    phase: str = "idle"
+    # phase_progress is [done, total] for a progress-bar-friendly
+    # within-phase indicator.  Zero total == indeterminate.
+    phase_progress: Tuple[int, int] = (0, 0)
+    run_id: str = ""
+    scope: str = ""              # 'landscape' / 'single:<sid>' / 'preview'
+    dry_run: bool = True
+    cap_per_user: int = 1
+    targets_total: int = 0
+    targets_done: int = 0
+    attempts_total: int = 0
+    attempts_done: int = 0
+    hits: int = 0
+    locks: int = 0
+    skipped_count: int = 0
+    aborted: str = ""
+    started_at: str = ""
+    finished_at: str = ""
+    # Short log tail for the progress panel's console pane.  Capped
+    # by _append_log so the serialized payload stays small.
+    log_tail: List[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict:
+        d = asdict(self)
+        d["phase_progress"] = list(d["phase_progress"])
+        return d
+
+
+_status: PwSprayStatus = PwSprayStatus()
+
+
+def get_status() -> dict:
+    """Return the current pwspray status as a plain dict suitable for
+    ``json.dumps``.  Called by Bottle request threads; the single-
+    writer invariant means we don't need a lock."""
+    return _status.to_dict()
+
+
+def _reset_status(**init) -> PwSprayStatus:
+    """Start a new run: wipe the singleton and seed with the fields the
+    orchestrator knows up-front (scope, dry_run, cap_per_user, run_id)."""
+    global _status
+    _status = PwSprayStatus(running=True, phase="idle", **init)
+    return _status
+
+
+def _set_phase(phase: str) -> None:
+    """Advance the phase marker.  No-op when the phase is unknown so
+    tests don't have to monkey-patch PHASE_ORDER to use a subset."""
+    if phase not in PHASE_ORDER:
+        logger.debug("ignoring unknown phase %r", phase)
+        return
+    _status.phase = phase
+    _status.phase_progress = (0, 0)
+
+
+def _set_phase_progress(done: int, total: int) -> None:
+    _status.phase_progress = (int(done), int(total))
+
+
+def _bump_targets_done() -> None:
+    _status.targets_done += 1
+
+
+def _append_log(line: str, *, cap: int = 200) -> None:
+    """Push a short log line into the status's log tail.  Kept small
+    (200 lines) so the serialized payload stays legible; the full
+    attempts audit lives on disk in loot/spray/<run_id>/."""
+    _status.log_tail.append(line)
+    if len(_status.log_tail) > cap:
+        del _status.log_tail[0:len(_status.log_tail) - cap]
+
+
+def _finalise_status(run) -> None:
+    """Called once at the end of spray_landscape.  Pulls the final
+    tallies off the SprayRun so GET /status reflects the result
+    without the caller having to also poll /runs."""
+    _status.running = False
+    _status.finished = True
+    _status.phase = "done"
+    _status.run_id = run.run_id
+    _status.attempts_total = run.attempts_total
+    _status.attempts_done = run.attempts_done
+    _status.hits = len(run.hits or [])
+    _status.locks = len(run.locked_users or [])
+    _status.skipped_count = len(run.skipped or [])
+    _status.aborted = run.aborted or ""
+    _status.started_at = run.started_at
+    _status.finished_at = run.finished_at
