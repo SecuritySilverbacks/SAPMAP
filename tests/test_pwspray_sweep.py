@@ -7,9 +7,6 @@ Covers the backend half of PR3:
     (collect_pool -> profile_probe -> spray -> report -> done),
     bumps targets/attempts/hits/locks counters, and the finished
     flag flips at the end
-  * Central PWSPRAY_ROUTES frozenset carries every destructive OR
-    enumeration-revealing pwspray route and the _pwspray_gate hook
-    sits AFTER _readonly_gate (so --read-only wins the refusal)
   * Reset-history semantics — three fields wiped in a single call,
     double-confirm enforced server-side, operator-OPS HIGH audit
     finding emitted
@@ -18,6 +15,14 @@ Covers the backend half of PR3:
 
 Follows the existing SAPMAP route-shape test style (source-level
 grep + pure-engine helper assertions) — no Bottle test client.
+
+NOTE (issue #69 de-gate): the kernel arm flag (--allow-pwspray /
+sapmap_mode.set_pwspray_armed / PWSPRAY_ROUTES / _pwspray_gate hook /
+body.pwspray-armed) was removed per operator request — the confirm
+dialogs + accept_lockout_risk strict-bool + --read-only WRITE_ROUTES
+gate are the real safety.  Tests pinning those arm-gate artefacts
+were removed; see tests/test_pwspray_gui.py for the negative pins
+guarding against their reintroduction.
 """
 from __future__ import annotations
 
@@ -30,7 +35,6 @@ from unittest.mock import patch
 import pytest
 
 import modules  # noqa: F401
-import sapmap_mode
 from sapmap_models import SAPMAPState, SAPNode, InstanceInfo
 import sapmap_pwspray
 
@@ -40,12 +44,10 @@ REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 
 @pytest.fixture(autouse=True)
 def _reset_pwspray_state():
-    """Every test starts with --allow-pwspray OFF and a fresh status
-    singleton so a stray leak cannot mask a regression."""
-    sapmap_mode.set_pwspray_armed(False)
+    """Every test starts with a fresh status singleton so a stray
+    leak cannot mask a regression."""
     sapmap_pwspray._status = sapmap_pwspray.PwSprayStatus()
     yield
-    sapmap_mode.set_pwspray_armed(False)
     sapmap_pwspray._status = sapmap_pwspray.PwSprayStatus()
 
 
@@ -192,65 +194,12 @@ def test_spray_landscape_aborted_dry_run_default_still_finalises():
 
 
 # ---------------------------------------------------------------------------
-# Central before_request arm-gate consolidation (PR3.2)
+# WRITE_ROUTES gating (--read-only mode)
 # ---------------------------------------------------------------------------
 
 def _gui_src() -> str:
     return (REPO_ROOT / "modules" / "core" / "sapmap_gui.py").read_text(
         encoding="utf-8")
-
-
-def test_pwspray_routes_frozenset_is_exhaustive():
-    """Every destructive OR enumeration-revealing pwspray route must
-    be listed in PWSPRAY_ROUTES, otherwise the central before_request
-    hook silently fails open on it.
-
-    When a new pwspray route is added (PR4/PR5), this test fails
-    loudly until it's registered."""
-    src = _gui_src()
-    m = re.search(r"PWSPRAY_ROUTES = frozenset\(\{(.*?)\}\)",
-                  src, re.DOTALL)
-    assert m, "PWSPRAY_ROUTES frozenset not found — PR3.2 was supposed " \
-              "to introduce it as part of the central arm-gate hook"
-    body = m.group(1)
-    for required in (
-        '"/api/node/<sid>/password_spray",',
-        '"/api/actions/password_spray",',
-        '"/api/actions/password_spray/preview",',
-        '"/api/actions/password_spray/pool",',
-        '"/api/actions/password_spray/pool/wordlist",',
-        '"/api/actions/password_spray/status",',
-        '"/api/actions/password_spray/runs",',
-        '"/api/actions/password_spray/reset_history",',
-    ):
-        assert required in body, (
-            f"PWSPRAY_ROUTES is missing {required!r} — the central "
-            f"before_request hook won't gate it, and operators without "
-            f"--allow-pwspray can hit the endpoint")
-
-
-def test_pwspray_gate_fires_after_readonly_gate():
-    """Hook order matters: --read-only must win over
-    pwspray_not_armed for routes that are both WRITE and PWSPRAY,
-    so the operator sees the read-only refusal (lower-friction UX)."""
-    src = _gui_src()
-    readonly_at = src.find("def _readonly_gate():")
-    pwspray_at = src.find("def _pwspray_gate():")
-    assert readonly_at > 0, "_readonly_gate missing"
-    assert pwspray_at > 0, "_pwspray_gate missing — PR3.2 consolidation"
-    assert pwspray_at > readonly_at, (
-        "_pwspray_gate must be registered AFTER _readonly_gate so "
-        "Bottle fires the readonly refusal first on dual-gated routes")
-
-
-def test_pwspray_gate_emits_pwspray_not_armed_error_key():
-    """Pin the body shape — matches the readonly refusal's
-    {error, message, route} shape so a future shared 403 handler
-    can key on it uniformly."""
-    src = _gui_src()
-    assert '"error": "pwspray_not_armed"' in src
-    # And must carry a route field.
-    assert '"route": rule,' in src
 
 
 def test_pwspray_write_routes_still_in_write_routes():
@@ -278,8 +227,7 @@ def test_pwspray_write_routes_omits_status_and_runs_and_pool_get():
     """Three read-only pwspray surfaces (GET pool, GET status, GET
     runs) must NOT be in WRITE_ROUTES — read-only sessions should
     still be able to inspect what wordlist is loaded, what spray
-    is running, and what history exists.  They stay gated by the
-    central _pwspray_gate hook alone."""
+    is running, and what history exists."""
     src = _gui_src()
     m = re.search(r"WRITE_ROUTES = frozenset\(\{(.*?)\}\)",
                   src, re.DOTALL)
@@ -552,19 +500,6 @@ def test_pwspray_panel_surfaces_aborted_reason():
 def _html_src() -> str:
     return (REPO_ROOT / "modules" / "core" / "sapmap_html.py").read_text(
         encoding="utf-8")
-
-
-def test_pwspray_armed_bar_sibling_of_evasion_bar():
-    """Both armed strips sit outside #app so they can stack cleanly
-    in the top banner region.  Pin: pwspray strip appears IN the
-    source immediately after the evasion strip."""
-    src = _html_src()
-    evasion_at = src.find('id="evasion-armed-bar"')
-    pwspray_at = src.find('id="pwspray-armed-bar"')
-    assert evasion_at > 0 and pwspray_at > evasion_at
-    # And the CSS rule that reveals the strip is driven by
-    # body.pwspray-armed, which PR2's initMode already toggles.
-    assert "body.pwspray-armed #pwspray-armed-bar { display: flex; }" in src
 
 
 def test_top_nav_actions_entry_sits_between_autopwn_and_propagate():
