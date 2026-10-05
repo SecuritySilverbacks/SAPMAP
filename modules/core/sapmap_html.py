@@ -9423,14 +9423,13 @@ async function ctxAction(action) {
         api('POST', `node/${sid}/check_default_creds`);
       break;
     case 'password_spray':
-      // Default to DRY-RUN so a confirm miss cannot burn the lockout
-      // budget; the operator must explicitly tick accept_lockout_risk
-      // in a follow-up body (PR3 ships the full config modal — for
-      // PR2 the ctx-menu entry fires the dry-run preview).
-      if (confirm('⚠️ WARNING: Password spray hits USR02 bad-logon counter and may LOCK accounts.\n\nSprays harvested credentials (SecStore + DBCON + BTP + SCC + operator wordlist) against ' + sid + '\'s enumerated clients via DIAG.\n\nThis ctx-menu entry starts a DRY-RUN (no sockets opened).  Use the Password Spray modal (PR3) for live spray.\n\nProceed?')) {
-        api('POST', `node/${sid}/password_spray`,
-            { dry_run: true, cap_per_user: 1 });
-      }
+      // Open the config modal pre-scoped to this node's SID.  The
+      // operator picks dry-run vs live, cap, purple mode, wordlist
+      // etc. there — same flow as the top-nav Actions entry, just
+      // with the single-scope radio seeded (operator feedback
+      // 2026-10-05: a confirm→dry-run short-cut here was redundant
+      // and bypassed the useful knobs).
+      showPwsprayModal({ single_sid: sid });
       break;
     case 'set_saprouter': showSaprouterModal(sid); break;
     case 'harvest_scc': {
@@ -17660,10 +17659,17 @@ function closeAutoPwnPanel() {
 let _pwsprayPollTimer = null;
 let _pwsprayLastRenderedRun = null;
 
-function showPwsprayModal() {
-  // Reset modal state
-  document.querySelector('input[name="pws-scope"][value="landscape"]').checked = true;
-  document.getElementById('pws-scope-sid').value = '';
+function showPwsprayModal(opts) {
+  // Reset modal state.  Optional `opts.single_sid` pre-seeds the
+  // single-system scope so the per-node ctx-menu entry (which knows
+  // the sid the operator right-clicked on) can open the modal pre-
+  // scoped — rather than firing a bare dry-run POST behind a
+  // confirm (operator feedback 2026-10-05).
+  opts = opts || {};
+  const seedSid = (opts.single_sid || '').trim();
+  const scopeVal = seedSid ? 'single' : 'landscape';
+  document.querySelector('input[name="pws-scope"][value="' + scopeVal + '"]').checked = true;
+  document.getElementById('pws-scope-sid').value = seedSid;
   document.getElementById('pws-cap').value = 1;
   document.getElementById('pws-cap-val').textContent = '1';
   document.getElementById('pws-dry-run').checked = true;
@@ -17987,7 +17993,10 @@ async function showPwsprayResults() {
   const defBody = document.getElementById('pws-tab-body-defender');
   if (!latest) {
     body.innerHTML = '<div style="color:#8b949e;font-size:12px">No runs yet.  Launch a spray from the Actions dropdown or the map ctx-menu.</div>';
-    defBody.innerHTML = '';
+    // Reuse the renderer's own "No run selected." placeholder rather
+    // than wiping the pane — a totally blank Defender tab reads as
+    // broken, not as "waiting for data" (operator feedback 2026-10-05).
+    defBody.innerHTML = _renderDefenderView(null);
   } else {
     body.innerHTML = _renderHitMatrix(latest);
     // Eager populate the Defender tab so a mid-run click doesn't
