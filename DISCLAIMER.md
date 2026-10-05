@@ -5,7 +5,7 @@
 SAPMAP (SAP Landscape Attack-Path Mapper) implements real, working
 exploits against SAP NetWeaver ABAP and Java stacks, including:
 
-- RFC Gateway remote command execution (10KBlaze / CVE-2020-6207 family)
+- RFC Gateway remote command execution (SAP Note 1408081 / CVE-2019-0330; related 10KBlaze MS-betrusted chain hardening in SAP Note 821875)
 - Message Server authentication bypass (betrusted)
 - CVE-2025-31324 — VisualComposer metadatauploader unauth RCE
 - CVE-2020-6287 — LM Configuration Wizard unauth admin user creation (RECON)

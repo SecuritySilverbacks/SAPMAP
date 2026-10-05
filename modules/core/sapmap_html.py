@@ -1144,7 +1144,7 @@ body {
         <div class="legend-grid">
           <div class="legend-row"><span class="swatch-cell"><svg width="34" height="10"><line x1="0" y1="5" x2="34" y2="5" stroke="#c0392b" stroke-width="9"/></svg></span><span class="label"><b>OS shell verified</b> — SAPControl OSExecute or CTCWebService/FileSystemConfig grants shell as &lt;sid&gt;adm (kernel-level, beats SAP_ALL)</span></div>
           <div class="legend-row"><span class="swatch-cell"><svg width="34" height="10"><line x1="0" y1="5" x2="34" y2="5" stroke="#e74c3c" stroke-width="8"/></svg></span><span class="label"><b>RFC Logon OK + SAP_ALL</b> — captured a stored credential with SAP_ALL role</span></div>
-          <div class="legend-row"><span class="swatch-cell"><svg width="34" height="10"><line x1="0" y1="5" x2="34" y2="5" stroke="#ff6b35" stroke-width="7" stroke-dasharray="8,4"/></svg></span><span class="label"><b>TCP/IP (sapxpg) works</b> — 10KBLAZE / GW SAPXPG remote command execution</span></div>
+          <div class="legend-row"><span class="swatch-cell"><svg width="34" height="10"><line x1="0" y1="5" x2="34" y2="5" stroke="#ff6b35" stroke-width="7" stroke-dasharray="8,4"/></svg></span><span class="label"><b>TCP/IP (sapxpg) works</b> — Gateway SAPXPG unauth remote command execution (reginfo/secinfo bypass)</span></div>
           <div class="legend-row"><span class="swatch-cell"><svg width="34" height="10"><line x1="0" y1="5" x2="34" y2="5" stroke="#f0883e" stroke-width="7" stroke-dasharray="12,4"/></svg></span><span class="label"><b>Trusted RFC</b> — SM59 Trust = Yes (RFCOPTIONS Q=Y).  Inbound trust: caller can land authenticated calls without a password</span></div>
           <div class="legend-row"><span class="swatch-cell"><svg width="34" height="10"><line x1="0" y1="5" x2="34" y2="5" stroke="#2ecc71" stroke-width="7"/></svg></span><span class="label"><b>RFC Logon OK</b> — creds work, role not yet SAP_ALL confirmed</span></div>
           <div class="legend-row"><span class="swatch-cell"><svg width="34" height="10"><line x1="0" y1="5" x2="34" y2="5" stroke="#5dade2" stroke-width="6"/></svg></span><span class="label"><b>RFC (untested)</b> — destination present, credential/reach not verified</span></div>
@@ -2735,7 +2735,7 @@ body {
       Vulnerability Checks (exploitable):
     </div>
     <label class="autopwn-cb"><input type="checkbox" id="apwn-scan-gw" checked> Gateway SAPXPG</label>
-    <label class="autopwn-cb"><input type="checkbox" id="apwn-scan-10k"> 10KBlaze (CVE-2020-6207) — slow, off by default</label>
+    <label class="autopwn-cb"><input type="checkbox" id="apwn-scan-10k"> 10KBlaze (MS betrusted, SAP Note 2890213) — slow, off by default</label>
     <label class="autopwn-cb"><input type="checkbox" id="apwn-scan-31324" checked> CVE-2025-31324 (VisualComposer RCE)</label>
     <label class="autopwn-cb"><input type="checkbox" id="apwn-scan-recon" checked> CVE-2020-6287 (RECON)</label>
     <label class="autopwn-cb"><input type="checkbox" id="apwn-dpmon-sapstar" checked> dpmon virtual SAP* (kernel &ge; 790, ABAP only)</label>
@@ -5034,7 +5034,7 @@ function updateMap() {
     // Finding count badge — matches the vulnerability rows shown in the System Details panel
     const isJava = (n.system_type || '').toUpperCase().indexOf('JAVA') !== -1;
     const vulnList = [];
-    if (n.gw_vulnerable) vulnList.push('Gateway SAPXPG (10KBLAZE)');
+    if (n.gw_vulnerable) vulnList.push('Gateway SAPXPG (unauth RCE)');
     if (n.ms_vulnerable) vulnList.push('MS betrusted (CVE-2020-6207)');
     if (isJava && n.cve_2025_31324_vulnerable) vulnList.push('CVE-2025-31324 (Java VisualComposer)');
     if (isJava && n.cve_2020_6287_vulnerable) vulnList.push('CVE-2020-6287 (RECON)');
@@ -6269,7 +6269,7 @@ function showCtxMenu(e, sid) {
     'create_user_dpmon_sapstar': hasGwVuln && isAbapStack && n.dpmon_sap_star_available,  // kernel>=790 + ABAP + GW
     // Transport import needs an OS-exec channel on the target.  Two
     // primitives are wired in:
-    //   * GW SAPXPG (10KBLAZE) — unauthenticated, requires gw_vulnerable
+    //   * GW SAPXPG (SAP Note 1408081) — unauthenticated, requires gw_vulnerable
     //   * SXPG_STEP_XPG_START — authenticated, requires a SAP_ALL cred
     //     (SAPMAP-created user or operator-supplied verified cred)
     // Transports themselves are an ABAP-stack construct — a pure-Java

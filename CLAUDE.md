@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What This Is
 
-SAPMAP (SAP Landscape Attack Path Mapper) is a security research tool for SAP NetWeaver environments. It discovers SAP systems, maps RFC trust relationships, executes known exploits (Gateway SAPXPG/10KBLAZE, MS betrusted, CVE-2025-31324, etc.), and visualizes the attack surface as an interactive web map. Requires written authorization before use — see `DISCLAIMER.md`.
+SAPMAP (SAP Landscape Attack Path Mapper) is a security research tool for SAP NetWeaver environments. It discovers SAP systems, maps RFC trust relationships, executes known exploits (Gateway SAPXPG unauth RCE, 10KBLAZE MS betrusted chain, CVE-2025-31324, etc.), and visualizes the attack surface as an interactive web map. Requires written authorization before use — see `DISCLAIMER.md`.
 
 ## Commands
 
@@ -64,7 +64,7 @@ No build step, no linting config, no pre-commit hooks.
 ### Exploitation
 
 - **`modules/exploitation/sapmap_exploit.py`** — Orchestrator for user creation + propagation across the landscape
-- **`modules/exploitation/sap_gw_xpg_standalone.py`** — Pure-Python 10KBLAZE Gateway SAPXPG exploit (unauthenticated OS command execution)
+- **`modules/exploitation/sap_gw_xpg_standalone.py`** — Pure-Python Gateway SAPXPG exploit (unauth `STARTED_PRG=sapxpg` via permissive `reginfo`/`secinfo`; SAP Note 1408081 / CVE-2019-0330)
 - **`modules/exploitation/sap_ms_betrusted.py` + `sap_betrusted_chain.py`** — Message Server internal port exploitation (CVE-2020-6207)
 - **`modules/exploitation/sap_cve_2025_31324.py`** — VisualComposer JSP webshell deployment via chunked-base64 file writes
 - **`modules/exploitation/sap_db_sql_writers.py`** — Multi-DB SQL generator (HANA, MSSQL, Oracle, MaxDB, DB2) for user creation via OS command injection

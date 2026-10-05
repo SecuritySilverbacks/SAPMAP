@@ -253,6 +253,11 @@ CAPABILITY_MAP: Dict[str, List[str]] = {
     "data.wd_backend_table_read": ["T1213", "T1526"],
 
     # ---- Initial Access / Execution ----
+    # NOTE: "exploit.10kblaze" is a historical capability key — it actually
+    # maps to the DIRECT Gateway SAPXPG reginfo/secinfo abuse (CVE-2019-0330,
+    # SAP Note 1408081), NOT the 10KBLAZE MS-betrusted chain (that one lives
+    # under "exploit.ms_betrusted" below).  The key name is kept for
+    # backward-compat with existing .sapmap state files + findings exports.
     "exploit.10kblaze":          ["T1190", "T1059"],
     "exploit.cve_2025_31324":    ["T1190", "T1505.003"],
     "exploit.cve_2020_6287":     ["T1190", "T1136.001"],
