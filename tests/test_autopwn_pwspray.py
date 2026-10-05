@@ -4,12 +4,10 @@ of the SAPMAP workflow.
 
 Covers:
   * AutoPwnConfig gains the four pwspray fields
-  * phase3b_password_spray exists, returns the tri-state summary,
-    no-ops cleanly when disabled or unarmed
+  * phase3b_password_spray exists, returns the bi-state summary,
+    no-ops cleanly when disabled
   * autopwn_run calls phase3b TWICE per wave (symmetric with the
     two phase3_enrich passes) + banner lists PWSPRAY
-  * /api/actions/autopwn coerces include_password_spray to False
-    when the kernel arm bit is off
   * SAPNode._pwspray_tested_triples field + to_dict/from_dict
     round-trip (sorted list)
   * engine writes to _pwspray_tested_triples on every real attempt
@@ -17,6 +15,11 @@ Covers:
   * script-step password_spray action in sapmap_script.py
   * MCP tools pwspray_sweep / pwspray_status / pwspray_runs
   * diff integration — spray_runs delta section + KPIs
+
+NOTE (issue #69 de-gate): the kernel arm flag was removed; tests
+pinning its unarmed / coerce / disable-on-unarmed behaviour were
+deleted here.  The confirm dialogs + accept_lockout_risk strict-bool
++ --read-only WRITE_ROUTES gate remain as the real safety.
 """
 from __future__ import annotations
 
@@ -29,7 +32,6 @@ from unittest.mock import patch
 import pytest
 
 import modules  # noqa: F401
-import sapmap_mode
 from sapmap_models import (
     SAPMAPState, SAPNode, InstanceInfo, Credentials)
 import sapmap_pwspray
@@ -41,10 +43,8 @@ REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 
 @pytest.fixture(autouse=True)
 def _reset_pwspray_state():
-    sapmap_mode.set_pwspray_armed(False)
     sapmap_pwspray._status = sapmap_pwspray.PwSprayStatus()
     yield
-    sapmap_mode.set_pwspray_armed(False)
     sapmap_pwspray._status = sapmap_pwspray.PwSprayStatus()
 
 
@@ -76,22 +76,11 @@ def test_phase3b_disabled_returns_disabled():
     assert result == {"ran": False, "reason": "disabled"}
 
 
-def test_phase3b_unarmed_returns_unarmed_even_when_toggle_on():
-    """Toggle on + arm bit off → no-op with reason=unarmed.  AutoPwn
-    keeps running, just without the spray phase."""
-    state = SAPMAPState()
-    cfg = sapmap_autopwn.AutoPwnConfig(include_password_spray=True)
-    sapmap_mode.set_pwspray_armed(False)
-    result = sapmap_autopwn.phase3b_password_spray(state, cfg, wave=1)
-    assert result == {"ran": False, "reason": "unarmed"}
-
-
-def test_phase3b_armed_runs_spray_landscape():
-    """Toggle on + arm bit on → engine fires.  Patch
-    spray_landscape to prove phase3b calls it with the right
-    SprayConfig (dry_run=False, accept_risk=True, purple_mode
-    propagated, max_total_locks_per_run derived from
-    pwspray_abort_on_lockout)."""
+def test_phase3b_enabled_runs_spray_landscape():
+    """Toggle on → engine fires.  Patch spray_landscape to prove
+    phase3b calls it with the right SprayConfig (dry_run=False,
+    accept_risk=True, purple_mode propagated, max_total_locks_per_run
+    derived from pwspray_abort_on_lockout)."""
     state = SAPMAPState()
     cfg = sapmap_autopwn.AutoPwnConfig(
         include_password_spray=True,
@@ -99,7 +88,6 @@ def test_phase3b_armed_runs_spray_landscape():
         pwspray_abort_on_lockout=True,
         pwspray_purple_mode=True,
     )
-    sapmap_mode.set_pwspray_armed(True)
 
     captured = {}
 
@@ -142,7 +130,6 @@ def test_phase3b_abort_on_lockout_false_uses_default_breaker():
         include_password_spray=True,
         pwspray_abort_on_lockout=False,
     )
-    sapmap_mode.set_pwspray_armed(True)
 
     captured = {}
 
@@ -186,7 +173,7 @@ def test_autopwn_run_calls_phase3b_twice_per_wave_in_source():
 
 def test_autopwn_banner_lists_pwspray_when_enabled():
     """Startup banner must list PWSPRAY among optional phases so the
-    operator can confirm their --allow-pwspray flag + toggle landed."""
+    operator can confirm their toggle landed."""
     src = (REPO_ROOT / "modules" / "exploitation" /
            "sapmap_autopwn.py").read_text(encoding="utf-8")
     assert 'opts.append(\n            "PWSPRAY"' in src or \
@@ -195,15 +182,10 @@ def test_autopwn_banner_lists_pwspray_when_enabled():
     assert "+purple" in src
 
 
-# ---------------------------------------------------------------------------
-# Launch-route coerces include_password_spray on unarmed kernel
-# ---------------------------------------------------------------------------
-
-def test_autopwn_launch_route_coerces_pwspray_when_unarmed():
-    """/api/actions/autopwn must silently coerce
-    include_password_spray=False when !is_pwspray_armed so a scripted
-    POST or a stale browser can't bypass the arm gate.  Source
-    pin on the backend logic."""
+def test_autopwn_launch_route_has_no_arm_coercion():
+    """De-gate (issue #69): /api/actions/autopwn no longer coerces
+    include_password_spray against an arm bit — it passes the raw
+    body boolean straight through to AutoPwnConfig.  Negative pin."""
     src = (REPO_ROOT / "modules" / "core" / "sapmap_gui.py").read_text(
         encoding="utf-8")
     m = re.search(
@@ -211,10 +193,15 @@ def test_autopwn_launch_route_coerces_pwspray_when_unarmed():
         src, re.DOTALL)
     assert m, "actions_autopwn handler not found"
     body = m.group(1)
-    assert "is_pwspray_armed as _is_pw_armed" in body
-    assert "_effective_pw = _wanted_pw and _pw_armed" in body
-    # AutoPwnConfig receives the COERCED value, not the raw body.
-    assert "include_password_spray=_effective_pw," in body
+    # No arm-gate wiring any more.
+    assert "is_pwspray_armed as _is_pw_armed" not in body
+    assert "_effective_pw" not in body
+    assert "autopwn.pwspray_coerced" not in body
+    # Raw body bool reaches AutoPwnConfig (newline-tolerant match
+    # because the call wraps across two lines).
+    collapsed = re.sub(r"\s+", " ", body)
+    assert ('include_password_spray=bool( '
+            'data.get("include_password_spray", False))') in collapsed
 
 
 # ---------------------------------------------------------------------------
@@ -360,8 +347,7 @@ def test_demo_pwspray_yaml_exists_and_is_dry_run_default():
 # ---------------------------------------------------------------------------
 
 def test_mcp_pwspray_sweep_tool_exposed():
-    """MCP server exposes pwspray_sweep with the full knob set
-    + mentions --allow-pwspray in the docstring."""
+    """MCP server exposes pwspray_sweep with the full knob set."""
     src = (REPO_ROOT / "modules" / "mcp" /
            "sapmap_mcp_server.py").read_text(encoding="utf-8")
     assert "def pwspray_sweep(dry_run: bool = True," in src
@@ -371,7 +357,6 @@ def test_mcp_pwspray_sweep_tool_exposed():
         "accept_production_risk:",
     ):
         assert kw in src
-    assert "--allow-pwspray" in src
     # Default safe = dry_run True (model can't accidentally go live).
     assert "def pwspray_sweep(dry_run: bool = True" in src
 
@@ -489,6 +474,9 @@ def test_diff_markdown_renders_pwspray_section():
 # ---------------------------------------------------------------------------
 
 def test_autopwn_modal_has_pwspray_group():
+    """AutoPwn modal exposes the four pwspray controls.  De-gate
+    (issue #69): the apwn-pwspray-unarmed-hint helper and the
+    unarmed-disable logic were removed with the arm gate."""
     src = (REPO_ROOT / "modules" / "core" /
            "sapmap_html.py").read_text(encoding="utf-8")
     assert 'id="apwn-pwspray-group"' in src
@@ -497,19 +485,11 @@ def test_autopwn_modal_has_pwspray_group():
         'id="apwn-pwspray-cap"',
         'id="apwn-pwspray-abort-on-lockout"',
         'id="apwn-pwspray-purple"',
-        'id="apwn-pwspray-unarmed-hint"',
     ):
         assert id_ in src
-
-
-def test_autopwn_modal_disables_pwspray_toggles_when_unarmed():
-    src = (REPO_ROOT / "modules" / "core" /
-           "sapmap_html.py").read_text(encoding="utf-8")
-    # showAutoPwnModal reads body.pwspray-armed and disables all four
-    # toggles when the class is absent.
-    assert "const pwsprayArmed = document.body.classList.contains(" \
-           "'pwspray-armed')" in src
-    assert "el.disabled = !pwsprayArmed" in src
+    # Negative pins — none of the arm-gate wiring may regress in.
+    assert 'id="apwn-pwspray-unarmed-hint"' not in src
+    assert "el.disabled = !pwsprayArmed" not in src
 
 
 def test_autopwn_launch_posts_pwspray_fields():
@@ -588,7 +568,6 @@ def test_phase3b_run_wide_lock_budget_blocks_second_wave():
     per-wave.  _PWSPRAY_RUN_LOCKS carries locks across waves;
     phase3b returns run_wide_lock_budget_exhausted on wave 2+ when
     the list is non-empty and abort_on_lockout is True."""
-    sapmap_mode.set_pwspray_armed(True)
     # Hand-pollute the run-wide lock list to simulate wave 1
     # having locked a user.
     sapmap_autopwn._PWSPRAY_RUN_LOCKS[:] = ["DDIC"]
@@ -608,7 +587,6 @@ def test_phase3b_run_wide_lock_budget_disabled_when_abort_off():
     """When abort_on_lockout=False, the engine's default breaker (3)
     applies and the cross-wave check is skipped — multi-wave sprays
     are allowed to accumulate locks."""
-    sapmap_mode.set_pwspray_armed(True)
     sapmap_autopwn._PWSPRAY_RUN_LOCKS[:] = ["X", "Y"]
     cfg = sapmap_autopwn.AutoPwnConfig(
         include_password_spray=True,
@@ -634,17 +612,6 @@ def test_autopwn_run_resets_pwspray_lock_budget():
            "sapmap_autopwn.py").read_text(encoding="utf-8")
     assert "_pwspray_reset_run_locks()" in src
     assert "def _pwspray_reset_run_locks(" in src
-
-
-def test_autopwn_coerce_emits_warning_finding():
-    """Launch-route coercion (include_password_spray=true without
-    --allow-pwspray) must call emit_finding so the fallout is
-    visible in /api/findings + engagement report, not just a
-    terminal print."""
-    src = (REPO_ROOT / "modules" / "core" /
-           "sapmap_gui.py").read_text(encoding="utf-8")
-    assert 'ref="autopwn.pwspray_coerced"' in src
-    assert "AutoPwn: include_password_spray requested but" in src
 
 
 def test_demo_pwspray_yaml_actions_exist():

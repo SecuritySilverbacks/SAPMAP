@@ -773,13 +773,6 @@ def autopwn(max_waves: int = 5, scan_gw: bool = True,
 
 
 # ===== TOOLS: Password Spraying (issue #69) =====
-#
-# All pwspray tools pass through the central _pwspray_gate
-# before_request hook on the Bottle server; MCP sees the HTTP 403
-# {error: "pwspray_not_armed"} echo and surfaces it to the model
-# as actionable text.  The MCP server runs as a SEPARATE PROCESS
-# from the SAPMAP Bottle server, so the arm bit cannot be checked
-# locally — the backend 403 IS the gate.
 
 
 @mcp.tool()
@@ -797,11 +790,6 @@ def pwspray_sweep(dry_run: bool = True,
     spray requires BOTH ``dry_run=False`` AND
     ``accept_lockout_risk=True`` — the backend returns HTTP 400
     ``accept_lockout_risk_required`` otherwise.
-
-    This endpoint requires SAPMAP to have been started with
-    ``--allow-pwspray``.  Without the arm flag the central hook
-    returns HTTP 403 ``pwspray_not_armed`` and this tool echoes the
-    error unchanged (no spray is attempted).
 
     The spray engine still enforces every lockout invariant:
       * per-user cap clamped to [1, 2] (``cap_per_user`` is a

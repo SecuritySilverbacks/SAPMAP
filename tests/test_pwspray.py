@@ -443,3 +443,165 @@ def test_attack_capabilities_resolve_to_real_techniques():
     # T1110.003 must be the primary tag on creds.password_spray
     from sapmap_attack import techniques_for as _tf
     assert "T1110.003" in _tf("creds.password_spray")
+
+
+# ---------------------------------------------------------------------------
+# Option B — post-hit authority probe + tiered node state (issue #69)
+# ---------------------------------------------------------------------------
+
+def _probe_returning(tier, *, profiles=None, roles=None, note=""):
+    """Factory for an injectable hit_authority_probe_fn stub."""
+    def _probe(node, client, user, password):
+        return {
+            "authority_level": tier,
+            "profiles": list(profiles or []),
+            "roles": list(roles or []),
+            "note": note,
+        }
+    return _probe
+
+
+def _run_spray_with_hit(authority_probe_tier, *, hits=None,
+                         profiles=None, roles=None, source_sid=""):
+    """Shared harness: one ABAP node + one wordlist entry that will
+    SUCCESS, with an injected authority probe returning the given
+    tier.  Returns (state, node, run).
+
+    Uses the non-default username 'JORIS' to sidestep
+    DEFAULT_SKIP_USERS (which drops DDIC / SAP* / service users)."""
+    state = SAPMAPState()
+    n = _make_target_node("NPL", clients=["001"])
+    state.nodes["NPL"] = n
+    hits = hits or [("JORIS", "secret", "001")]
+    fake = _FakeTryLogin(hits=hits)
+    cfg = pw.SprayConfig(
+        dry_run=False, accept_lockout_risk=True, cap_per_user=1,
+        manual_wordlist=[(hits[0][0], hits[0][1])])
+    probe = _probe_returning(
+        authority_probe_tier,
+        profiles=profiles, roles=roles,
+        note=f"stub probe → {authority_probe_tier}")
+    run = pw.spray_landscape(
+        state, cfg,
+        try_login_fn=fake,
+        hit_authority_probe_fn=probe,
+        loot_dir_fn=lambda _: "",
+    )
+    return state, n, run
+
+
+def test_hit_authority_sap_all_marks_node_pwned_and_records_tier():
+    """Tier=sap_all → node.pwned=True AND
+    node.spray_hit_users carries authority_level='sap_all'."""
+    _, node, run = _run_spray_with_hit(
+        "sap_all",
+        profiles=["SAP_ALL"], roles=[])
+    assert run.hits, "expected one hit"
+    assert node.pwned is True, (
+        "sap_all authority must upgrade node.pwned")
+    assert len(node.spray_hit_users) == 1
+    entry = node.spray_hit_users[0]
+    assert entry["authority_level"] == "sap_all"
+    assert entry["user"] == "JORIS"
+    assert entry["client"] == "001"
+    assert entry["profiles"] == ["SAP_ALL"]
+
+
+def test_hit_authority_privileged_does_not_mark_node_pwned():
+    """Tier=privileged → node.pwned stays False (operator still
+    needs an SU01 BAPI to grant SAP_ALL), but entry carries
+    the profiles/roles the probe found."""
+    _, node, run = _run_spray_with_hit(
+        "privileged",
+        profiles=["Z_SUPER"], roles=["SAP_BR_ADMINISTRATOR"])
+    assert run.hits
+    assert node.pwned is False, (
+        "privileged (not sap_all) must NOT mark the node pwned — "
+        "the operator still has to run LPE / SU01")
+    entry = node.spray_hit_users[0]
+    assert entry["authority_level"] == "privileged"
+    assert entry["profiles"] == ["Z_SUPER"]
+    assert entry["roles"] == ["SAP_BR_ADMINISTRATOR"]
+
+
+def test_hit_authority_unprivileged_does_not_mark_node_pwned():
+    """Tier=unprivileged → node.pwned stays False, entry carries
+    empty profiles/roles.  Still a password-reuse finding (SOC
+    should know), just MEDIUM severity."""
+    _, node, run = _run_spray_with_hit("unprivileged")
+    assert run.hits
+    assert node.pwned is False
+    entry = node.spray_hit_users[0]
+    assert entry["authority_level"] == "unprivileged"
+    assert entry["profiles"] == []
+    assert entry["roles"] == []
+
+
+def test_hit_authority_probe_failure_falls_back_to_probe_failed():
+    """When the probe raises, the hit still lands with
+    authority_level='probe_failed' + a note.  The hit is not lost
+    just because BAPI_USER_GET_DETAIL blew up."""
+    state = SAPMAPState()
+    n = _make_target_node("NPL", clients=["001"])
+    state.nodes["NPL"] = n
+    fake = _FakeTryLogin(hits=[("JORIS", "secret", "001")])
+    cfg = pw.SprayConfig(
+        dry_run=False, accept_lockout_risk=True, cap_per_user=1,
+        manual_wordlist=[("JORIS", "secret")])
+
+    def _raising_probe(node, client, user, password):
+        raise RuntimeError("S_RFC denied BAPI_USER_GET_DETAIL")
+
+    run = pw.spray_landscape(
+        state, cfg,
+        try_login_fn=fake,
+        hit_authority_probe_fn=_raising_probe,
+        loot_dir_fn=lambda _: "")
+    assert run.hits, "hit must still land even if probe raised"
+    assert n.pwned is False
+    entry = n.spray_hit_users[0]
+    assert entry["authority_level"] == "probe_failed"
+    assert "S_RFC denied" in entry.get("note", "")
+
+
+def test_spray_hit_users_round_trips_through_sapmap_json():
+    """node.spray_hit_users must be included in to_dict() and
+    restored by from_dict() so the GUI's rim-colour logic still
+    renders tiers after a .sapmap reload."""
+    _, node, _ = _run_spray_with_hit(
+        "privileged", profiles=["Z_ADMIN"], roles=["Z_ROLE"])
+    d = node.to_dict()
+    assert "spray_hit_users" in d
+    assert isinstance(d["spray_hit_users"], list)
+    assert d["spray_hit_users"][0]["authority_level"] == "privileged"
+
+    # Round-trip via JSON (not just the dict) to catch any sneaky
+    # non-JSON-serialisable values the engine might smuggle in.
+    serialised = json.dumps(d)
+    restored = SAPNode.from_dict(json.loads(serialised))
+    assert len(restored.spray_hit_users) == 1
+    assert (restored.spray_hit_users[0]["authority_level"]
+            == "privileged")
+    assert restored.spray_hit_users[0]["profiles"] == ["Z_ADMIN"]
+
+
+def test_sap_all_aliases_cover_known_variants():
+    """The _SAP_ALL_ALIASES set must include every ABAP alias the
+    kernel resolves to SAP_ALL.  Missing one here means a probe
+    classifies an SAP_ALL user as merely 'privileged'."""
+    assert "SAP_ALL" in pw._SAP_ALL_ALIASES
+    assert "ALL_AUTHORIZATIONS_PROF" in pw._SAP_ALL_ALIASES
+    assert "S_A.SYSTEM" in pw._SAP_ALL_ALIASES
+
+
+def test_default_hit_authority_probe_handles_missing_pyrfc():
+    """Without pyrfc / the SDK + no injected probe, the default
+    probe must return probe_failed cleanly rather than crash the
+    spray.  Smoke: build minimal args + call the private function
+    with a target the SDK can't reach."""
+    n = _make_target_node("NPL", clients=["001"])
+    result = pw._default_hit_authority_probe(
+        n, "001", "DDIC", "secret")
+    assert isinstance(result, dict)
+    assert result.get("authority_level") == "probe_failed"
+    assert "note" in result

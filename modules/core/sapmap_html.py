@@ -36,12 +36,6 @@ html, body { height: 100%; overflow: hidden; }
    Class is toggled on <body> by initMode() after polling /api/mode.
    Backend still enforces via a 403 hook, this is the UX layer. */
 body.read-only .write-op { display: none !important; }
-
-/* Password-spray armed strip (issue #69, PR3).  PR2's initMode flips
-   body.pwspray-armed at page load from /api/mode's pwspray_armed
-   field; the strip only appears when the flag is on, and
-   independently of the Tier 3 evasion strip. */
-body.pwspray-armed #pwspray-armed-bar { display: flex; }
 body {
   font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
   background: #0d1117; color: #e6edf3; font-size: 13px;
@@ -920,7 +914,7 @@ body {
       <div class="dd-header">Landscape-wide</div>
       <div class="dd-item" onclick="scanAllVulns()" style="color:#f0883e">&#128270; Scan for All Vulnerabilities</div>
       <div class="dd-item write-op" onclick="showAutoPwnModal()" style="color:#f85149;font-weight:bold">&#9889; AutoPwn</div>
-      <div class="dd-item write-op" onclick="showPwsprayModal()" style="color:#ffa657" title="Spray harvested credentials (issue #69) across every ABAP system on the landscape.  Pool is the union of node credentials + SecStore + DBCON + BTP destinations + SCC admin + operator wordlist.  Requires --allow-pwspray.  WARNING: hits USR02 bad-logon counter — may lock accounts.">&#128299; Spray Harvested Credentials&hellip;</div>
+      <div class="dd-item write-op" onclick="showPwsprayModal()" style="color:#ffa657" title="Spray harvested credentials (issue #69) across every ABAP system on the landscape.  Pool is the union of node credentials + SecStore + DBCON + BTP destinations + SCC admin + operator wordlist.  WARNING: hits USR02 bad-logon counter — may lock accounts.">&#128299; Spray Harvested Credentials&hellip;</div>
       <div class="dd-item write-op" onclick="propagateAll()">&#128640; Auto-Propagate All</div>
       <div class="dd-item" onclick="testAllRFCs()">&#129514; Test All RFC Destinations</div>
       <div class="dd-item write-op" onclick="cleanupAll()">&#129529; Cleanup All Users</div>
@@ -1026,14 +1020,6 @@ body {
 <div id="evasion-armed-bar" style="display:none;align-items:center;gap:8px;background:linear-gradient(90deg,#3a0808 0%,#1a0e0e 100%);border-bottom:2px solid #f85149;padding:6px 16px;font-size:13px;font-weight:600;color:#ff9b9b;text-shadow:0 0 6px #f8514980" title="Tier 3 active-evasion techniques are armed for this session.  SAL filter narrow, kernel-param dynamic-set, STAD/DBTABLOG suppression, NWA log-config flip etc. will RUN when invoked.  Toggle off in Settings to re-arm gate.">
   <span style="font-weight:700;color:#f85149;text-transform:uppercase;font-size:11px;letter-spacing:1px;padding:2px 8px;border:1px solid #f8514980;border-radius:3px;background:#f8514915">⚡ Tier 3 Armed</span>
   <span id="evasion-armed-text">Active-evasion techniques unlocked for this session.  Every Tier 3 entry point snapshots a baseline and restores on exit.</span>
-</div>
-<!-- Password-spray armed strip (issue #69).  Toggled by CSS off
-     body.pwspray-armed which PR2's initMode flips at page load from
-     /api/mode's pwspray_armed field.  Amber palette to distinguish
-     from the red Tier 3 bar; both strips can be visible at once. -->
-<div id="pwspray-armed-bar" style="display:none;align-items:center;gap:8px;background:linear-gradient(90deg,#3a2808 0%,#1a140e 100%);border-bottom:2px solid #ffa657;padding:6px 16px;font-size:13px;font-weight:600;color:#ffd4a8;text-shadow:0 0 6px #ffa65780" title="Password spraying is armed for this session.  The engine still enforces every lockout invariant (per-user cap, SAP*/DDIC skip list, landscape-wide locked-user cache, cross-target circuit breaker, pw_sha256_prefix audit JSONL); this flag is the operator's acknowledgement that noisy DIAG logon attempts are allowed on in-scope targets.">
-  <span style="font-weight:700;color:#ffa657;text-transform:uppercase;font-size:11px;letter-spacing:1px;padding:2px 8px;border:1px solid #ffa65780;border-radius:3px;background:#ffa65715">&#128299; Pw-Spray Armed</span>
-  <span>Password-spraying unlocked for this session.  Risk-tier is lockout, not performance — SAP*/DDIC skipped, cap &le; 2, landscape-wide lock cache active.</span>
 </div>
 
 <!-- Critical-finding banner (rendered by renderFindings()) -->
@@ -1265,7 +1251,6 @@ body {
       <div class="ctx-item" data-action="enum_clients">&#128202; Enumerate Clients</div>
       <div class="ctx-item write-op" data-action="client_roles">&#128202; Retrieve Client Roles</div>
       <div class="ctx-item write-op" data-action="default_creds">&#9888; Check Default Accounts</div>
-      <div class="ctx-item write-op" data-action="password_spray" title="Spray harvested credentials against this node's enumerated clients (issue #69).  Pool is the union of node credentials + SecStore + DBCON + BTP destinations + SCC admin + operator wordlist.  Short-circuits on first hit per (client, user).  Default is DRY-RUN; live spray requires accept_lockout_risk.  Requires --allow-pwspray; needs 32XX ABAP dispatcher.  WARNING: hits USR02 bad-logon counter — may lock accounts.">&#128299; Spray Harvested Credentials</div>
       <div class="ctx-item" data-action="check_router_info">&#128268; Check SAProuter Info Leak</div>
       <div class="ctx-item" data-action="check_ms_info_leak" title="Message Server text/dump info disclosure.  Sends HTTP GET /msgserver/text/dump?3=1 (ms/* profile parameters) and ?8=1 (kernel release + git hash) to the MS HTTP port (81NN).  When the MS ACL is at its default (unset) the response contains the ENTIRE ms/* profile — timeouts, HTTP handler config, ACL settings, log-file paths — plus precise kernel PL and Git commit hash.  Raw dumps land in loot/msinfo/ per system; the finding is HIGH.  Fix: set ms/acl_info + ms/HTTP/acl_info (SAP Notes 1421005, 2696233).">&#128268; Check MS Info Disclosure (text/dump ACL)</div>
       <div class="ctx-item" data-action="router_scan">&#128270; Scan Internally via SAProuter</div>
@@ -1275,6 +1260,7 @@ body {
   <div class="ctx-group write-op">
     <div class="ctx-item">&#9876; Exploitation</div>
     <div class="ctx-sub">
+      <div class="write-op ctx-item" data-action="password_spray" title="Spray harvested credentials against this node's enumerated clients (issue #69).  Pool is the union of node credentials + SecStore + DBCON + BTP destinations + SCC admin + operator wordlist.  Short-circuits on first hit per (client, user).  Default is DRY-RUN; live spray requires accept_lockout_risk.  Needs a 32XX ABAP dispatcher.  WARNING: hits USR02 bad-logon counter — may lock accounts.">&#128299; Spray Harvested Credentials</div>
       <div class="ctx-item" data-action="lpe">&#128274; ABAP Local Privilege Escalation</div>
       <div class="ctx-item" data-action="exploit_linux_lpe">&#9889; Escalate to Root (pick: Copy Fail / pedit-COW / Dirty Frag)</div>
       <div class="ctx-item" data-action="exploit_windows_lpe">&#9889; Escalate to SYSTEM (auto: EfsPotato / GodPotato / MiniPlasma)</div>
@@ -1457,7 +1443,7 @@ body {
   <div class="ctx-item" data-action="map_add_system">&#10133; Add System Manually</div>
   <div class="ctx-sep"></div>
   <div class="ctx-item write-op" data-action="map_autopwn" style="color:#f85149;font-weight:bold">&#9889; AutoPwn</div>
-  <div class="ctx-item write-op" data-action="map_password_spray" style="color:#ffa657" title="Spray harvested credentials across every ABAP system on the landscape (issue #69).  Requires --allow-pwspray.  WARNING: hits USR02 bad-logon counter — may lock accounts.">&#128299; Spray Harvested Credentials&hellip;</div>
+  <div class="ctx-item write-op" data-action="map_password_spray" style="color:#ffa657" title="Spray harvested credentials across every ABAP system on the landscape (issue #69).  WARNING: hits USR02 bad-logon counter — may lock accounts.">&#128299; Spray Harvested Credentials&hellip;</div>
   <div class="ctx-item write-op" data-action="map_propagate_all">&#128640; Auto-Propagate All</div>
   <div class="ctx-item write-op" data-action="map_cleanup_all">&#129529; Cleanup All Users</div>
   <div class="ctx-item" data-action="map_scan_all_vulns" style="color:#f0883e">&#128270; Scan for All Vulnerabilities</div>
@@ -2768,11 +2754,9 @@ body {
 
     <!-- Password-spray AutoPwn integration (issue #69, PR5).  Yellow-
          warn section so the operator can't miss that this phase hits
-         USR02's bad-logon counter.  Requires --allow-pwspray at
-         startup; without it the backend silently coerces
-         include_password_spray=False and the AutoPwn run proceeds
-         minus the spray phase.  Grey this entire block when the
-         frontend knows the kernel is unarmed. -->
+         USR02's bad-logon counter.  Opt-in only (toggle default off);
+         the engine still enforces per-user cap + landscape-wide
+         locked-user cache + cross-target circuit breaker regardless. -->
     <div id="apwn-pwspray-group" style="margin-top:10px;padding:10px;background:#1a1208;border:1px solid #5a4a20;border-radius:6px">
       <div style="font-size:11px;color:#d29922;margin-bottom:6px;font-weight:600">
         &#128299; Password spraying &mdash; opt-in, lockout risk
@@ -2796,9 +2780,6 @@ body {
         <input type="checkbox" id="apwn-pwspray-purple">
         &#128302; Purple mode <span style="color:#8b949e">(baseline + readback + blue-team report)</span>
       </label>
-      <div id="apwn-pwspray-unarmed-hint" style="display:none;margin-top:6px;font-size:10px;color:#f85149">
-        Kernel is unarmed &mdash; restart SAPMAP with <code>--allow-pwspray</code> to enable the spray phase.  Toggles above are forced OFF regardless.
-      </div>
     </div>
 
     <div class="form-row" style="margin-top:12px">
@@ -3189,8 +3170,15 @@ body {
       <button class="btn" id="pws-tab-matrix" onclick="pwsprayShowTab('matrix')" style="border-bottom:2px solid #ffa657">Hit Matrix</button>
       <button class="btn" id="pws-tab-defender" onclick="pwsprayShowTab('defender')">Defender View</button>
     </div>
-    <div id="pws-tab-body-matrix"></div>
-    <div id="pws-tab-body-defender" style="display:none"></div>
+    <!-- WKWebView (pywebview on macOS) defaults every element to
+         -webkit-user-select:none unless explicitly re-enabled; the
+         rest of the SAPMAP GUI follows the same explicit-opt-in
+         pattern (e.g. .console-body, .detail-panel).  Operators
+         need to copy user/password-sha / SIEM hints / timestamps
+         out of these tables into a report (operator feedback
+         2026-10-05). -->
+    <div id="pws-tab-body-matrix" style="user-select:text;-webkit-user-select:text;cursor:text"></div>
+    <div id="pws-tab-body-defender" style="display:none;user-select:text;-webkit-user-select:text;cursor:text"></div>
     <div class="form-actions" style="margin-top:12px">
       <button class="btn" onclick="closeModal('pwspray-results-modal')">Close</button>
     </div>
@@ -4762,6 +4750,33 @@ function updateMap() {
     else if (Object.keys(n.clients || {}).length > 0) fill = '#4a3a1a';
 
     if (n.pwned || n.has_critical_finding || n.gw_vulnerable || n.ms_vulnerable || n.cve_2025_31324_vulnerable || n.cve_2020_6287_vulnerable || n.cve_2022_22536_vulnerable) { borderColor = '#8b0000'; borderWidth = 6; }
+    // Password-spray hit without SAP_ALL (issue #69, PR5-de-gate).
+    // The authority probe tiers each hit: sap_all upgrades
+    // node.pwned=True above (red), privileged shows orange rim,
+    // unprivileged + probe_failed show yellow rim.  Operator sees
+    // at a glance "logon works but needs escalation" vs "fully
+    // pwned".
+    else if (Array.isArray(n.spray_hit_users)
+             && n.spray_hit_users.length > 0) {
+      // Pick the highest tier observed across all hits on this node.
+      let best = 'probe_failed';
+      const rank = {sap_all: 3, privileged: 2,
+                    unprivileged: 1, probe_failed: 1};
+      for (const h of n.spray_hit_users) {
+        const t = h.authority_level || 'probe_failed';
+        if ((rank[t] || 0) > (rank[best] || 0)) best = t;
+      }
+      if (best === 'sap_all') {
+        // Belt-and-braces: if a sap_all hit landed but node.pwned
+        // got stale (hand-edited state / older-version replay),
+        // still rim red so the operator doesn't miss it.
+        borderColor = '#8b0000'; borderWidth = 6;
+      } else if (best === 'privileged') {
+        borderColor = '#f0883e'; borderWidth = 5;  // orange
+      } else {
+        borderColor = '#d4a72c'; borderWidth = 4;  // yellow
+      }
+    }
     // cert_auth_trusted = kernel-proxied cert-auth reached this
     // target with a non-2xx response (TLS handshake succeeded,
     // endpoint denied).  Distinguishes "our cert is trusted at the
@@ -6207,14 +6222,10 @@ function showCtxMenu(e, sid) {
 
   // Password-spraying (issue #69) — the engine targets the 32XX
   // DIAG dispatcher directly, so it needs that port but NOT a
-  // pre-verified credential (that's what the spray is for).  Arm
-  // bit is set from /api/mode's pwspray_armed → initMode toggles
-  // body.pwspray-armed; keep the readback here so the rules dict
-  // closes over the arm state captured when the menu was opened.
+  // pre-verified credential (that's what the spray is for).
   const hasDispPort = n && (n.instances || []).some(i =>
     Object.entries(i.ports || {}).some(
       ([p,s]) => s === 'dispatcher' || (p >= 3200 && p <= 3299)));
-  const pwsprayArmed = document.body.classList.contains('pwspray-armed');
 
   // Enable/disable rules per action
   const rules = {
@@ -6527,7 +6538,7 @@ function showCtxMenu(e, sid) {
     'set_instance_nr':  true,                       // always available
     'enum_clients':     true,                       // always (uses DIAG, no creds needed)
     'default_creds':    true,                       // always (uses DIAG, no creds needed)
-    'password_spray':   pwsprayArmed && hasDispPort, // #69 — needs the arm flag + a DIAG dispatcher
+    'password_spray':   hasDispPort,                 // #69 — needs a DIAG dispatcher; warning is in the ctx confirm
     'check_router_info': true,                     // always (direct TCP, no creds)
     'check_ms_info_leak': !isSaprouter,             // MS HTTP dump probe; SAProuters have no MS
     'router_scan':      true,                       // always (probes via SAProuter, no creds)
@@ -6540,11 +6551,9 @@ function showCtxMenu(e, sid) {
   const hints = {
     'rfc_system_info':  'No gateway port detected',
     'check_gw':         'No gateway port detected',
-    'password_spray':   (!pwsprayArmed
-        ? 'Password spray not armed — restart SAPMAP with --allow-pwspray (see disclaimer banner).  Lockout invariants still protect the landscape once armed; the flag is the operator\'s acknowledgement that noisy DIAG logon attempts are allowed on in-scope targets.'
-        : !hasDispPort
-            ? 'No 32XX ABAP dispatcher reachable — DIAG spray has no listener to hit.'
-            : 'Not available'),
+    'password_spray':   (!hasDispPort
+        ? 'No 32XX ABAP dispatcher reachable — DIAG spray has no listener to hit.'
+        : 'Not available'),
     'betrusted':             (msSecureComms
         ? 'MS port requires TLS/SystemPKI (system/secure_communication = ON) — betrusted attack CLOSED at the wire layer.  SAPMAP has no SystemPKI client certificate signed by this landscape\'s CA to present during the TLS handshake.'
         : 'Run Check MS Betrusted first to find the MS port'),
@@ -9421,14 +9430,13 @@ async function ctxAction(action) {
         api('POST', `node/${sid}/check_default_creds`);
       break;
     case 'password_spray':
-      // Default to DRY-RUN so a confirm miss cannot burn the lockout
-      // budget; the operator must explicitly tick accept_lockout_risk
-      // in a follow-up body (PR3 ships the full config modal — for
-      // PR2 the ctx-menu entry fires the dry-run preview).
-      if (confirm('⚠️ WARNING: Password spray hits USR02 bad-logon counter and may LOCK accounts.\n\nSprays harvested credentials (SecStore + DBCON + BTP + SCC + operator wordlist) against ' + sid + '\'s enumerated clients via DIAG.\n\nThis ctx-menu entry starts a DRY-RUN (no sockets opened).  Use the Password Spray modal (PR3) for live spray.\n\nProceed?')) {
-        api('POST', `node/${sid}/password_spray`,
-            { dry_run: true, cap_per_user: 1 });
-      }
+      // Open the config modal pre-scoped to this node's SID.  The
+      // operator picks dry-run vs live, cap, purple mode, wordlist
+      // etc. there — same flow as the top-nav Actions entry, just
+      // with the single-scope radio seeded (operator feedback
+      // 2026-10-05: a confirm→dry-run short-cut here was redundant
+      // and bypassed the useful knobs).
+      showPwsprayModal({ single_sid: sid });
       break;
     case 'set_saprouter': showSaprouterModal(sid); break;
     case 'harvest_scc': {
@@ -10506,6 +10514,30 @@ function showDetails(sid, opts) {
       <div class="detail-row"><span class="detail-key">SAP Release</span><span class="detail-val">${escHtml(n.sap_release)}</span></div>
       <div class="detail-row"><span class="detail-key">Production</span><span class="detail-val">${n.is_production ? '<span style="color:#f85149">YES</span>' : 'No'}</span></div>
       <div class="detail-row"><span class="detail-key">Pwned</span><span class="detail-val">${n.pwned ? '<span style="color:#f0883e">&#9889; YES</span>' : 'No'}</span></div>
+      ${(() => {
+        // Password-spray hits (issue #69, PR5-de-gate).  Group by
+        // authority tier so the operator sees at a glance whether
+        // escalation is still needed.
+        const hits = (n.spray_hit_users || []);
+        if (!hits.length) return '';
+        const tiers = {sap_all: [], privileged: [],
+                       unprivileged: [], probe_failed: []};
+        for (const h of hits) {
+          const t = h.authority_level || 'probe_failed';
+          (tiers[t] || tiers.probe_failed).push(h);
+        }
+        const seg = [];
+        if (tiers.sap_all.length)
+          seg.push(`<span style="color:#f85149">&#9889; SAP_ALL (${tiers.sap_all.length})</span>`);
+        if (tiers.privileged.length)
+          seg.push(`<span style="color:#f0883e">privileged (${tiers.privileged.length})</span>`);
+        if (tiers.unprivileged.length)
+          seg.push(`<span style="color:#d4a72c">unprivileged (${tiers.unprivileged.length})</span>`);
+        if (tiers.probe_failed.length)
+          seg.push(`<span style="color:#8b949e">probe failed (${tiers.probe_failed.length})</span>`);
+        const users = hits.map(h => `${escHtml(h.user || '?')}/${escHtml(h.client || '?')}`).join(', ');
+        return `<div class="detail-row"><span class="detail-key">Spray hits</span><span class="detail-val">${seg.join(' &middot; ')}<br><span style="font-size:11px;color:#8b949e">${escHtml(users)}</span></span></div>`;
+      })()}
       <div class="detail-row"><span class="detail-key">GW Vulnerable</span><span class="detail-val">${n.gw_vulnerable ? `<span style="color:#f85149">YES — SAPXPG</span>${!n.pwned ? `<span class="detail-action-btn" onclick="selectedNodeSid='${escHtml(n.sid)}';ctxAction('create_user_gw')">Exploit →</span>` : ''}` : 'No'}</span></div>
       <div class="detail-row"><span class="detail-key">MS Vulnerable</span><span class="detail-val">${
         n.ms_vulnerable ? `<span style="color:#f85149">YES — betrusted (port ${n.ms_port})</span>` + (!n.pwned ? `<span class="detail-action-btn" onclick="selectedNodeSid='${escHtml(n.sid)}';ctxAction('create_user_betrusted')">Exploit →</span>` : '')
@@ -17452,20 +17484,6 @@ let _apwnPollTimer = null;
 function showAutoPwnModal() {
   const nodeCount = Object.keys(mapState.nodes || {}).length;
   if (nodeCount < 1) { alert('No systems on the map.'); return; }
-  // Password-spray group (issue #69, PR5) is kernel-arm-gated.
-  // When body.pwspray-armed is OFF the four toggles are forced
-  // disabled + unchecked and the hint line appears.  The backend
-  // ALSO coerces to False so a tampered browser can't bypass.
-  const pwsprayArmed = document.body.classList.contains('pwspray-armed');
-  ['apwn-pwspray', 'apwn-pwspray-cap',
-   'apwn-pwspray-abort-on-lockout', 'apwn-pwspray-purple'].forEach(id => {
-    const el = document.getElementById(id);
-    if (!el) return;
-    el.disabled = !pwsprayArmed;
-    if (!pwsprayArmed && (el.type === 'checkbox')) el.checked = false;
-  });
-  const hint = document.getElementById('apwn-pwspray-unarmed-hint');
-  if (hint) hint.style.display = pwsprayArmed ? 'none' : '';
   document.getElementById('autopwn-config-modal').classList.add('visible');
 }
 
@@ -17648,14 +17666,17 @@ function closeAutoPwnPanel() {
 let _pwsprayPollTimer = null;
 let _pwsprayLastRenderedRun = null;
 
-function showPwsprayModal() {
-  if (!document.body.classList.contains('pwspray-armed')) {
-    alert('Password spray is not armed.\n\nRestart SAPMAP with --allow-pwspray to enable it.  The engine still enforces every lockout invariant once armed — this flag is the operator\'s acknowledgement that noisy DIAG logon attempts are allowed on in-scope targets.');
-    return;
-  }
-  // Reset modal state
-  document.querySelector('input[name="pws-scope"][value="landscape"]').checked = true;
-  document.getElementById('pws-scope-sid').value = '';
+function showPwsprayModal(opts) {
+  // Reset modal state.  Optional `opts.single_sid` pre-seeds the
+  // single-system scope so the per-node ctx-menu entry (which knows
+  // the sid the operator right-clicked on) can open the modal pre-
+  // scoped — rather than firing a bare dry-run POST behind a
+  // confirm (operator feedback 2026-10-05).
+  opts = opts || {};
+  const seedSid = (opts.single_sid || '').trim();
+  const scopeVal = seedSid ? 'single' : 'landscape';
+  document.querySelector('input[name="pws-scope"][value="' + scopeVal + '"]').checked = true;
+  document.getElementById('pws-scope-sid').value = seedSid;
   document.getElementById('pws-cap').value = 1;
   document.getElementById('pws-cap-val').textContent = '1';
   document.getElementById('pws-dry-run').checked = true;
@@ -17979,7 +18000,10 @@ async function showPwsprayResults() {
   const defBody = document.getElementById('pws-tab-body-defender');
   if (!latest) {
     body.innerHTML = '<div style="color:#8b949e;font-size:12px">No runs yet.  Launch a spray from the Actions dropdown or the map ctx-menu.</div>';
-    defBody.innerHTML = '';
+    // Reuse the renderer's own "No run selected." placeholder rather
+    // than wiping the pane — a totally blank Defender tab reads as
+    // broken, not as "waiting for data" (operator feedback 2026-10-05).
+    defBody.innerHTML = _renderDefenderView(null);
   } else {
     body.innerHTML = _renderHitMatrix(latest);
     // Eager populate the Defender tab so a mid-run click doesn't
@@ -19745,13 +19769,6 @@ async function initMode() {
       LOOT_TOKEN = m.loot_token;
       const item = document.getElementById('dd-browse-loot');
       if (item) item.style.display = '';
-    }
-    if (m && m.pwspray_armed) {
-      // Password-spraying armed (issue #69) — showCtxMenu reads this
-      // class to enable the 'Spray Harvested Credentials' per-node
-      // entry.  Never polled again (sapmap_mode globals are set once
-      // at startup and cannot flip at runtime).
-      document.body.classList.add('pwspray-armed');
     }
   } catch (e) {
     // /api/mode is new — if the server doesn't have it yet, silently
