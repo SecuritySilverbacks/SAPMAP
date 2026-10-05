@@ -627,7 +627,7 @@ class SAPNode:
     # kloris/SAPMAP#41 — True when the MS internal port speaks TLS
     # (system/secure_communication = ON).  Detected via a TLS
     # ClientHello probe in sap_ms_betrusted.probe_ms_tls_required.
-    # When True, both 10KBLAZE (CVE-2020-6207) and CVE-2026-58240
+    # When True, both 10KBLAZE betrusted (SAP Note 2890213) and CVE-2026-58240
     # ASCS_GW rogue registration are BLOCKED at the wire layer —
     # SAPMAP does not speak SNC/SystemPKI yet.
     ms_secure_comms_required: bool = False

@@ -1711,7 +1711,7 @@ def _derive_landscape_recommendations(state: SAPMAPState) -> list:
             "body": (
                 "Every listed system accepted unauthenticated SAPXPG "
                 "registrations, allowing arbitrary OS command execution "
-                "(10KBLAZE / CVE-2019-0344 family).  Edit the gateway "
+                "(SAP Note 1408081, CVE-2019-0330).  Edit the gateway "
                 "ACL files (gw/reg_info, gw/sec_info) to enforce "
                 "explicit allow-lists for both REGISTERED and started "
                 "external programs, set gw/sim_mode = 0 and "
@@ -1722,7 +1722,7 @@ def _derive_landscape_recommendations(state: SAPMAPState) -> list:
             "refs": "SAP Note 1408081, 1444282, 1425765",
         })
 
-    # 2. Message-server ACL — CVE-2020-6207 / 10KBLAZE betrusted prereq
+    # 2. Message-server ACL — SAP Note 2890213 / 10KBLAZE betrusted prereq
     ms_sids = sorted(n.sid for n in nodes
                        if getattr(n, "ms_vulnerable", False))
     if ms_sids:
