@@ -2622,27 +2622,6 @@ def create_app(api: SAPMAPApi) -> Bottle:
         "/api/scc/<host>/analyse_pp",
     })
 
-    # Password-spraying arm-gate (issue #69, PR3).  Centralises the
-    # per-closure ``_pwspray_armed_or_refuse`` PR2 shipped so a new
-    # pwspray route added in PR4/PR5 inherits the 403 without having
-    # to remember a per-handler one-liner (addresses PR2 adversarial
-    # review MEDIUM "arm gate is per-route closure, forgettable on
-    # new routes").  Every destructive OR enumeration-revealing
-    # pwspray endpoint goes here; the per-node /password_spray and
-    # the pool-wordlist upload are ALSO in WRITE_ROUTES so a
-    # --read-only session sees that refusal first (lower-friction
-    # error for the operator).
-    PWSPRAY_ROUTES = frozenset({
-        "/api/node/<sid>/password_spray",
-        "/api/actions/password_spray",
-        "/api/actions/password_spray/preview",
-        "/api/actions/password_spray/pool",
-        "/api/actions/password_spray/pool/wordlist",
-        "/api/actions/password_spray/status",
-        "/api/actions/password_spray/runs",
-        "/api/actions/password_spray/reset_history",
-    })
-
     # Bottle's 'before_request' hook fires BEFORE the router picks a
     # route, so request.route is not populated yet (touching it raises
     # RuntimeError).  Instead, pre-compile each write rule to a regex
@@ -2653,19 +2632,9 @@ def create_app(api: SAPMAPApi) -> Bottle:
         _re.compile("^" + _re.sub(r"<[^>]+>", "[^/]+", rule) + "$")
         for rule in WRITE_ROUTES
     )
-    _PWSPRAY_PATH_PATTERNS = tuple(
-        _re.compile("^" + _re.sub(r"<[^>]+>", "[^/]+", rule) + "$")
-        for rule in PWSPRAY_ROUTES
-    )
 
     def _matched_write_rule(path: str) -> str:
         for rule, pat in zip(WRITE_ROUTES, _WRITE_PATH_PATTERNS):
-            if pat.match(path):
-                return rule
-        return ""
-
-    def _matched_pwspray_rule(path: str) -> str:
-        for rule, pat in zip(PWSPRAY_ROUTES, _PWSPRAY_PATH_PATTERNS):
             if pat.match(path):
                 return rule
         return ""
@@ -2688,37 +2657,6 @@ def create_app(api: SAPMAPApi) -> Bottle:
                     "Restart SAPMAP without --read-only to enable "
                     "destructive actions."
                 ),
-                "route": rule,
-            }),
-            status=403,
-            headers={"Content-Type": "application/json"},
-        )
-
-    @app.hook("before_request")
-    def _pwspray_gate():
-        """Refuse every PWSPRAY_ROUTES entry with 403 when the operator
-        did not pass --allow-pwspray.  Fires AFTER _readonly_gate so a
-        route that is both WRITE and PWSPRAY under --read-only returns
-        the read_only_mode error first (lower-friction operator UX).
-        """
-        from sapmap_mode import is_pwspray_armed
-        if is_pwspray_armed():
-            return
-        rule = _matched_pwspray_rule(request.path)
-        if not rule:
-            return
-        from bottle import HTTPResponse
-        raise HTTPResponse(
-            body=json.dumps({
-                "error": "pwspray_not_armed",
-                "message": (
-                    "Password spray is disabled.  Restart SAPMAP with "
-                    "--allow-pwspray to arm it — the engine still "
-                    "enforces the per-user cap, landscape-wide locked-"
-                    "user cache and cross-target circuit breaker "
-                    "regardless, this flag is the operator's "
-                    "acknowledgement that noisy DIAG logon attempts "
-                    "are allowed on in-scope targets."),
                 "route": rule,
             }),
             status=403,
@@ -2878,16 +2816,10 @@ def create_app(api: SAPMAPApi) -> Bottle:
             is_read_only as _ro,
             is_loot_browser_enabled as _lb,
             loot_browser_token as _lb_tok,
-            is_pwspray_armed as _pws,
         )
         payload = {
             "read_only": _ro(),
             "loot_browser": _lb(),
-            # Password-spraying arm bit (issue #69).  initMode() flips
-            # body.pwspray-armed on this flag so the per-node ctx-menu
-            # entry can enable itself.  Backend still gates every
-            # pwspray route independently (403 pwspray_not_armed).
-            "pwspray_armed": _pws(),
         }
         if _lb():
             # The GUI is served from the same origin, so handing the
@@ -16728,17 +16660,14 @@ def create_app(api: SAPMAPApi) -> Bottle:
 
     # ------------------------------------------------------------------
     # Password spraying (issue #69) — per-node + landscape pool routes.
-    # Arm gate: --allow-pwspray at startup (sapmap_mode.is_pwspray_armed).
-    # PR3 consolidated the per-route arm check into the central
-    # _pwspray_gate before_request hook above (parallel to
-    # _readonly_gate) so new routes added later inherit the 403
-    # without needing per-handler boilerplate — adding a new route
-    # is a one-line edit to PWSPRAY_ROUTES.
-    # The engine still ships every lockout-safety invariant (per-user
+    # No kernel arm gate: the operator safety story lives in the UI
+    # confirm dialogs + the engine's own lockout invariants (per-user
     # cap, SAP*/DDIC skip list, landscape-wide locked-user cache,
     # cross-target circuit breaker, pw_sha256_prefix audit JSONL)
-    # regardless; the arm flag is only the operator's acknowledgement
-    # that noisy logon attempts are allowed on in-scope targets.
+    # + the dry-run default + the accept_lockout_risk /
+    # accept_production_risk strict-bool second factors on the live
+    # path.  --read-only still refuses the mutating routes via the
+    # existing WRITE_ROUTES hook.
     # ------------------------------------------------------------------
 
     @app.route("/api/node/<sid>/password_spray", method="POST")
@@ -16935,8 +16864,7 @@ def create_app(api: SAPMAPApi) -> Bottle:
         the existing session store; ``replace`` wipes it first.  The
         wordlist lives on the API controller as a list of (user, pw)
         tuples — process-memory only, NEVER serialised to .sapmap.
-        Returns a summary (no cleartext echoed back).  Arm-gated by
-        the central _pwspray_gate before_request hook."""
+        Returns a summary (no cleartext echoed back)."""
         response.content_type = "application/json"
         body = request.json or {}
         raw_text = (body.get("raw_text") or "").strip()
@@ -16971,10 +16899,7 @@ def create_app(api: SAPMAPApi) -> Bottle:
         and whether the engine would skip wd_admin / scc / dbcon by
         default.  NEVER echoes passwords; usernames are returned only
         for the operator wordlist (which is already in the operator's
-        hand) and omitted for every other source.  Arm-gated by the
-        central _pwspray_gate before_request hook — unarmed sessions
-        see a 403 with the pwspray_not_armed error key instead of a
-        reconnaissance-friendly source-breakdown dump."""
+        hand) and omitted for every other source."""
         response.content_type = "application/json"
         wordlist = list(api.pwspray_wordlist or [])
         try:
@@ -16993,10 +16918,8 @@ def create_app(api: SAPMAPApi) -> Bottle:
             if getattr(cand, "verified_somewhere", False):
                 verified_count += 1
 
-        from sapmap_mode import is_pwspray_armed
         return json.dumps({
             "ok": True,
-            "armed": is_pwspray_armed(),
             "total_candidates": len(pool),
             "verified_somewhere": verified_count,
             "source_breakdown": source_counts,
@@ -17264,32 +17187,6 @@ def create_app(api: SAPMAPApi) -> Bottle:
             return json.dumps({"error": "No systems on the map"})
 
         data = request.json or {}
-        # Password-spray AutoPwn integration (issue #69, PR5).
-        # Silently coerce include_password_spray to False when the
-        # kernel arm bit is off — AutoPwn keeps running without the
-        # spray phase instead of 403ing the whole run.  phase3b
-        # itself re-checks the arm bit as defence-in-depth.
-        from sapmap_mode import is_pwspray_armed as _is_pw_armed
-        _pw_armed = _is_pw_armed()
-        _wanted_pw = bool(data.get("include_password_spray", False))
-        _effective_pw = _wanted_pw and _pw_armed
-        if _wanted_pw and not _pw_armed:
-            print("[!] AutoPwn: include_password_spray=true but "
-                  "--allow-pwspray not passed — spray phase skipped")
-            # Also surface via emit_finding so the fallout is visible
-            # in the engagement report AND /api/findings (not just
-            # terminal stdout — PR5 adversarial review MED #3).
-            try:
-                emit_finding(
-                    "WARNING", "landscape",
-                    "AutoPwn: include_password_spray requested but "
-                    "kernel is not armed (--allow-pwspray); spray "
-                    "phase was skipped.  Restart SAPMAP with the "
-                    "flag + re-run AutoPwn to enable phase3b.",
-                    ref="autopwn.pwspray_coerced",
-                    attack_capability="creds.password_spray")
-            except Exception:
-                pass
         from sapmap_autopwn import AutoPwnConfig, autopwn_run
         cfg = AutoPwnConfig(
             max_waves=int(data.get("max_waves", 5)),
@@ -17303,7 +17200,8 @@ def create_app(api: SAPMAPApi) -> Bottle:
                 data.get("include_icmad_detection", True)),
             include_router_info_detection=bool(
                 data.get("include_router_info_detection", True)),
-            include_password_spray=_effective_pw,
+            include_password_spray=bool(
+                data.get("include_password_spray", False)),
             pwspray_cap_per_user=max(1, min(2, int(
                 data.get("pwspray_cap_per_user", 1) or 1))),
             pwspray_abort_on_lockout=bool(
@@ -17327,8 +17225,10 @@ def create_app(api: SAPMAPApi) -> Bottle:
 
     # ------------------------------------------------------------------
     # Password-spraying landscape routes (issue #69, PR3).
-    # Arm-gated by _pwspray_gate before_request hook — any new route
-    # added here must also be registered in PWSPRAY_ROUTES above.
+    # No kernel arm gate — safety is in the engine invariants + the
+    # UI confirm dialogs + the dry_run/accept_lockout_risk strict-
+    # bool pair on the live path.  --read-only still refuses the
+    # mutating routes via WRITE_ROUTES.
     # ------------------------------------------------------------------
 
     @app.route("/api/actions/password_spray/preview", method="POST")

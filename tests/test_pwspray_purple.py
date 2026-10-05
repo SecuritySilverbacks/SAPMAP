@@ -28,7 +28,6 @@ from unittest.mock import patch
 import pytest
 
 import modules  # noqa: F401
-import sapmap_mode
 from sapmap_models import (
     SAPMAPState, SAPNode, InstanceInfo, Credentials)
 import sapmap_pwspray
@@ -39,10 +38,11 @@ REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 
 @pytest.fixture(autouse=True)
 def _reset_pwspray_state():
-    sapmap_mode.set_pwspray_armed(False)
+    # De-gate (issue #69): the kernel arm flag was removed; status
+    # cache still needs resetting per-test to isolate PwSprayStatus
+    # mutations.
     sapmap_pwspray._status = sapmap_pwspray.PwSprayStatus()
     yield
-    sapmap_mode.set_pwspray_armed(False)
     sapmap_pwspray._status = sapmap_pwspray.PwSprayStatus()
 
 
