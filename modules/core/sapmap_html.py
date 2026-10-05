@@ -3058,6 +3058,20 @@ body {
         I accept the production lockout risk (required to include production)
       </label>
     </div>
+    <div style="margin-bottom:10px;padding:8px;background:#0d1117;border-left:3px solid #a371f7;border-radius:3px">
+      <label style="font-size:12px;color:#c9d1d9">
+        <input type="checkbox" id="pws-purple-mode">
+        &#128302; <strong>Purple mode</strong>: pair each attempt with its expected SAL/SM21 signal and read USR02.LOCNT before + after to compute observed deltas
+      </label>
+      <div style="font-size:11px;color:#8b949e;margin-top:4px;line-height:1.4">
+        Writes a <code>loot/spray/&lt;run_id&gt;/purple_report.{md,html}</code> blue-team
+        deliverable enumerating what the SOC's SIEM should have seen.  Uses the DIAG
+        terminal spoof <code>sapmap-spray-purple</code> so SAL Source correlation lands.
+        <strong>No cleartext</strong> &mdash; only pw_sha256_prefix.  Requires a verified RFC
+        credential on each target for USR02 reads (falls back to signal-only without deltas
+        when UCON blocks or S_TABU_DIS is missing).
+      </div>
+    </div>
 
     <div style="margin-top:14px;margin-bottom:4px;font-size:12px;color:#c9d1d9;font-weight:600">
       Operator wordlist (optional)
@@ -3101,7 +3115,11 @@ body {
       <span class="autopwn-arrow">&gt;</span>
       <div class="autopwn-phase" id="pws-ph-profile_probe"><div class="autopwn-phase-icon">&#128269;</div><div class="autopwn-phase-label">Probe</div><div class="autopwn-phase-sub" id="pws-ph-profile_probe-sub"></div></div>
       <span class="autopwn-arrow">&gt;</span>
+      <div class="autopwn-phase" id="pws-ph-baseline" style="display:none"><div class="autopwn-phase-icon">&#128302;</div><div class="autopwn-phase-label">Baseline</div><div class="autopwn-phase-sub" id="pws-ph-baseline-sub"></div></div>
+      <span class="autopwn-arrow" id="pws-arrow-after-baseline" style="display:none">&gt;</span>
       <div class="autopwn-phase" id="pws-ph-spray"><div class="autopwn-phase-icon">&#128299;</div><div class="autopwn-phase-label">Spray</div><div class="autopwn-phase-sub" id="pws-ph-spray-sub"></div></div>
+      <span class="autopwn-arrow" id="pws-arrow-before-readback" style="display:none">&gt;</span>
+      <div class="autopwn-phase" id="pws-ph-readback" style="display:none"><div class="autopwn-phase-icon">&#128247;</div><div class="autopwn-phase-label">Readback</div><div class="autopwn-phase-sub" id="pws-ph-readback-sub"></div></div>
       <span class="autopwn-arrow">&gt;</span>
       <div class="autopwn-phase" id="pws-ph-report"><div class="autopwn-phase-icon">&#128203;</div><div class="autopwn-phase-label">Report</div><div class="autopwn-phase-sub" id="pws-ph-report-sub"></div></div>
     </div>
@@ -3137,12 +3155,7 @@ body {
       <button class="btn" id="pws-tab-defender" onclick="pwsprayShowTab('defender')">Defender View</button>
     </div>
     <div id="pws-tab-body-matrix"></div>
-    <div id="pws-tab-body-defender" style="display:none;font-size:12px;color:#8b949e;line-height:1.5">
-      Defender View (purple mode) &mdash; expected SIEM signals + observed
-      USR02 counter deltas.  <em>Placeholder for PR4.</em>  Until PR4 lands
-      a run with <code>purple_mode=true</code> populates each node's
-      <code>spray_purple_signals</code> list which this tab will render.
-    </div>
+    <div id="pws-tab-body-defender" style="display:none"></div>
     <div class="form-actions" style="margin-top:12px">
       <button class="btn" onclick="closeModal('pwspray-results-modal')">Close</button>
     </div>
@@ -17591,6 +17604,7 @@ function showPwsprayModal() {
   document.getElementById('pws-accept-risk').checked = false;
   document.getElementById('pws-include-prod').checked = false;
   document.getElementById('pws-accept-prod-risk').checked = false;
+  document.getElementById('pws-purple-mode').checked = false;
   document.getElementById('pws-wordlist').value = '';
   document.getElementById('pws-preview-result').innerHTML = '';
   document.getElementById('pwspray-config-modal').classList.add('visible');
@@ -17615,6 +17629,7 @@ function _pwsprayCollectConfig() {
     cap_per_user: parseInt(document.getElementById('pws-cap').value, 10) || 1,
     dry_run: document.getElementById('pws-dry-run').checked,
     accept_lockout_risk: document.getElementById('pws-accept-risk').checked,
+    purple_mode: document.getElementById('pws-purple-mode').checked,
     wordlist_text: document.getElementById('pws-wordlist').value || '',
   };
 }
@@ -17735,6 +17750,7 @@ async function pwsprayLaunch() {
       cap_per_user: cfg.cap_per_user,
       dry_run: cfg.dry_run,
       accept_lockout_risk: cfg.accept_lockout_risk,
+      purple_mode: cfg.purple_mode,
     }),
   });
   const d = await r.json();
@@ -17756,13 +17772,26 @@ function _pwsprayShowProgressPanel(launchResult) {
   const label = document.getElementById('pws-scope-label');
   label.textContent = (launchResult.dry_run ? 'DRY-RUN' : 'LIVE')
     + ' — scope: ' + launchResult.scope
-    + ' — cap: ' + launchResult.cap_per_user;
+    + ' — cap: ' + launchResult.cap_per_user
+    + (launchResult.purple_mode ? ' — purple' : '');
   // Reset the aborted-run colour from any previous run.
-  label.style.color = '#ffa657';
+  label.style.color = launchResult.purple_mode ? '#a371f7' : '#ffa657';
   document.getElementById('pws-stop-btn').style.display = '';
   document.getElementById('pws-close-btn').style.display = 'none';
+  // Purple-only phase boxes (issue #69, PR4).  Shown when the
+  // launch config has purple_mode on; hidden otherwise so the
+  // panel stays compact for a non-purple sweep.
+  const purpleOn = !!launchResult.purple_mode;
+  const purpleDisplay = purpleOn ? 'flex' : 'none';
+  document.getElementById('pws-ph-baseline').style.display = purpleDisplay;
+  document.getElementById('pws-ph-readback').style.display = purpleDisplay;
+  document.getElementById('pws-arrow-after-baseline').style.display =
+    purpleOn ? '' : 'none';
+  document.getElementById('pws-arrow-before-readback').style.display =
+    purpleOn ? '' : 'none';
   // Reset phase classes
-  ['collect_pool', 'profile_probe', 'spray', 'report'].forEach(k => {
+  ['collect_pool', 'profile_probe', 'baseline', 'spray',
+   'readback', 'report'].forEach(k => {
     const el = document.getElementById('pws-ph-' + k);
     if (el) el.classList.remove('active', 'done');
     const sub = document.getElementById('pws-ph-' + k + '-sub');
@@ -17784,9 +17813,11 @@ async function _pwsprayPollStatus() {
     const r = await fetch('/api/actions/password_spray/status');
     const st = await r.json();
     if (st.error) throw new Error(st.error);
-    const phaseOrder = ['idle', 'collect_pool', 'profile_probe', 'spray', 'report', 'done'];
+    // phaseOrder must stay in sync with sapmap_pwspray.PHASE_ORDER —
+    // the status-shape test pins the pair as a shared contract.
+    const phaseOrder = ['idle', 'collect_pool', 'profile_probe', 'baseline', 'spray', 'readback', 'report', 'done'];
     const currentIdx = phaseOrder.indexOf(st.phase);
-    ['collect_pool', 'profile_probe', 'spray', 'report'].forEach(k => {
+    ['collect_pool', 'profile_probe', 'baseline', 'spray', 'readback', 'report'].forEach(k => {
       const el = document.getElementById('pws-ph-' + k);
       if (!el) return;
       el.classList.remove('active', 'done');
@@ -17817,9 +17848,14 @@ async function _pwsprayPollStatus() {
     if (st.finished || !st.running) {
       document.getElementById('pws-stop-btn').style.display = 'none';
       document.getElementById('pws-close-btn').style.display = '';
-      ['collect_pool', 'profile_probe', 'spray', 'report'].forEach(k => {
+      ['collect_pool', 'profile_probe', 'baseline', 'spray',
+       'readback', 'report'].forEach(k => {
         const el = document.getElementById('pws-ph-' + k);
-        if (el) { el.classList.remove('active'); el.classList.add('done'); }
+        // Skip hidden phase boxes (non-purple runs don't advance
+        // through baseline/readback).
+        if (el && el.style.display !== 'none') {
+          el.classList.remove('active'); el.classList.add('done');
+        }
       });
       // Surface the aborted reason to the operator so cascade_abort
       // / user_stop / dry_run_default_active don't look like a
@@ -17882,13 +17918,131 @@ async function showPwsprayResults() {
   const latest = runs[0];
   _pwsprayLastRenderedRun = latest;
   const body = document.getElementById('pws-tab-body-matrix');
+  const defBody = document.getElementById('pws-tab-body-defender');
   if (!latest) {
     body.innerHTML = '<div style="color:#8b949e;font-size:12px">No runs yet.  Launch a spray from the Actions dropdown or the map ctx-menu.</div>';
+    defBody.innerHTML = '';
   } else {
     body.innerHTML = _renderHitMatrix(latest);
+    // Eager populate the Defender tab so a mid-run click doesn't
+    // race the renderer; same source data (SprayRun), different lens.
+    defBody.innerHTML = _renderDefenderView(latest);
   }
   pwsprayShowTab('matrix');
   document.getElementById('pwspray-results-modal').classList.add('visible');
+}
+
+function _renderDefenderView(run) {
+  if (!run) {
+    return '<div style="color:#8b949e;font-size:12px">No run selected.</div>';
+  }
+  const purpleOn = !!(run.config_snapshot
+                      && run.config_snapshot.purple_mode);
+  if (!purpleOn) {
+    return '<div style="color:#8b949e;font-size:12px;padding:20px;line-height:1.5">'
+      + 'This run was not launched in purple mode, so no expected-SIEM-signal rows were captured.<br><br>'
+      + 'Launch a new spray from the Actions dropdown and tick <strong>&#128302; Purple mode</strong> to enable the baseline/readback USR02 phase and generate the blue-team deliverable at <code>loot/spray/' + _escapeHtml(run.run_id || '?') + '/purple_report.html</code>.'
+      + '</div>';
+  }
+  // Walk mapState.nodes to collect every spray_purple_signals row
+  // tagged with this run_id.  No new fetch — the state wire already
+  // carries these fields via /api/state.
+  const signals = [];
+  const nodes = (mapState.nodes || {});
+  Object.values(nodes).forEach(n => {
+    (n.spray_purple_signals || []).forEach(s => {
+      if (s && s.run_id === run.run_id) signals.push(s);
+    });
+  });
+  // Chronological order so the SOC can scroll alongside their SIEM.
+  signals.sort((a, b) => (a.ts || '').localeCompare(b.ts || ''));
+  const baselineOk = !!run.purple_baseline_available;
+  const baselineErr = run.purple_baseline_error || '';
+  // Only advertise the on-disk deliverable path when the writer
+  // actually succeeded — run.loot_path is set BEFORE the writer
+  // runs, so a crashed write would otherwise lie to the operator
+  // (PR4 adversarial review MED #6).
+  const deliverableOk =
+    !!(run.purple_report_generated && run.loot_path);
+  const header =
+    '<div style="font-size:12px;color:#8b949e;margin-bottom:12px;line-height:1.5">'
+    + '<strong>Run:</strong> <code>' + _escapeHtml(run.run_id || '?') + '</code>'
+    + ' &nbsp; <strong>Terminal spoof:</strong> <code>sapmap-spray-purple</code>'
+    + ' &nbsp; <strong>USR02 baseline:</strong> '
+    + (baselineOk
+        ? '<span style="color:#3fb950">available</span>'
+        : '<span style="color:#f85149">unavailable</span>'
+          + (baselineErr ? ' (' + _escapeHtml(baselineErr) + ')' : ''))
+    + '<br>'
+    + (deliverableOk
+        ? 'Blue-team deliverable: <code>' + _escapeHtml(run.loot_path) + '/purple_report.{md,html}</code>'
+        : (run.loot_path
+            ? '<em style="color:#f85149">(purple_report write failed — see run log)</em>'
+            : '<em>(dry-run — no files written)</em>'))
+    + '</div>';
+  if (!signals.length) {
+    return header + '<div style="color:#8b949e;font-size:12px;padding:20px;text-align:center">No purple-mode signal rows for this run.</div>';
+  }
+  // Group by SID for the per-system SOC query view.
+  const bySid = {};
+  signals.forEach(s => {
+    const sid = s.sid || '?';
+    if (!bySid[sid]) bySid[sid] = [];
+    bySid[sid].push(s);
+  });
+  const parts = [];
+  Object.keys(bySid).sort().forEach(sid => {
+    parts.push(
+      '<h4 style="color:#a371f7;margin-top:16px;margin-bottom:4px">'
+      + '<code>' + _escapeHtml(sid) + '</code>'
+      + ' <span style="color:#8b949e;font-size:11px;font-weight:normal">'
+      + '(' + bySid[sid].length + ' event' + (bySid[sid].length === 1 ? '' : 's') + ')</span>'
+      + '</h4>');
+    parts.push(
+      '<table style="width:100%;font-size:11px;border-collapse:collapse;white-space:nowrap">'
+      + '<thead><tr style="color:#8b949e;text-align:left">'
+      + '<th style="padding:3px 6px">TS</th>'
+      + '<th>Client</th>'
+      + '<th>User</th>'
+      + '<th>Result</th>'
+      + '<th style="white-space:nowrap">SAL 00-N</th>'
+      + '<th>Baseline</th>'
+      + '<th>Readback</th>'
+      + '<th>&Delta;</th>'
+      + '<th>SM21 hint</th>'
+      + '<th>PW hash</th>'
+      + '</tr></thead><tbody>');
+    bySid[sid].forEach(s => {
+      const delta = s.delta_locnt;
+      const deltaCell = (delta !== null && delta !== undefined && delta > 0)
+        ? '<span style="color:#f85149">+' + _escapeHtml(String(delta)) + '</span>'
+        : (delta !== null && delta !== undefined
+            ? _escapeHtml(String(delta)) : '&mdash;');
+      // The sal_will_fire grey-out from earlier PR4 drafts needed
+      // rsau/enable from the kernel audit profile, which no code
+      // populates today — removed to avoid misleading every row
+      // (PR4 adversarial review HIGH #2 / #11).  A follow-up that
+      // extends the telemetry probe can re-add it.
+      const sals = (s.sal_numbers || []).map(_escapeHtml).join(',');
+      parts.push(
+        '<tr>'
+        + '<td style="padding:3px 6px"><code>' + _escapeHtml(s.ts || '') + '</code></td>'
+        + '<td><code>' + _escapeHtml(s.client || '') + '</code></td>'
+        + '<td><code>' + _escapeHtml(s.user || '') + '</code></td>'
+        + '<td><strong>' + _escapeHtml(s.result || '') + '</strong></td>'
+        + '<td><code>' + sals + '</code></td>'
+        + '<td>' + (s.baseline_locnt !== null && s.baseline_locnt !== undefined
+                     ? _escapeHtml(String(s.baseline_locnt)) : '&mdash;') + '</td>'
+        + '<td>' + (s.readback_locnt !== null && s.readback_locnt !== undefined
+                     ? _escapeHtml(String(s.readback_locnt)) : '&mdash;') + '</td>'
+        + '<td>' + deltaCell + '</td>'
+        + '<td style="color:#8b949e">' + _escapeHtml(s.sm21_hint || '') + '</td>'
+        + '<td><code>' + _escapeHtml(s.pw_sha256_prefix || '') + '</code></td>'
+        + '</tr>');
+    });
+    parts.push('</tbody></table>');
+  });
+  return header + parts.join('');
 }
 
 function _renderHitMatrix(run) {

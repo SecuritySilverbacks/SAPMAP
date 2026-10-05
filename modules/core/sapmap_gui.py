@@ -17418,6 +17418,7 @@ def create_app(api: SAPMAPApi) -> Bottle:
             include_production = _strict_bool("include_production", False)
             accept_production_risk = _strict_bool(
                 "accept_production_risk", False)
+            purple_mode = _strict_bool("purple_mode", False)
         except ValueError as e:
             response.status = 400
             return json.dumps({
@@ -17499,6 +17500,10 @@ def create_app(api: SAPMAPApi) -> Bottle:
                 dry_run=dry_run,
                 cap_per_user=cap_per_user,
             )
+            # purple_mode flag isn't a PwSprayStatus field (status
+            # stays feature-agnostic) but the frontend keys the
+            # progress-panel phase-box visibility off the launch
+            # response's purple_mode echo below.
         except Exception:
             pass
 
@@ -17515,6 +17520,7 @@ def create_app(api: SAPMAPApi) -> Bottle:
                 dry_run=dry_run,
                 accept_lockout_risk=accept_risk,
                 cap_per_user=cap_per_user,
+                purple_mode=purple_mode,
                 manual_wordlist=[(u, p) for (u, p) in operator_wordlist],
             )
             scope_filter = {}
@@ -17579,6 +17585,12 @@ def create_app(api: SAPMAPApi) -> Bottle:
                 pass
 
         _bg("_password_spray", task_label, _run)
+        # Echo the EFFECTIVE purple_mode (dry-run suppresses purple
+        # — the engine short-circuits before baseline/readback), so
+        # the frontend progress panel hides the baseline/readback
+        # phase boxes on a dry-run.  Addresses PR4 adversarial
+        # review LOW #12.
+        effective_purple = bool(purple_mode) and not dry_run
         return json.dumps({
             "status": "started",
             "scope": "single:" + single_sid if single_sid
@@ -17586,6 +17598,7 @@ def create_app(api: SAPMAPApi) -> Bottle:
             "dry_run": dry_run,
             "cap_per_user": cap_per_user,
             "accept_lockout_risk": accept_risk,
+            "purple_mode": effective_purple,
             "wordlist_entries": len(operator_wordlist),
         })
 
