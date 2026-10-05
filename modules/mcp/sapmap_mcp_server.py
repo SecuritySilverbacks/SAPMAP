@@ -444,7 +444,7 @@ def check_vulnerability(sid: str, vuln: str) -> str:
     Args:
         sid: Target system SID (or empty for landscape-wide checks)
         vuln: Vulnerability to check:
-            - gw: Gateway SAPXPG (10KBlaze)
+            - gw: Gateway SAPXPG (unauth reginfo/secinfo bypass)
             - ms: Message Server betrusted (CVE-2020-6207)
             - ms_info: Message Server text/dump info disclosure
                 (missing ms/acl_info + ms/HTTP/acl_info — SAP Notes
