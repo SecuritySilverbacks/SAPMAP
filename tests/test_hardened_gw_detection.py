@@ -1,0 +1,270 @@
+"""Pins for the hardened-Gateway F_SAP_INIT rejection detection
+(issue surfaced on A4H kernel 916 / 10KBLAZE betrusted chain polling
+for 1500 s instead of giving up when STARTED_PRG=sapxpg is reginfo-
+blocked by SAP Note 2808158).
+
+Covers:
+  * parse_response flags gw_id=0 + short F_SAP_INIT reply as
+    hardened_reject (prevents the extract_ascii_strings pass from
+    treating the GW's internal CPIC counter as a valid conv_id)
+  * The header-shape precondition (first two bytes = 06 CA for a
+    primary F_SAP_INIT reply) keeps the check from false-positiving
+    on drained follow-up frames
+  * The signal does NOT fire for other steps (P1, P3) that
+    legitimately have gw_id=0 in their reply envelopes
+  * check_gw_vulnerable's return_detail=True shape surfaces
+    hardened_reject up to sap_betrusted_chain's poll loop
+  * The MS trust probe (ADM_SERVER_LONG_LIST) returns a well-formed
+    result dict even when the MS is unreachable, so a diagnostic
+    failure never kills the main attack path
+"""
+from __future__ import annotations
+
+import pathlib
+import re
+import socket
+import struct
+
+import pytest
+
+import modules  # noqa: F401 — registers package paths
+
+from sap_gw_xpg_standalone import parse_response
+from sap_ms_betrusted import probe_ms_server_list
+
+
+REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
+
+
+# ---------------------------------------------------------------------------
+# parse_response — hardened-reject detection
+# ---------------------------------------------------------------------------
+
+def _hardened_frame() -> bytes:
+    """The exact 24-byte frame A4H kernel 916 returned to F_SAP_INIT
+    in the user's bug report (see conversation 2026-10-05)."""
+    return bytes.fromhex(
+        "06ca03000013000000000000000000000000000000000000"
+    )
+
+
+def test_parse_response_flags_a4h_hardened_reject():
+    """24-byte 06-CA frame with gw_id=0 is the kernel-916
+    hardening signature.  Must set error=True + hardened_reject=True
+    AND clear any bogus conv_id so downstream code bails cleanly."""
+    info = parse_response(_hardened_frame(), "F_SAP_INIT")
+    assert info["error"] is True
+    assert info["hardened_reject"] is True
+    assert info["gw_id"] == 0
+    assert info.get("conv_id") is None, (
+        "parse_response must NOT return a conv_id for a hardened "
+        "reject — the GW's CPIC counter leaking into the response "
+        "is not a real session identifier")
+    assert "hardened gateway" in info["error_msg"].lower()
+    assert "2808158" in info["error_msg"], (
+        "error_msg must cite SAP Note 2808158 so operators can "
+        "look up the hardening")
+
+
+def test_hardened_reject_also_matches_p2_alias():
+    """step_name is 'P2' in sapmap_exploit._p1_p2 and 'F_SAP_INIT'
+    in the standalone's loop — both must trigger the check."""
+    info_p2 = parse_response(_hardened_frame(), "P2")
+    assert info_p2["hardened_reject"] is True
+    assert info_p2["error"] is True
+
+
+def test_hardened_reject_requires_f_sap_init_header():
+    """A frame of the same length + gw_id=0 but WITHOUT the 06-CA
+    header must NOT trigger the hardened-reject check — this keeps
+    the check from false-positiving on drained follow-up frames
+    that happen to be short."""
+    # 24 bytes starting with 07-xx (version 7 or some other opcode).
+    bogus = bytes([0x07, 0x00]) + bytes(22)
+    info = parse_response(bogus, "F_SAP_INIT")
+    assert info.get("hardened_reject") is not True
+    # Non-F_SAP_INIT shape → parser should NOT fast-path as error.
+    assert info["error"] is False
+
+
+def test_hardened_reject_does_not_fire_on_p1():
+    """P1 responses can legitimately carry gw_id=0 in some kernels —
+    the step_name gate must keep the hardening check off that path."""
+    short_frame = bytes.fromhex(
+        "06ca03000013000000000000000000000000000000000000"
+    )
+    # Same bytes as the A4H frame — but called from the P1 code path.
+    info = parse_response(short_frame, "P1")
+    assert info.get("hardened_reject") is not True
+
+
+def test_hardened_reject_does_not_fire_on_p3():
+    """P3 (SAPXPG_START_XPG_LONG) replies have their own envelope and
+    their own error signals (*ERR* text).  The gw_id=0 check must
+    not spuriously flip a legitimate P3 reply to hardened."""
+    short_frame = _hardened_frame()
+    info = parse_response(short_frame, "P3")
+    assert info.get("hardened_reject") is not True
+
+
+def test_hardened_reject_does_not_fire_on_long_f_sap_init_reply():
+    """A vulnerable gateway's F_SAP_INIT reply is 420-520 bytes with a
+    non-zero gw_id in the header.  Build a synthetic 400-byte reply
+    with gw_id=0x1234 and confirm the check does NOT fire."""
+    # Header: 06 CA 03 00 00 13 12 34 ... (gw_id = 0x1234 at [6:8])
+    header = bytes.fromhex("06ca03000013") + struct.pack("!H", 0x1234)
+    body = bytes([0x00]) * 392   # pad to 400 bytes total
+    frame = header + body
+    assert len(frame) == 400
+    info = parse_response(frame, "F_SAP_INIT")
+    assert info.get("hardened_reject") is not True
+    assert info["gw_id"] == 0x1234
+    assert info["error"] is False
+
+
+def test_hardened_reject_does_not_fire_on_short_frame_with_nonzero_gw_id():
+    """gw_id != 0 means the GW DID allocate state for us — the
+    short-frame heuristic must only fire when gw_id==0 AND the frame
+    is short, both conditions required."""
+    header = bytes.fromhex("06ca03000013") + struct.pack("!H", 0x0042)
+    frame = header + bytes([0x00]) * 16   # 24 bytes, nonzero gw_id
+    info = parse_response(frame, "F_SAP_INIT")
+    assert info.get("hardened_reject") is not True
+
+
+# ---------------------------------------------------------------------------
+# check_gw_vulnerable return_detail=True — Fix #1 integration
+# ---------------------------------------------------------------------------
+
+def test_check_gw_vulnerable_return_detail_shape():
+    """New kwarg return_detail=True returns a dict with the three
+    keys sap_betrusted_chain's poll loop reads: vulnerable,
+    hardened_reject, detail.  Shape must be stable so callers can
+    key off it without defensive guards."""
+    src = (REPO_ROOT / "modules" / "exploitation" / "sapmap_exploit.py"
+           ).read_text(encoding="utf-8")
+    # The shape is built in a tiny inline _result helper — pin the
+    # keys so a refactor can't silently rename them.
+    m = re.search(
+        r"def _result\(vuln:[^)]*\):\s*(.*?)return bool\(vuln\)",
+        src, re.DOTALL)
+    assert m, "_result helper not found in check_gw_vulnerable"
+    body = m.group(1)
+    assert '"vulnerable":' in body
+    assert '"hardened_reject":' in body
+    assert '"detail":' in body
+
+
+def test_check_gw_vulnerable_backward_compat_bool_return():
+    """Existing callers that call check_gw_vulnerable(node) without
+    the kwarg must still get a bare bool back."""
+    src = (REPO_ROOT / "modules" / "exploitation" / "sapmap_exploit.py"
+           ).read_text(encoding="utf-8")
+    assert "def check_gw_vulnerable(node: SAPNode, *, return_detail: bool = False)" in src
+    # The helper returns bool when return_detail is False.
+    assert "return bool(vuln)" in src
+
+
+def test_p2_hardened_reject_status_propagates_through_p1_p2():
+    """_p1_p2 must return the new 'p2_hardened_reject' status (not
+    the generic 'p2_err') when parse_response flags
+    hardened_reject.  This lets check_gw_vulnerable surface the
+    hardened signal in return_detail."""
+    src = (REPO_ROOT / "modules" / "exploitation" / "sapmap_exploit.py"
+           ).read_text(encoding="utf-8")
+    assert 'return ("p2_hardened_reject"' in src
+    # And check_gw_vulnerable's outer loop handles the new status.
+    assert 'if status == "p2_hardened_reject":' in src
+    assert '"hardened_reject": True' in src
+
+
+# ---------------------------------------------------------------------------
+# sap_betrusted_chain poll loop — early abort on hardened_reject
+# ---------------------------------------------------------------------------
+
+def test_betrusted_poll_loop_early_abort_on_hardened_reject():
+    """The 25-minute poll must NOT keep running against a kernel 916
+    gateway that reports hardened_reject.  Threshold = 2 consecutive
+    hardened_reject probes before aborting."""
+    src = (REPO_ROOT / "modules" / "exploitation" / "sap_betrusted_chain.py"
+           ).read_text(encoding="utf-8")
+    assert "HARDENED_REJECT_THRESHOLD = 2" in src
+    assert "hardened_rejects += 1" in src
+    assert "aborting poll after" in src
+    assert "return_detail=True" in src
+
+
+def test_betrusted_poll_loop_resets_counter_on_non_hardened_rejection():
+    """A non-hardened error between hardened-reject probes must
+    reset the counter — one accidental misclassification should not
+    accumulate false confidence that the GW is hardened."""
+    src = (REPO_ROOT / "modules" / "exploitation" / "sap_betrusted_chain.py"
+           ).read_text(encoding="utf-8")
+    # The reset happens inside the else-branch of the probe loop.
+    assert "hardened_rejects = 0" in src
+    assert "false confidence" in src
+
+
+# ---------------------------------------------------------------------------
+# probe_ms_server_list (Fix #3)
+# ---------------------------------------------------------------------------
+
+def test_probe_ms_server_list_returns_stable_dict_shape():
+    """Every exit path (connect fail, LOGIN fail, timeout, success,
+    exception) must return a dict with the same six keys so callers
+    never need defensive guards."""
+    # Hit an obviously-unreachable port to force the connect-fail path.
+    result = probe_ms_server_list(
+        "127.0.0.1", 1, needle="192.168.2.196", timeout=0.5)
+    for key in ("connected", "sent", "received", "response_len",
+                 "has_needle", "error"):
+        assert key in result, f"missing key: {key}"
+    assert result["connected"] is False
+    assert result["sent"] is False
+    assert result["received"] is False
+    assert result["response_len"] == 0
+    assert result["has_needle"] is False
+    assert result["error"]   # non-empty error message
+
+
+def test_probe_ms_server_list_separate_socket_architecture():
+    """The betrusted thread's socket is server-role and cannot send
+    ADM queries without triggering MS LOGOUT.  Pin: probe_ms_server_list
+    takes host/port (not a socket), proving it opens its own
+    connection with a benign client-role LOGIN_2."""
+    import inspect
+    sig = inspect.signature(probe_ms_server_list)
+    assert list(sig.parameters.keys())[:2] == ["host", "port"]
+    # Pin the default benign probe name — must NOT be the attacker's
+    # injected app-server name.
+    assert sig.parameters["probe_name"].default == "sapmap_probe"
+
+
+def test_probe_ms_server_list_scans_for_dot_and_dash_forms():
+    """Different kernels render IPs in the server-list response as
+    either dotted-decimal ("192.168.2.196") or hyphenated
+    ("192-168-2-196" — the ncpic_lu form).  The probe must check
+    both so a kernel-rendering-variant doesn't miss the match."""
+    src = (REPO_ROOT / "modules" / "exploitation" / "sap_ms_betrusted.py"
+           ).read_text(encoding="utf-8")
+    # Primary scan uses the raw needle bytes.
+    assert "needle_b in resp:" in src
+    # Fallback scan replaces dots with dashes.
+    assert 'needle.replace(".", "-")' in src
+
+
+def test_betrusted_chain_wires_in_trust_probe_before_poll():
+    """sap_betrusted_chain must call probe_ms_server_list ONCE after
+    Phase 1 settles and BEFORE entering the GW poll loop — operator
+    gets an immediate verdict on whether the MS inject actually
+    landed."""
+    src = (REPO_ROOT / "modules" / "exploitation" / "sap_betrusted_chain.py"
+           ).read_text(encoding="utf-8")
+    assert "from sap_ms_betrusted import probe_ms_server_list" in src
+    # The three distinct log paths — confirmation, miss, inconclusive.
+    assert "MS table confirms injection" in src
+    assert "does NOT contain" in src
+    assert "MS SERVER_LONG_LIST probe" in src
+    # Never kill the main attack path — the whole thing is in a try/
+    # except that logs and continues.
+    assert "MS trust probe skipped" in src
