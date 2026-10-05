@@ -16,6 +16,13 @@ from datetime import datetime
 from typing import Optional
 
 from sapmap_models import SAPMAPState, SAPNode, RFCConnection, Severity
+# Pulled in for the Password-Spraying section's Detection-validation
+# subsection (issue #69, PR4) — the engagement report cites the exact
+# Terminal spoof string so SIEM correlation rules are one grep away.
+try:
+    from sapmap_pwspray import PURPLE_SPRAY_TERMINAL
+except Exception:
+    PURPLE_SPRAY_TERMINAL = "sapmap-spray-purple"
 
 
 # ---------------------------------------------------------------------------
@@ -31,10 +38,20 @@ def _stat_table(rows) -> list:
 
 
 def _esc(s) -> str:
-    """Escape a value for Markdown table-cell use (collapse pipes + newlines)."""
+    """Escape a value for Markdown table-cell use.  Collapses pipes
+    + newlines + backticks: a backtick inside a backtick-code-span
+    cell closes the span and lets the following cell text escape
+    into prose (PR4 adversarial review LOW #10).  Not a full
+    HTML/XSS escape — the Markdown is rendered through a GFM
+    pipeline later; this just prevents the operator from breaking
+    the table layout with pathological field values."""
     if s is None:
         return ""
-    return str(s).replace("|", "\\|").replace("\n", " ").replace("\r", " ")
+    return (str(s)
+            .replace("|", "\\|")
+            .replace("\n", " ")
+            .replace("\r", " ")
+            .replace("`", ""))
 
 
 def _executive_summary(state: SAPMAPState) -> list:
@@ -1429,6 +1446,219 @@ def _persistence_section(state: SAPMAPState) -> list:
     return out
 
 
+def _pwspray_section(state: SAPMAPState) -> list:
+    """Password-spraying runs (issue #69, PR4) — one subsection per
+    run.  Includes a Detection-validation table for purple-mode runs
+    enumerating the SAL / SM21 / USR02-delta signatures the SOC's
+    SIEM should have correlated.  Reads from state.spray_runs and
+    per-node .spray_purple_signals — never re-queries the landscape
+    at report time (comment in the engagement-report design)."""
+    runs = list(getattr(state, "spray_runs", []) or [])
+    if not runs:
+        return []
+    # Newest first — operators read runs top-down.
+    runs_sorted = sorted(
+        runs, key=lambda r: r.get("started_at", ""), reverse=True)
+    out: list = []
+    out.append("## Password spraying (issue #69)")
+    out.append("")
+    out.append(
+        "Credential-reuse / improper-client-copy sweep across the "
+        "mapped landscape.  Each run below carries the SprayRun "
+        "summary — attempts, hits, locked users, aborted reason — "
+        "plus (purple-mode only) a Detection-validation subsection "
+        "with the SAL class 00 numbers + USR02 counter deltas the "
+        "SOC should have captured.")
+    out.append("")
+    total_attempts = sum(int(r.get("attempts_done", 0) or 0) for r in runs)
+    total_hits = sum(len(r.get("hits", []) or []) for r in runs)
+    total_locks = sum(
+        len(r.get("locked_users", []) or []) for r in runs)
+    purple_runs = sum(
+        1 for r in runs
+        if (r.get("config_snapshot", {}) or {}).get("purple_mode"))
+    out.extend(_stat_table([
+        ("Runs", str(len(runs))),
+        ("Attempts total", str(total_attempts)),
+        ("Hits total", str(total_hits)),
+        ("Locked users total", str(total_locks)),
+        ("Purple-mode runs", str(purple_runs)),
+    ]))
+    out.append("")
+    for r in runs_sorted:
+        rid = r.get("run_id", "?")
+        cfg = r.get("config_snapshot", {}) or {}
+        out.append(f"### Run `{_esc(rid)}`")
+        out.append("")
+        rows = [
+            ("Started", r.get("started_at", "")[:19]),
+            ("Finished", (r.get("finished_at", "") or "—")[:19]),
+            ("Scope", _esc(str(cfg.get("scope_filter", {})))),
+            ("Dry run", "yes" if cfg.get("dry_run") else "no"),
+            ("Purple mode",
+             "yes" if cfg.get("purple_mode") else "no"),
+            ("Cap per user", str(cfg.get("cap_per_user", 1))),
+            ("Attempts", str(r.get("attempts_done", 0))),
+            ("Hits", str(len(r.get("hits", []) or []))),
+            ("Locked users",
+             ", ".join(r.get("locked_users", []) or []) or "—"),
+            ("Aborted", _esc(r.get("aborted", "") or "—")),
+        ]
+        if cfg.get("purple_mode"):
+            rows.append(
+                ("USR02 baseline",
+                 "available" if r.get("purple_baseline_available")
+                 else "unavailable"
+                      + (f" ({_esc(r.get('purple_baseline_error', ''))})"
+                         if r.get("purple_baseline_error") else "")))
+            if r.get("loot_path"):
+                rows.append(
+                    ("Blue-team deliverable",
+                     f"`{_esc(r['loot_path'])}/purple_report.{{md,html}}`"))
+        out.extend(_stat_table(rows))
+        out.append("")
+        # Detection validation subsection (purple-mode only).
+        if cfg.get("purple_mode"):
+            signals = []
+            for node in (state.nodes or {}).values():
+                for sig in (
+                        getattr(node, "spray_purple_signals", []) or []):
+                    if sig.get("run_id") == rid:
+                        signals.append(sig)
+            if signals:
+                out.append("#### Detection validation (SIEM-expected signatures)")
+                out.append("")
+                out.append(
+                    "What SOC's SAL / SM21 / USR02 should have captured "
+                    "for this run.  Grep the SIEM by Terminal="
+                    f"`{PURPLE_SPRAY_TERMINAL}` and this run's time "
+                    "window to verify coverage.")
+                out.append("")
+                out.append(
+                    "| TS | SID | Client | User | Result | SAL 00-N "
+                    "| USR02 &Delta; | PW hash |")
+                out.append(
+                    "| --- | --- | --- | --- | --- | --- | --- | --- |")
+                signals.sort(key=lambda s: s.get("ts", ""))
+                for s in signals:
+                    delta = s.get("delta_locnt")
+                    delta_cell = (
+                        f"+{delta}" if (delta is not None
+                                          and delta > 0)
+                        else (str(delta) if delta is not None else "—"))
+                    out.append(
+                        f"| {s.get('ts','')[:19]} | `{_esc(s.get('sid',''))}` | "
+                        f"`{_esc(s.get('client',''))}` | "
+                        f"`{_esc(s.get('user',''))}` | "
+                        f"**{_esc(s.get('result',''))}** | "
+                        f"`{','.join(s.get('sal_numbers') or [])}` | "
+                        f"{delta_cell} | "
+                        f"`{_esc(s.get('pw_sha256_prefix',''))}` |")
+                out.append("")
+            else:
+                out.append(
+                    "_No purple-mode signal rows captured for this run "
+                    "(baseline unavailable or dry-run)._")
+                out.append("")
+    return out
+
+
+def _html_pwspray_section(state: SAPMAPState) -> str:
+    """HTML variant of _pwspray_section — self-contained markup
+    for the engagement HTML report.  Returns '' when there are no
+    spray runs so the TOC entry can be gated by truthy-check."""
+    runs = list(getattr(state, "spray_runs", []) or [])
+    if not runs:
+        return ""
+    import html as _html
+    runs_sorted = sorted(
+        runs, key=lambda r: r.get("started_at", ""), reverse=True)
+    total_attempts = sum(int(r.get("attempts_done", 0) or 0) for r in runs)
+    total_hits = sum(len(r.get("hits", []) or []) for r in runs)
+    total_locks = sum(
+        len(r.get("locked_users", []) or []) for r in runs)
+    purple_runs = sum(
+        1 for r in runs
+        if (r.get("config_snapshot", {}) or {}).get("purple_mode"))
+    parts: list = []
+    parts.append('<section id="sec-pwspray">')
+    parts.append('<h2>&#128299; Password spraying (issue #69)</h2>')
+    parts.append(
+        '<p>Credential-reuse / improper-client-copy sweep across the '
+        'mapped landscape.  Each run below carries the SprayRun '
+        'summary; purple-mode runs additionally enumerate the SAL / '
+        'SM21 / USR02-delta signatures the SOC\'s SIEM should have '
+        'captured.</p>')
+    parts.append(
+        '<table class="stat-table"><tbody>'
+        f'<tr><td>Runs</td><td>{len(runs)}</td></tr>'
+        f'<tr><td>Attempts total</td><td>{total_attempts}</td></tr>'
+        f'<tr><td>Hits total</td><td>{total_hits}</td></tr>'
+        f'<tr><td>Locked users total</td><td>{total_locks}</td></tr>'
+        f'<tr><td>Purple-mode runs</td><td>{purple_runs}</td></tr>'
+        '</tbody></table>')
+    for r in runs_sorted:
+        rid = r.get("run_id", "?")
+        cfg = r.get("config_snapshot", {}) or {}
+        parts.append(f'<h3>Run <code>{_html.escape(rid)}</code></h3>')
+        parts.append(
+            '<table class="stat-table"><tbody>'
+            f'<tr><td>Started</td><td>{_html.escape(r.get("started_at","")[:19])}</td></tr>'
+            f'<tr><td>Finished</td><td>{_html.escape((r.get("finished_at","") or "—")[:19])}</td></tr>'
+            f'<tr><td>Scope</td><td><code>{_html.escape(str(cfg.get("scope_filter", {})))}</code></td></tr>'
+            f'<tr><td>Dry run</td><td>{"yes" if cfg.get("dry_run") else "no"}</td></tr>'
+            f'<tr><td>Purple mode</td><td>{"yes" if cfg.get("purple_mode") else "no"}</td></tr>'
+            f'<tr><td>Attempts</td><td>{r.get("attempts_done", 0)}</td></tr>'
+            f'<tr><td>Hits</td><td>{len(r.get("hits", []) or [])}</td></tr>'
+            f'<tr><td>Locked users</td><td>{_html.escape(", ".join(r.get("locked_users", []) or []) or "—")}</td></tr>'
+            f'<tr><td>Aborted</td><td>{_html.escape(r.get("aborted", "") or "—")}</td></tr>'
+            '</tbody></table>')
+        if cfg.get("purple_mode"):
+            signals: list = []
+            for node in (state.nodes or {}).values():
+                for sig in (
+                        getattr(node, "spray_purple_signals", []) or []):
+                    if sig.get("run_id") == rid:
+                        signals.append(sig)
+            if signals:
+                parts.append(
+                    '<h4>Detection validation '
+                    '(SIEM-expected signatures)</h4>')
+                parts.append(
+                    '<p>What SOC\'s SAL / SM21 / USR02 should have '
+                    'captured for this run.  Grep by '
+                    f'Terminal=<code>{_html.escape(PURPLE_SPRAY_TERMINAL)}</code> '
+                    'and this run\'s time window.</p>')
+                signals.sort(key=lambda s: s.get("ts", ""))
+                parts.append(
+                    '<table><thead><tr>'
+                    '<th>TS</th><th>SID</th><th>Client</th><th>User</th>'
+                    '<th>Result</th><th>SAL 00-N</th>'
+                    '<th>USR02 &Delta;</th><th>PW hash</th>'
+                    '</tr></thead><tbody>')
+                for s in signals:
+                    delta = s.get("delta_locnt")
+                    delta_cell = (
+                        f'<span style="color:#f85149">+{delta}</span>'
+                        if (delta is not None and delta > 0)
+                        else (str(delta) if delta is not None
+                              else '&mdash;'))
+                    parts.append(
+                        '<tr>'
+                        f'<td><code>{_html.escape(s.get("ts","")[:19])}</code></td>'
+                        f'<td><code>{_html.escape(s.get("sid",""))}</code></td>'
+                        f'<td><code>{_html.escape(s.get("client",""))}</code></td>'
+                        f'<td><code>{_html.escape(s.get("user",""))}</code></td>'
+                        f'<td><strong>{_html.escape(s.get("result",""))}</strong></td>'
+                        f'<td><code>{_html.escape(",".join(s.get("sal_numbers") or []))}</code></td>'
+                        f'<td>{delta_cell}</td>'
+                        f'<td><code>{_html.escape(s.get("pw_sha256_prefix",""))}</code></td>'
+                        '</tr>')
+                parts.append('</tbody></table>')
+    parts.append('</section>')
+    return "\n".join(parts)
+
+
 def _evasion_section(state: SAPMAPState) -> list:
     """OPSEC posture — what evasion primitives were armed."""
     ev = getattr(state, "evasion", {}) or {}
@@ -2241,6 +2471,11 @@ def build_markdown_report(state: SAPMAPState,
     sections.extend(_trust_chains_section(state))
     sections.append("---")
     sections.append("")
+    pwspray_section = _pwspray_section(state)
+    if pwspray_section:
+        sections.extend(pwspray_section)
+        sections.append("---")
+        sections.append("")
     sections.extend(_per_system_table(state))
     sections.append("---")
     sections.append("")
@@ -4091,6 +4326,7 @@ def build_html_report(state: SAPMAPState,
     secstore_html = _html_secstore_section(state)
     persistence_html = _html_persistence_section(state)
     evasion_html = _html_evasion_section(state)
+    pwspray_section_html = _html_pwspray_section(state)
 
     # Table of contents — one row per section that actually rendered.
     # Section IDs match the anchors on the <section id="..."> tags
@@ -4102,6 +4338,8 @@ def build_html_report(state: SAPMAPState,
         ("sec-critical",      "🛑 Critical findings",     True),
         ("sec-high",          "⚠️ High findings",         True),
         ("sec-chains",        "🔗 Trust chains",          True),
+        ("sec-pwspray",       "🔓 Password spraying",
+                              bool(pwspray_section_html)),
         ("sec-inventory",     "🗺️ Landscape inventory",   True),
         ("sec-credentials",   "🔑 Recovered credentials", True),
         ("sec-capability",    "📊 User capability inventory",
@@ -4345,6 +4583,8 @@ def build_html_report(state: SAPMAPState,
       <th>Risk</th><th>Path</th><th>Hops</th><th>PRD</th><th>Entry</th>
     </tr></thead><tbody>{chain_rows_html}</tbody></table>
   </section>
+
+  {pwspray_section_html}
 
   <section id="sec-inventory">
     <h2>🗺️ Landscape inventory</h2>

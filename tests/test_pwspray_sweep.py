@@ -618,22 +618,22 @@ def test_results_modal_has_hit_matrix_and_defender_tabs():
     assert 'id="pwspray-results-modal"' in src
     assert 'id="pws-tab-matrix"' in src
     assert 'id="pws-tab-defender"' in src
-    # Defender View is a PR4 placeholder — pin that we didn't ship
-    # it as live by accident.
-    assert "Placeholder for PR4" in src
+    # PR4 shipped the Defender View live — the stub placeholder is
+    # gone and the renderer handles the non-purple case explicitly.
+    assert "Placeholder for PR4" not in src
+    assert "function _renderDefenderView(run)" in src
 
 
 def test_status_phase_order_shared_with_frontend():
     """Backend PHASE_ORDER and frontend phaseOrder are both the
-    source of truth for the progress panel.  Pin that both exist
-    with the same canonical phase strings so a backend rename can't
-    silently desync."""
+    source of truth for the progress panel.  PR4 extended both to
+    include 'baseline' + 'readback' phases for purple mode."""
     src = _html_src()
     assert "phaseOrder = ['idle', 'collect_pool', 'profile_probe', " \
-           "'spray', 'report', 'done']" in src
+           "'baseline', 'spray', 'readback', 'report', 'done']" in src
     # And the backend PHASE_ORDER has the same shape.
     backend_phases = sapmap_pwspray.PHASE_ORDER
     assert backend_phases == [
         "idle", "collect_pool", "profile_probe",
-        "spray", "report", "done",
+        "baseline", "spray", "readback", "report", "done",
     ]
