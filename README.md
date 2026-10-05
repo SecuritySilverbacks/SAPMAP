@@ -96,7 +96,7 @@ SAPMAP discovers SAP systems on a network, maps RFC connections between them, ex
 - **dpmon virtual SAP\* user creation (kernel ≥ 790, ABAP)** — Chains GW SAPXPG → `dpmon` → SAP\* one-time password → BAPI_USER_CREATE1 with SAP_ALL.  DB-agnostic alternative to the SQL-INSERT writer chain: single dpmon invocation vs ~40 SAPXPG chunks, kernel-blessed (SAP Note 3303172, won't be patched out), bypasses SCC4 client lock / DBCO routing edge cases.  Available on Phase 2 of AutoPwn and via the right-click context menu
 - **CVE-2025-31324 (VisualComposer metadatauploader)** — Unauth Java JSP webshell deployment with chunked-base64 file write, OS-aware command wrapping (cmd.exe / /bin/sh), session-resilient shell tracking
 - **CVE-2026-58240 (MS ASCS_GW rogue registration, SAP Note 3759472)** — Unauthenticated MS `ASCS_GW_LOGON` (opcode 82) write path.  Register a rogue "ASCS gateway" host/port in the Message Server's `gAscsGw` struct — the MS broadcasts our forged entry to every subscribed application server, polluting the trust list of the whole landscape.  Check + confirm-gated register + verified STATUS-based cleanup, with automatic detection of `system/secure_communication = ON` (compensating control that blocks the plaintext path).  Kernel fix at 9.16 PL100 / 9.18 PL032 / 9.19 PL017 / 9.20 PL007.  First confirmed end-to-end exploit against kernel 9.16 PL75 (Sept 2026)
-- **Message Server betrusted (CVE-2020-6207 / 10KBLAZE)** — Register a fake dispatcher with the MS so the attacker IP is added to the SAP Gateway's trusted-host list, enabling unauthenticated OS command execution via SAPXPG
+- **Message Server betrusted (10KBLAZE, SAP Note 2890213)** — Register a fake dispatcher with the MS so the attacker IP is added to the SAP Gateway's trusted-host list, enabling unauthenticated OS command execution via SAPXPG.  (The CVE-2020-6207 identifier is used elsewhere in SAPMAP as this vuln's established shorthand; the authoritative hardening reference is the SAP note.)
 - **Direct database injection** — Create SAP users by injecting into USR02/UST04/USRBF2 tables via SQL CLI tools (hdbsql, sqlcli, sqlcmd, sqlplus, db2)
 - **BAPI user creation** — Authenticated user creation with SAP_ALL via BAPI_USER_CREATE1
 - **SXPG remote execution** — Create users on remote systems via TCP/IP RFC destinations and SXPG_STEP_XPG_START
@@ -1107,7 +1107,7 @@ Tests 16 well-known default SAP credentials via DIAG protocol (dispatcher port 3
 
 ## Exploitation
 
-### 10KBLAZE Full Chain (MS Betrusted → Gateway SAPXPG, Unauthenticated) — CVE-2020-6207
+### 10KBLAZE Full Chain (MS Betrusted → Gateway SAPXPG, Unauthenticated) — SAP Note 2890213 (CVE-2020-6207)
 
 The 10KBLAZE technique exploits the unauthenticated SAP Message Server internal port to register a fake application server, which injects the attacker's IP into the SAP Gateway's trusted host list. Once trusted as "internal", the attacker can execute OS commands via the SAPXPG external program interface without authentication.  (The *direct* Gateway SAPXPG `reginfo` / `secinfo` abuse — CVE-2019-0330 / SAP Note 1408081 — is a distinct, simpler attack path implemented in `sap_gw_xpg_standalone.py`.)
 
@@ -1243,7 +1243,7 @@ Right-click anywhere on the map background (or use the top **Actions** menu) and
 ```
 Vulnerability checks (exploitable):
   ☑ Gateway SAPXPG
-  ☑ 10KBlaze (CVE-2020-6207)
+  ☑ 10KBlaze (MS betrusted, SAP Note 2890213)
   ☑ CVE-2025-31324 (VisualComposer RCE)
   ☑ CVE-2020-6287 (RECON)
 
