@@ -1,6 +1,6 @@
 """Global operating mode flags for SAPMAP.
 
-Two toggles live here today:
+Three toggles live here today:
 
 * ``read_only`` gates every destructive action on both the HTTP
   surface (Bottle routes) and the MCP tool surface.
@@ -12,6 +12,13 @@ Two toggles live here today:
   it.  Both the CLI flag AND the token must match — layered defence
   because loot holds password hashes, cleartext RFC destination
   passwords from SecStore, PII pulled from tables, etc.
+
+* ``pwspray_armed`` gates the password-spraying engine (issue #69).
+  Spraying hits USR02's bad-logon counter and risks landscape-wide
+  lockout, so every pwspray entry point refuses with HTTP 403 unless
+  the operator passed ``--allow-pwspray`` at startup.  No per-run
+  token — the GUI just needs the boolean to show the ctx-menu entry
+  and the backend reads the flag directly.
 
 Kept as a tiny standalone module so any layer can import it without
 dragging in the RFC / scanner / GUI packages.  Set once at startup
@@ -25,6 +32,7 @@ import secrets
 _read_only: bool = False
 _loot_browser_enabled: bool = False
 _loot_browser_token: str = ""
+_pwspray_armed: bool = False
 
 
 def set_read_only(value: bool) -> None:
@@ -65,3 +73,17 @@ def check_loot_browser_token(candidate: str) -> bool:
     if not candidate:
         return False
     return secrets.compare_digest(_loot_browser_token, candidate)
+
+
+def set_pwspray_armed(value: bool) -> None:
+    """Arm the password-spraying engine.  Called once at startup from
+    sapmap.py when --allow-pwspray is passed.  OR-only semantics are
+    not needed here — the flag is session-only and does not persist
+    through .sapmap round-trips (unlike state.evasion.allow_evasion)."""
+    global _pwspray_armed
+    _pwspray_armed = bool(value)
+
+
+def is_pwspray_armed() -> bool:
+    """Return True when the operator has armed password spraying."""
+    return _pwspray_armed

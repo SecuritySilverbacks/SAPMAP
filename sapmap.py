@@ -225,6 +225,20 @@ def main():
                              "Requires explicit written authorization for "
                              "active-evasion testing against in-scope "
                              "targets.")
+    parser.add_argument("--allow-pwspray", action="store_true",
+                        help="Arm the landscape password-spraying engine "
+                             "(issue #69).  Spraying hits USR02's "
+                             "bad-logon counter via DIAG and risks "
+                             "landscape-wide user lockout; without this "
+                             "flag every pwspray entry point refuses with "
+                             "HTTP 403.  The engine still enforces its "
+                             "own invariants (per-user cap, SAP*/DDIC "
+                             "skip list, landscape-wide locked-user "
+                             "cache, cross-target circuit breaker, "
+                             "pw_sha256_prefix audit JSONL) once armed.  "
+                             "Requires explicit written authorization "
+                             "for credential testing against in-scope "
+                             "targets.")
 
     args = parser.parse_args()
 
@@ -279,6 +293,15 @@ def main():
         print("  token secret; a fresh token is generated on every start.")
         print(_bar)
         print()
+
+    # --allow-pwspray flips the arm bit here (pre-OutputCapture) so the
+    # module global is live before `create_app(api)` wires /api/mode;
+    # the operator-facing banner is deferred until AFTER OutputCapture
+    # installs below (next to print_evasion_banner) so it lands in the
+    # GUI console too, matching the evasion precedent.
+    if getattr(args, "allow_pwspray", False):
+        import sapmap_mode
+        sapmap_mode.set_pwspray_armed(True)
 
     # Probe which RFC backend will be used and tell the operator
     try:
@@ -375,6 +398,29 @@ def main():
             print_evasion_banner()
         except Exception as e:
             print(f"[!] Could not print evasion banner: {e}")
+
+    # Pwspray arm banner — same reasoning as the evasion one: print it
+    # here (post-OutputCapture) so the operator sees it in the GUI
+    # console too, not just the terminal.
+    if getattr(args, "allow_pwspray", False):
+        _bar = "=" * 64
+        print()
+        print(_bar)
+        print("        PASSWORD SPRAY ARMED — lockout risk live")
+        print(_bar)
+        print("  Spray engine (issue #69) can now be launched from the")
+        print("  per-node ctx-menu or /api/node/<sid>/password_spray.")
+        print("  Pool is harvested from node credentials + SecStore +")
+        print("  DBCON + BTP destinations + SCC admin + operator")
+        print("  wordlist (POST /api/actions/password_spray/pool/wordlist).")
+        print("  Invariants that still protect the landscape:")
+        print("    * per-user cap <= 2 (= 1 when policy unknown)")
+        print("    * SAP*/DDIC + 14 service users skipped by default")
+        print("    * landscape-wide locked-user cache (any lock -> ban)")
+        print("    * cross-target circuit breaker (3 locks -> halt)")
+        print("    * audit JSONL writes pw_sha256_prefix, never cleartext")
+        print(_bar)
+        print()
 
     # Create Bottle app
     app = create_app(api)
