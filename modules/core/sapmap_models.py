@@ -945,6 +945,21 @@ class SAPNode:
     # otherwise effectively multiply by wave_count.  Persisted via
     # to_dict as a sorted list; from_dict converts back to a set.
     _pwspray_tested_triples: set = field(default_factory=set)
+    # Password-spray hit summaries (issue #69, PR5-de-gate).  One
+    # entry per HIT recorded during this engagement; the engine's
+    # post-hit authority probe populates ``authority_level`` as one
+    # of 'sap_all' / 'privileged' / 'unprivileged' / 'probe_failed'
+    # so the GUI can colour the node rim correctly:
+    #   sap_all        -> node.pwned = True + red rim (PWNED)
+    #   privileged     -> orange rim (working logon + roles, needs
+    #                     escalation)
+    #   unprivileged   -> yellow rim (working logon but no observed
+    #                     authorizations — probably dialog-only)
+    #   probe_failed   -> yellow rim (authority unknown)
+    # Each entry: {client, user, source_kind, source_sid,
+    #              pw_sha256_prefix, authority_level, profiles: list,
+    #              roles: list, note: str, ts: iso, run_id: str}
+    spray_hit_users: list = field(default_factory=list)
 
     # Computed helpers
     def has_access(self) -> bool:
@@ -1133,6 +1148,7 @@ class SAPNode:
             "spray_purple_signals": list(self.spray_purple_signals or []),
             "_pwspray_tested_triples": sorted(
                 self._pwspray_tested_triples or set()),
+            "spray_hit_users": list(self.spray_hit_users or []),
         }
 
     @classmethod
@@ -1276,6 +1292,8 @@ class SAPNode:
             spray_purple_signals=list(d.get("spray_purple_signals", [])),
             _pwspray_tested_triples=set(
                 d.get("_pwspray_tested_triples", []) or []),
+            spray_hit_users=list(
+                d.get("spray_hit_users", []) or []),
         )
         return node
 

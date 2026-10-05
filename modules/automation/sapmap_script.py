@@ -80,7 +80,7 @@ Supported actions:
     check_all_cve_6287, check_all_cve_22536, check_all_router_info,
     check_all_ms_info_disclosure,
     check_all_snc, check_all_vulns,
-    # Password spraying (--allow-pwspray required; dry_run default)
+    # Password spraying (dry_run default; live needs accept_lockout_risk)
     password_spray,
     # State management
     save_state, load_state,
@@ -630,9 +630,7 @@ def _map_step(step: dict) -> tuple:
             "include_router_info_detection": bool(
                 step.get("include_router_info_detection", True)),
             # Password-spray AutoPwn integration (issue #69, PR5).
-            # Silently coerced to False by the backend when
-            # --allow-pwspray is not set, so a shared playbook can
-            # keep this on without breaking unarmed sessions.
+            # Off by default; the operator opts in via this toggle.
             "include_password_spray": bool(
                 step.get("include_password_spray", False)),
             "pwspray_cap_per_user": int(
@@ -648,10 +646,11 @@ def _map_step(step: dict) -> tuple:
     # -----------------------------------------------------------------
     if action == "password_spray":
         # Landscape-wide DIAG logon spray against every ABAP system
-        # on the map.  Requires --allow-pwspray at startup (backend
-        # returns 403 pwspray_not_armed otherwise).  Dry-run is the
-        # SAFE default so a playbook can preview the pool + target
-        # matrix without opening sockets.
+        # on the map.  Dry-run is the SAFE default so a playbook can
+        # preview the pool + target matrix without opening sockets;
+        # live spray requires dry_run=false AND
+        # accept_lockout_risk=true (backend returns HTTP 400
+        # accept_lockout_risk_required otherwise).
         #
         # Knobs (all optional):
         #   dry_run:              bool (default True)
