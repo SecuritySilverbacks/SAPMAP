@@ -68,6 +68,29 @@ _VALID_SEVERITIES = {CRITICAL, HIGH, MEDIUM, INFO}
 
 # CRITICAL -----------------------------------------------------------------
 
+# "quoted" shape for the user / password value — tried as alternatives
+# BEFORE the bare \S+ fallback so admins who write multi-word values
+# in brackets or quotes don't get truncated at the first space:
+#
+#   "User: Joris Password: <zou je wel willen weten he?>"
+#    (observed live on an authorized NPL lab banner, 2026-10-06)
+#
+# Covers the common wrapper chars: <...>, "...", '...', [...], (...).
+# Each wrapper is bounded at 200 chars to keep the regex engine
+# well-behaved on hostile input (no .+ catastrophic backtracking).
+# Ordered longest-first so the regex engine prefers wrapped forms
+# over the bare \S+.
+_VALUE_SHAPES = (
+    r"(?:"
+    r"<[^>\n\r]{1,200}>"
+    r"|\"[^\"\n\r]{1,200}\""
+    r"|'[^'\n\r]{1,200}'"
+    r"|\[[^\]\n\r]{1,200}\]"
+    r"|\([^)\n\r]{1,200}\)"
+    r"|\S+"
+    r")"
+)
+
 # "user: XXX ... password: YYY" and reverse order.  The 0-80 char
 # distance between the two labels catches:
 #   - inline ("user: admin  password: Welcome1")
@@ -75,14 +98,15 @@ _VALID_SEVERITIES = {CRITICAL, HIGH, MEDIUM, INFO}
 # Short enough that we don't match "user admin, meet me at the park;
 # phone number is passport ..." kind of coincidences.
 _RE_USER_THEN_PASSWORD = re.compile(
-    r"\buser[:\s=]+(\S+)[^\n\r]{0,80}?\b"
+    r"\buser[:\s=]+" + _VALUE_SHAPES + r"[^\n\r]{0,80}?\b"
     r"(?:pass(?:word|wort)?|pw|pwd|kennwort|contrase[nñ]a|wachtwoord)"
-    r"[:\s=]+(\S+)",
+    r"[:\s=]+" + _VALUE_SHAPES,
     re.IGNORECASE,
 )
 _RE_PASSWORD_THEN_USER = re.compile(
     r"\b(?:pass(?:word|wort)?|pw|pwd|kennwort|contrase[nñ]a|wachtwoord)"
-    r"[:\s=]+(\S+)[^\n\r]{0,80}?\buser[:\s=]+(\S+)",
+    r"[:\s=]+" + _VALUE_SHAPES + r"[^\n\r]{0,80}?\buser[:\s=]+"
+    + _VALUE_SHAPES,
     re.IGNORECASE,
 )
 
