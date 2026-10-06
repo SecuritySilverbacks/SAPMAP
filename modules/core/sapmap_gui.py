@@ -16914,6 +16914,15 @@ def create_app(api: SAPMAPApi) -> Bottle:
                                   if sapmap_stop is not None else None),
                 )
             except Exception as exc:
+                # Clean up the per-SID loot dir if the scan crashed
+                # before writing anything, so operators don't see empty
+                # husks accumulating under loot/logon_banners/<SID>/
+                # after a run of failed scans.
+                try:
+                    from sapmap_logon_sweep import rmdir_if_empty as _rie
+                    _rie(loot_dir)
+                except Exception:
+                    pass
                 print(f"[-] {sid}: logon-banner scan failed: {exc}")
                 try:
                     emit_finding(
@@ -17027,6 +17036,22 @@ def create_app(api: SAPMAPApi) -> Bottle:
                         f"scraped, no secrets detected",
                         ref="logon_banner.no_hits",
                         attack_capability="recon.logon_banner_scan")
+                except Exception:
+                    pass
+
+            # Clean up the per-SID loot dir when the scan finished
+            # cleanly BUT scan_node skipped the loot write (its
+            # ``if raw_text or findings`` guard — happens on connect
+            # error, SNC-required reject, or any path where the DIAG
+            # round-trip returned no field text).  Keeps empty husks
+            # out of loot/logon_banners/<SID>/ across runs of failed
+            # scans.
+            if loot_dir and not (
+                    result.get("loot_text_path")
+                    or result.get("loot_json_path")):
+                try:
+                    from sapmap_logon_sweep import rmdir_if_empty as _rie
+                    _rie(loot_dir)
                 except Exception:
                     pass
 
