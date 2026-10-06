@@ -1253,6 +1253,7 @@ body {
       <div class="ctx-item write-op" data-action="default_creds">&#9888; Check Default Accounts</div>
       <div class="ctx-item" data-action="check_router_info">&#128268; Check SAProuter Info Leak</div>
       <div class="ctx-item" data-action="check_ms_info_leak" title="Message Server text/dump info disclosure.  Sends HTTP GET /msgserver/text/dump?3=1 (ms/* profile parameters) and ?8=1 (kernel release + git hash) to the MS HTTP port (81NN).  When the MS ACL is at its default (unset) the response contains the ENTIRE ms/* profile — timeouts, HTTP handler config, ACL settings, log-file paths — plus precise kernel PL and Git commit hash.  Raw dumps land in loot/msinfo/ per system; the finding is HIGH.  Fix: set ms/acl_info + ms/HTTP/acl_info (SAP Notes 1421005, 2696233).">&#128268; Check MS Info Disclosure (text/dump ACL)</div>
+      <div class="ctx-item" data-action="scan_logon_banners" title="DIAG logon-banner secret scan (issue #68).  Opens one DIAG session to the dispatcher (32XX), scrapes the login screen's DYNT atom text — the message admins typically put there (support contacts, service account hints, maintenance notes, QR links, etc.) — and runs the result through the sap_logon_text_secrets regex catalogue.  Flags admin-posted credentials (user/password adjacency across EN/DE/ES/NL, SAP*/DDIC/EARLYWATCH names near a password label), AWS keys / private keys / JWTs / bearer tokens, email addresses, phone numbers and infra IPs.  Raw banner text + findings JSON land in loot/logon_banners/&lt;SID&gt;/ per scan; CRITICAL/HIGH hits bubble into the findings bus and the top banner.  Operator textarea on the modal accepts additional regex (one per line, optional 'SEV:' prefix) for tenant-specific keywords.">&#128269; Scan Logon Banner for Secrets</div>
       <div class="ctx-item" data-action="router_scan">&#128270; Scan Internally via SAProuter</div>
     </div>
   </div>
@@ -2474,6 +2475,39 @@ body {
   </div>
 </div>
 
+<!-- Scan Logon Banner Secrets Modal (issue #68) -->
+<div class="modal-overlay" id="scan-logon-banners-modal">
+  <div class="modal" style="min-width:620px;max-width:760px">
+    <h3>&#128269; Scan Logon Banner for Secrets</h3>
+    <div id="scan-logon-banners-info" style="font-size:12px;color:#8b949e;margin-bottom:12px"></div>
+    <p style="font-size:12px;color:#8b949e;line-height:1.5">
+      Opens one DIAG session to the dispatcher, scrapes the login screen's text (the message
+      admins pin there — contacts, service-account hints, maintenance notes, …) and runs
+      it through the built-in secrets catalogue: credentials (EN/DE/ES/NL), SAP service-account
+      names near a password label, AWS keys / private keys / JWTs / bearer tokens, emails,
+      phone numbers, infra IPs with contact cues. CRITICAL / HIGH hits land on the findings
+      bus and the top banner; the raw text + findings JSON land in <code>loot/logon_banners/&lt;SID&gt;/</code>.
+      Pure read — no account is touched, no command executed.
+    </p>
+    <div class="form-row" style="margin-top:12px">
+      <label style="display:flex;align-items:center;gap:8px">
+        Extra regex (optional, one per line) &mdash;
+        <span style="color:#8b949e;font-weight:normal;font-size:11px">
+          format: <code>pattern</code> (defaults MEDIUM) or <code>SEV: pattern</code> where SEV &isin; CRITICAL / HIGH / MEDIUM / INFO.
+          Blank + <code># …</code> / <code>// …</code> lines are skipped.
+        </span>
+      </label>
+      <textarea id="scan-logon-banners-patterns" rows="6"
+                placeholder="# add tenant-specific keywords&#10;CRITICAL: PROJ_[A-Z]{3,}_PWD&#10;HIGH: internal\.corp\.example\.com"
+                style="width:100%;font-family:monospace;font-size:12px;background:#0d1117;color:#c9d1d9;border:1px solid #30363d;border-radius:4px;padding:8px;resize:vertical"></textarea>
+    </div>
+    <div class="form-actions" style="margin-top:12px">
+      <button class="btn btn-primary" onclick="startScanLogonBanners()">Scan Now</button>
+      <button class="btn" onclick="closeModal('scan-logon-banners-modal')">Cancel</button>
+    </div>
+  </div>
+</div>
+
 <!-- TCP/IP Destination Modal -->
 <div class="modal-overlay" id="tcpip-modal">
   <div class="modal">
@@ -3564,6 +3598,29 @@ async function pollUpdates() {
                 _detailsRefreshKey = { srcSid, conName };
               }
             }
+          } else if (view === 'logon-banners' && dsid) {
+            // Issue #68 — repaint the Logon Banner side-panel when
+            // the backend scanner updates node.logon_banner_scan /
+            // logon_banner_findings on the state singleton.  Also
+            // include the activeTasks presence for this node's scan
+            // key so the "scanning now..." banner clears cleanly when
+            // the background thread completes.
+            const taskKey = dsid + ':scan_logon_banners';
+            const oldN = ((mapState.nodes || {})[dsid] || {});
+            const newN = ((state.nodes || {})[dsid] || {});
+            const oldKey = JSON.stringify([
+              oldN.logon_banner_scan || null,
+              oldN.logon_banner_findings || null,
+              !!((mapState.active_tasks || {})[taskKey])]);
+            const newKey = JSON.stringify([
+              newN.logon_banner_scan || null,
+              newN.logon_banner_findings || null,
+              !!((state.active_tasks || {})[taskKey])]);
+            if (newN && oldKey !== newKey) {
+              _detailsPanelNeedsRefresh = true;
+              _detailsRefreshKind = 'logon-banners';
+              _detailsRefreshKey = dsid;
+            }
           }
         }
       } catch (_) { /* details refresh never blocks state update */ }
@@ -3587,6 +3644,8 @@ async function pollUpdates() {
                             _detailsRefreshKey.target,
                             _detailsRefreshKey.domain,
                             {refresh: true});
+          } else if (_detailsRefreshKind === 'logon-banners') {
+            showLogonBannerResults(_detailsRefreshKey, {refresh: true});
           }
         } catch (_) {}
       }
@@ -6539,6 +6598,7 @@ function showCtxMenu(e, sid) {
     'enum_clients':     true,                       // always (uses DIAG, no creds needed)
     'default_creds':    true,                       // always (uses DIAG, no creds needed)
     'password_spray':   hasDispPort,                 // #69 — needs a DIAG dispatcher; warning is in the ctx confirm
+    'scan_logon_banners': hasDispPort,              // #68 — pure DIAG read; same dispatcher gate as spray
     'check_router_info': true,                     // always (direct TCP, no creds)
     'check_ms_info_leak': !isSaprouter,             // MS HTTP dump probe; SAProuters have no MS
     'router_scan':      true,                       // always (probes via SAProuter, no creds)
@@ -6553,6 +6613,9 @@ function showCtxMenu(e, sid) {
     'check_gw':         'No gateway port detected',
     'password_spray':   (!hasDispPort
         ? 'No 32XX ABAP dispatcher reachable — DIAG spray has no listener to hit.'
+        : 'Not available'),
+    'scan_logon_banners': (!hasDispPort
+        ? 'No 32XX ABAP dispatcher reachable — DIAG logon-banner scrape has no listener to hit.'
         : 'Not available'),
     'betrusted':             (msSecureComms
         ? 'MS port requires TLS/SystemPKI (system/secure_communication = ON) — betrusted attack CLOSED at the wire layer.  SAPMAP has no SystemPKI client certificate signed by this landscape\'s CA to present during the TLS handshake.'
@@ -6770,6 +6833,7 @@ function showCtxMenu(e, sid) {
     'read_usrextid':    !isAbapStack,
     'default_creds':    !isAbapStack,
     'password_spray':   !isAbapStack,              // #69 — only ABAP has a DIAG dispatcher to spray
+    'scan_logon_banners': !isAbapStack,              // #68 — DIAG login screen is an ABAP-stack surface
     'probe_telemetry':  !isAbapStack,
     'capture_evasion_baseline': !isAbapStack,
     'probe_rsau_api': !isAbapStack,
@@ -9420,6 +9484,14 @@ async function ctxAction(action) {
       await api('POST', `node/${sid}/check_router_info`); break;
     case 'check_ms_info_leak':
       await api('POST', `node/${sid}/check_ms_info_disclosure`); break;
+    case 'scan_logon_banners':
+      // Issue #68 — DIAG logon-banner secret scan.  Opens a tiny
+      // modal first so the operator can paste tenant-specific regex
+      // (optional); on OK the modal POSTs with the textarea content
+      // and immediately opens the Logon Banner side-panel which
+      // live-renders via /api/state polling.
+      showScanLogonBannersModal(sid);
+      break;
     case 'check_snc':
       await api('POST', `node/${sid}/check_snc`); break;
     case 'router_scan': showRouterScanModal(sid); break;
@@ -14769,6 +14841,186 @@ async function saveSaprouter() {
   closeModal('saprouter-modal');
   startPolling();
 }
+
+// ---------------------------------------------------------------------
+// Issue #68 — DIAG logon-banner secret scan.
+// Config modal (one textarea for optional tenant-specific regex) + the
+// side-panel renderer that live-refreshes via /api/state polling.
+// ---------------------------------------------------------------------
+
+function showScanLogonBannersModal(sid) {
+  const n = (mapState.nodes || {})[sid] || {};
+  // Info line — SID (host) with the dispatcher port if we know one.
+  let infoText = sid + '  (' + (n.ip || n.hostname || '?') + ')';
+  const dispPort = (n.instances || []).reduce((acc, inst) => {
+    if (acc) return acc;
+    const ports = (inst && inst.ports) || {};
+    for (const p in ports) {
+      const svc = ports[p];
+      const pi = parseInt(p, 10);
+      if (svc === 'dispatcher' || (pi >= 3200 && pi <= 3299)) return pi;
+    }
+    return acc;
+  }, 0);
+  if (dispPort) infoText += '  •  dispatcher :' + dispPort;
+  document.getElementById('scan-logon-banners-info').textContent = infoText;
+  document.getElementById('scan-logon-banners-patterns').value = '';
+  // Stash the sid on the modal itself.  The Rescan button in the
+  // side-panel can reach us from a different data-view where
+  // selectedNodeSid may not match this scan's target any more; we
+  // bind to the sid the modal was OPENED for, not whatever is
+  // selected when Scan Now is clicked.
+  const modal = document.getElementById('scan-logon-banners-modal');
+  modal.dataset.sid = sid;
+  modal.classList.add('visible');
+  document.getElementById('scan-logon-banners-patterns').focus();
+}
+
+async function startScanLogonBanners() {
+  // Read sid from the modal's dataset.sid (set by showScanLogonBannersModal)
+  // — NOT from the global selectedNodeSid which can have drifted since
+  // the modal opened.
+  const modal = document.getElementById('scan-logon-banners-modal');
+  const sid = (modal && modal.dataset && modal.dataset.sid)
+              || selectedNodeSid;
+  if (!sid) { alert('No system selected.'); return; }
+  const raw = document.getElementById('scan-logon-banners-patterns').value || '';
+  // Hand the textarea text through verbatim — scan_text parses the
+  // SEV: prefix + comment lines + blank skipping itself (PR2).  The
+  // backend accepts either a list[str] or a single blob.
+  closeModal('scan-logon-banners-modal');
+  const r = await api('POST', `node/${sid}/scan_logon_banners`, {
+    custom_patterns: raw,
+  });
+  if (r && r.error) {
+    alert('Logon-banner scan did not start: ' + (r.message || r.error));
+    return;
+  }
+  // Open the side-panel immediately with a scanning-now state; the
+  // next /api/state tick will auto-refresh it with real results.
+  showLogonBannerResults(sid, {scanning: true});
+  startPolling();
+}
+
+function showLogonBannerResults(sid, opts) {
+  opts = opts || {};
+  const n = (mapState.nodes || {})[sid] || {};
+  const scan = n.logon_banner_scan || {};
+  const findings = n.logon_banner_findings || [];
+  const panel = document.getElementById('detail-panel');
+  panel.setAttribute('data-view', 'logon-banners');
+  panel.dataset.sid = sid;
+
+  // Scanning-in-progress indicator: when the operator just clicked
+  // Scan Now, show a loading state until activeTasks drops the key.
+  const scanKey = sid + ':scan_logon_banners';
+  const isScanning = (opts.scanning === true)
+                      || !!((activeTasks || {})[scanKey]);
+
+  const sev = scan.hits_by_severity || {};
+  const sevPill = (name, color) => {
+    const n = sev[name] || 0;
+    return '<span style="display:inline-block;padding:2px 8px;margin-right:6px;'
+         + 'border-radius:10px;font-size:11px;'
+         + 'background:' + (n ? color : '#21262d') + ';'
+         + 'color:' + (n ? '#fff' : '#8b949e') + ';">'
+         + name + ': ' + n + '</span>';
+  };
+  const sevStrip =
+      sevPill('CRITICAL', '#da3633')
+    + sevPill('HIGH', '#f85149')
+    + sevPill('MEDIUM', '#d29922')
+    + sevPill('INFO', '#58a6ff');
+
+  const _sevColor = s => (
+    s === 'CRITICAL' ? '#da3633' :
+    s === 'HIGH'     ? '#f85149' :
+    s === 'MEDIUM'   ? '#d29922' : '#58a6ff');
+
+  const _esc = s => String(s == null ? '' : s)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+
+  const findingRows = findings.length
+    ? findings.map(f => (
+        '<div style="padding:10px;margin-bottom:8px;background:#161b22;'
+      + 'border-left:3px solid ' + _sevColor(f.severity) + ';border-radius:4px">'
+      + '<div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">'
+      +   '<span style="color:' + _sevColor(f.severity) + ';font-weight:600;'
+      +     'font-size:11px;letter-spacing:0.5px">' + _esc(f.severity) + '</span>'
+      +   '<span style="color:#c9d1d9;font-weight:500">' + _esc(f.pattern_name) + '</span>'
+      +   '<span style="color:#8b949e;font-size:11px">· ' + _esc(f.category) + '</span>'
+      + '</div>'
+      + '<div style="font-family:monospace;font-size:12px;color:#f85149;'
+      +   'word-break:break-all;margin:4px 0">' + _esc(f.match) + '</div>'
+      + (f.snippet
+         ? '<div style="font-size:11px;color:#8b949e;font-family:monospace;'
+         + 'white-space:pre-wrap;margin-top:4px">' + _esc(f.snippet) + '</div>'
+         : '')
+      + '</div>'
+      )).join('')
+    : '<div style="padding:16px;color:#8b949e;text-align:center">'
+      + (scan.error_kind
+         ? '&#9888; Scan error: ' + _esc(scan.error_kind)
+           + (scan.error ? '<br><span style="font-size:11px">' + _esc(scan.error) + '</span>' : '')
+         : (scan.run_id
+            ? 'Scan complete &mdash; no secrets detected on the banner. '
+              + (scan.pair_count || 0) + ' field(s) scraped.'
+            : 'No scan has run yet &mdash; click "Scan Logon Banner for Secrets" in the Scanning submenu.'))
+      + '</div>';
+
+  const metaRow = scan.run_id
+    ? '<div style="margin:8px 0 12px;font-size:11px;color:#8b949e">'
+      + 'Run: <code>' + _esc(scan.run_id) + '</code>'
+      + '  &middot;  <code>' + _esc(scan.ts || '') + '</code>'
+      + (scan.port ? '  &middot;  :' + scan.port
+         + (scan.instance_nr ? ' (inst ' + _esc(scan.instance_nr) + ')' : '') : '')
+      + (scan.elapsed_s != null ? '  &middot;  ' + scan.elapsed_s + 's' : '')
+      + (scan.raw_text_bytes != null ? '  &middot;  ' + scan.raw_text_bytes + 'B scraped' : '')
+      + '</div>'
+      + (scan.loot_text_path
+         ? '<div style="font-size:11px;color:#8b949e;margin-bottom:12px">'
+         + '&#128194; <code>' + _esc(scan.loot_text_path) + '</code>'
+         + (scan.loot_json_path ? '<br>&#128194; <code>'
+            + _esc(scan.loot_json_path) + '</code>' : '')
+         + '</div>'
+         : '')
+    : '';
+
+  const scanningBanner = isScanning
+    ? '<div style="padding:8px 12px;margin-bottom:12px;'
+      + 'background:#1f6feb20;border-left:3px solid #1f6feb;'
+      + 'border-radius:4px;font-size:12px;color:#58a6ff">'
+      + '&#9203; Scanning now&hellip; the panel will refresh automatically '
+      + 'when the DIAG round-trip completes.'
+      + '</div>'
+    : '';
+
+  panel.innerHTML =
+      '<span class="close-btn" onclick="_closeDetailPanel()">&times;</span>'
+    + '<h3>&#128269; Logon Banner Scan &mdash; ' + _esc(sid) + '</h3>'
+    + '<div style="margin:4px 0 10px">' + sevStrip + '</div>'
+    + scanningBanner
+    + metaRow
+    + '<div style="display:flex;gap:8px;margin-bottom:12px">'
+    +   '<span class="detail-action-btn" id="logon-banner-rescan-btn"'
+    +     ' style="cursor:pointer;padding:4px 10px;background:#1f6feb;'
+    +     'color:#fff;border-radius:4px;font-size:12px">'
+    +     '&#128260; Rescan&hellip;</span>'
+    + '</div>'
+    + '<div>' + findingRows + '</div>';
+  panel.classList.add('visible');
+  // DOM listener (not an onclick= attribute) so the SID is bound by
+  // closure — avoids the JS-string injection risk of splicing SID
+  // text into an onclick HTML attribute.
+  const rescanBtn = document.getElementById('logon-banner-rescan-btn');
+  if (rescanBtn) {
+    rescanBtn.addEventListener('click', function() {
+      showScanLogonBannersModal(sid);
+    });
+  }
+}
+
 
 function closeModal(id) { document.getElementById(id).classList.remove('visible'); }
 function openLegend() {
