@@ -105,13 +105,16 @@ def shape_status_reply_replay(host, port, ip, pid):
 
 def shape_setlogon_family(host, port, ip, pid):
     """MS_SET_LOGON (opcode 0x06) layout — a nearby write opcode.
-    <type: uint16><port: uint16><addr: 4><name_len: uint16>
+    <addr: 4><type: uint16><port: uint16><name_len: uint16>
     <name_len bytes><prot_len: uint16><host_len: uint16><host>
-    <misc_len: uint16><addr6_len_sentinel: 0xffff>"""
+    <misc_len: uint16><addr6_len_sentinel: 0xffff>
+
+    IPv4 is first in the body (matches MS_CHANGE_IP's convention).
+    See the matching docstring + fix in sap_ms_betrusted.pkt_set_logon."""
     host_b = host.encode("ascii")[:80]
-    p  = struct.pack("!H", 0x0001)     # logon type
-    p += struct.pack("!H", port)
-    p += socket.inet_aton(ip)
+    p  = socket.inet_aton(ip)          # [0:4]  address
+    p += struct.pack("!H", 0x0001)     # [4:6]  logon type
+    p += struct.pack("!H", port)       # [6:8]  port
     p += struct.pack("!H", 0)          # logonname_length
     p += struct.pack("!H", 0)          # prot_length
     p += struct.pack("!H", len(host_b)) + host_b

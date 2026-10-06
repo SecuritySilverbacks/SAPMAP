@@ -102,19 +102,34 @@ class TestPktSetLogon:
         pkt = pkt_set_logon("server", b"\x00" * 8, "10.0.0.1", 3200)
         assert pkt[_HEADER_LEN] == MS_OPCODE_SET_LOGON
 
+    def test_ip_at_body_start(self):
+        """Regression pin — the kernel reads MS_SET_LOGON's hostadr(IPv4)
+        from body[0:4].  Prior layout put [type:2][port:2] there, so SMMS
+        rendered a garbled IPv4 (observed 2026-10-06 against S4H kernel
+        793: hostadr(IPv4) = ``0.6.12.228`` = ``struct.pack('!H', 6) +
+        struct.pack('!H', 3300)``).  IPv4 must now be first in the body,
+        mirroring MS_CHANGE_IP's convention."""
+        ip = "192.168.2.210"
+        pkt = pkt_set_logon("server", b"\x00" * 8, ip, 3200)
+        # Opcode section is 4 bytes right after the 110-byte header.
+        # Body starts at _HEADER_LEN + 4.  IPv4 is the first field.
+        assert pkt[_HEADER_LEN + 4: _HEADER_LEN + 8] == socket.inet_aton(ip)
+
     def test_diag_logon_type(self):
         pkt = pkt_set_logon("server", b"\x00" * 8, "10.0.0.1", 3200, logon_type=2)
-        logon_type = struct.unpack("!H", pkt[_HEADER_LEN + 4: _HEADER_LEN + 6])[0]
+        # type now sits AFTER the 4-byte IPv4 → offset shifted by +4.
+        logon_type = struct.unpack("!H", pkt[_HEADER_LEN + 8: _HEADER_LEN + 10])[0]
         assert logon_type == 2
 
     def test_rfc_logon_type(self):
         pkt = pkt_set_logon("server", b"\x00" * 8, "10.0.0.1", 3300, logon_type=6)
-        logon_type = struct.unpack("!H", pkt[_HEADER_LEN + 4: _HEADER_LEN + 6])[0]
+        logon_type = struct.unpack("!H", pkt[_HEADER_LEN + 8: _HEADER_LEN + 10])[0]
         assert logon_type == 6
 
     def test_port_encoded(self):
         pkt = pkt_set_logon("server", b"\x00" * 8, "10.0.0.1", 3200)
-        port = struct.unpack("!H", pkt[_HEADER_LEN + 6: _HEADER_LEN + 8])[0]
+        # port now at _HEADER_LEN + 10 (ipv4:4 + type:2 before it).
+        port = struct.unpack("!H", pkt[_HEADER_LEN + 10: _HEADER_LEN + 12])[0]
         assert port == 3200
 
     def test_ip_embedded(self):
@@ -129,9 +144,28 @@ class TestPktSetLogon:
     def test_no_host_when_empty(self):
         pkt = pkt_set_logon("server", b"\x00" * 8, "10.0.0.1", 3200, host="")
         # host_length should be 0
-        host_len_offset = _HEADER_LEN + 4 + 2 + 2 + 4 + 2 + 2  # opcode + type + port + ip + logonname + prot
+        # Layout: hdr(110) + opcode(4) + ipv4(4) + type(2) + port(2)
+        #       + logonname_length(2) + prot_length(2) + host_length(2)
+        host_len_offset = _HEADER_LEN + 4 + 4 + 2 + 2 + 2 + 2
         host_len = struct.unpack("!H", pkt[host_len_offset:host_len_offset + 2])[0]
         assert host_len == 0
+
+    def test_ipv4_field_not_type_port_regression(self):
+        """Regression pin against the 2026-10-06 forensic: SMMS showed
+        ``hostadr(IPv4) = 0.6.12.228`` for a server registered via an
+        RFC MS_SET_LOGON (port 3300, logon_type=6).  Those bytes are
+        exactly ``struct.pack('!H', 6) + struct.pack('!H', 3300)`` =
+        ``b'\\x00\\x06\\x0C\\xE4'``, i.e. the type+port leaked into
+        the IPv4 slot.  The post-fix layout must NOT reproduce that
+        pattern — i.e. body[0:4] must be an actual inet_aton value,
+        never the type+port combo."""
+        pkt = pkt_set_logon("server", b"\x00" * 8, "192.168.2.196",
+                             3300, logon_type=6)
+        body = pkt[_HEADER_LEN + 4:]
+        assert body[0:4] != b"\x00\x06\x0c\xe4", (
+            "regression: body[0:4] matches the garble pattern — "
+            "pkt_set_logon reverted to type/port-first order")
+        assert body[0:4] == socket.inet_aton("192.168.2.196")
 
     def test_address6_sentinel(self):
         pkt = pkt_set_logon("server", b"\x00" * 8, "10.0.0.1", 3200)
