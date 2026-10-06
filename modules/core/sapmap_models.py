@@ -2183,6 +2183,15 @@ class SAPMAPState:
     #         totals, hits_count, locked_count, loot_path,
     #         purple_report_generated}
     spray_runs: list = field(default_factory=list)
+
+    # Per-sweep summaries for the issue #68 DIAG logon-banner scanner.
+    # Each entry: {run_id, started_at, finished_at, scope, targets_total,
+    #              targets_done, findings_by_severity, errors_count,
+    #              loot_dir, aborted}
+    # Full per-finding data stays on the per-node ``logon_banner_findings``
+    # (so the GUI side-panel keeps rendering) + on the on-disk loot
+    # bundle at ``loot/logon_banners/<run_id>/``.
+    logon_banner_runs: list = field(default_factory=list)
     timestamp: str = ""
     version: str = "1.0"
 
@@ -3363,6 +3372,7 @@ class SAPMAPState:
             "spray_attempts_counter": dict(self.spray_attempts_counter or {}),
             "pwspray_locked_users": dict(self.pwspray_locked_users or {}),
             "spray_runs": list(self.spray_runs or []),
+            "logon_banner_runs": list(self.logon_banner_runs or []),
         }
 
     @classmethod
@@ -3399,6 +3409,7 @@ class SAPMAPState:
         state.pwspray_locked_users = dict(
             d.get("pwspray_locked_users", {}))
         state.spray_runs = list(d.get("spray_runs", []))
+        state.logon_banner_runs = list(d.get("logon_banner_runs", []))
         # One-shot dedup pass: fold FQDN-keyed placeholder BTP nodes
         # (from earlier materialise_type_g_target runs) into any
         # real-UUID node that shares the same subdomain.  Handles

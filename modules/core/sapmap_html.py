@@ -913,6 +913,7 @@ body {
     <div class="menu-dropdown">
       <div class="dd-header">Landscape-wide</div>
       <div class="dd-item" onclick="scanAllVulns()" style="color:#f0883e">&#128270; Scan for All Vulnerabilities</div>
+      <div class="dd-item" onclick="showScanAllLogonBannersModal()" style="color:#58a6ff" title="Scan every ABAP system's DIAG logon banner for secrets (issue #68).  Opens one DIAG session to each dispatcher, scrapes the DYNT atom text (the message admins pin on the login screen — contacts, service-account hints, maintenance notes), and runs the result through the sap_logon_text_secrets regex catalogue.  Pure read: no account touched, no command executed, no lockout risk.  Raw banner text + findings JSON land in loot/logon_banners/&lt;run_id&gt;/ per sweep; CRITICAL/HIGH hits bubble into the top findings bar.  Operator textarea accepts tenant-specific regex.">&#128269; Scan All Logon Banners for Secrets&hellip;</div>
       <div class="dd-item write-op" onclick="showAutoPwnModal()" style="color:#f85149;font-weight:bold">&#9889; AutoPwn</div>
       <div class="dd-item write-op" onclick="showPwsprayModal()" style="color:#ffa657" title="Spray harvested credentials (issue #69) across every ABAP system on the landscape.  Pool is the union of node credentials + SecStore + DBCON + BTP destinations + SCC admin + operator wordlist.  WARNING: hits USR02 bad-logon counter — may lock accounts.">&#128299; Spray Harvested Credentials&hellip;</div>
       <div class="dd-item write-op" onclick="propagateAll()">&#128640; Auto-Propagate All</div>
@@ -1448,6 +1449,7 @@ body {
   <div class="ctx-item write-op" data-action="map_propagate_all">&#128640; Auto-Propagate All</div>
   <div class="ctx-item write-op" data-action="map_cleanup_all">&#129529; Cleanup All Users</div>
   <div class="ctx-item" data-action="map_scan_all_vulns" style="color:#f0883e">&#128270; Scan for All Vulnerabilities</div>
+  <div class="ctx-item" data-action="map_scan_all_logon_banners" style="color:#58a6ff" title="Issue #68 — scan every ABAP dispatcher's DIAG logon banner for secrets.  Pure read, no account touched.">&#128269; Scan All Logon Banners for Secrets&hellip;</div>
   <div class="ctx-item" id="map-ctx-check-all-gw" data-action="map_check_all_gw">&#128272; Check All GW Vulnerabilities</div>
   <div class="ctx-item" id="map-ctx-check-all-betrusted" data-action="map_check_all_betrusted">&#128272; Check All 10KBlaze (MS Betrusted)</div>
   <div class="ctx-item" id="map-ctx-check-all-cve-31324" data-action="map_check_all_cve_31324">&#128272; Check All CVE-2025-31324 (Java VisualComposer)</div>
@@ -3215,6 +3217,114 @@ body {
     <div id="pws-tab-body-defender" style="display:none;user-select:text;-webkit-user-select:text;cursor:text"></div>
     <div class="form-actions" style="margin-top:12px">
       <button class="btn" onclick="closeModal('pwspray-results-modal')">Close</button>
+    </div>
+  </div>
+</div>
+
+<!-- =========================================================================
+     Issue #68 PR4 — Logon-banner landscape sweep: config modal + progress
+     panel + results modal.  Mirrors the pwspray surface structurally
+     (same CSS classes, close-sibling contract, poll loop, severity palette).
+     ========================================================================= -->
+
+<!-- Config modal -->
+<div class="modal-overlay" id="scan-all-logon-banners-modal">
+  <div class="modal" style="width:95vw;max-width:720px;max-height:90vh;overflow-y:auto">
+    <h3 style="color:#58a6ff">&#128269; Scan All Logon Banners for Secrets</h3>
+    <div id="sweep-logon-banners-info" style="font-size:12px;color:#8b949e;margin-bottom:12px"></div>
+    <p style="font-size:12px;color:#8b949e;line-height:1.5">
+      Opens one DIAG session to every ABAP dispatcher on the map, scrapes
+      the login screen's DYNT atoms, and classifies the text through the
+      sap_logon_text_secrets regex catalogue.  Pure read: no account
+      touched, no command executed, no lockout risk.  Each scan writes
+      per-node loot (txt + json) into <code>loot/logon_banners/&lt;run_id&gt;/</code>;
+      CRITICAL / HIGH hits also surface in the top findings bar + the
+      per-node Logon Banner side-panel (same shape as the per-node
+      Scanning entry).
+    </p>
+    <div class="form-row" style="margin-top:12px">
+      <label>Scope</label>
+      <div style="display:flex;gap:14px;align-items:center;font-size:12px;color:#c9d1d9">
+        <label><input type="radio" name="sweep-logon-scope" value="landscape" checked> Whole landscape (every ABAP + dispatcher)</label>
+        <label><input type="radio" name="sweep-logon-scope" value="single"> Single SID</label>
+      </div>
+      <input type="text" id="sweep-logon-single-sid" placeholder="SID (e.g. NPL)" style="margin-top:6px;width:200px;text-transform:uppercase">
+    </div>
+    <div class="form-row" style="margin-top:12px">
+      <label style="display:flex;align-items:center;gap:8px">
+        Extra regex (optional, one per line) &mdash;
+        <span style="color:#8b949e;font-weight:normal;font-size:11px">
+          format: <code>pattern</code> (defaults MEDIUM) or <code>SEV: pattern</code> where SEV &isin; CRITICAL / HIGH / MEDIUM / INFO.
+        </span>
+      </label>
+      <textarea id="sweep-logon-patterns" rows="6"
+                placeholder="# tenant-specific keywords&#10;CRITICAL: PROJ_[A-Z]{3,}_PWD&#10;HIGH: internal\.corp\.example\.com"
+                style="width:100%;font-family:monospace;font-size:12px;background:#0d1117;color:#c9d1d9;border:1px solid #30363d;border-radius:4px;padding:8px;resize:vertical"></textarea>
+    </div>
+    <div class="form-actions" style="margin-top:12px">
+      <button class="btn btn-primary" onclick="launchScanAllLogonBanners()">Scan Now</button>
+      <button class="btn" onclick="closeModal('scan-all-logon-banners-modal')">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<!-- Progress panel (shares the fixed .autopwn-panel rectangle with
+     AutoPwn + pwspray — the launcher closes both siblings first). -->
+<div class="autopwn-panel" id="scan-logon-banners-sweep-panel" style="border-left-color:#58a6ff">
+  <div class="autopwn-header">
+    <div class="autopwn-title">&#128269; Logon-Banner Sweep</div>
+    <div style="display:flex;gap:6px">
+      <button class="btn btn-sm" id="sweep-logon-stop-btn" onclick="stopLogonBannersSweep()" style="background:#f85149;color:#fff">STOP</button>
+      <button class="btn btn-sm" id="sweep-logon-close-btn" onclick="closeLogonBannersSweepPanel()" style="display:none">Close</button>
+    </div>
+  </div>
+  <div id="sweep-logon-scope-label" style="font-size:11px;color:#8b949e;margin-bottom:8px"></div>
+  <div class="autopwn-phases">
+    <div class="autopwn-phase" id="sweep-logon-ph-collect_targets">
+      <div class="autopwn-phase-icon">&#128269;</div>
+      <div class="autopwn-phase-label">Collect targets</div>
+      <div class="autopwn-phase-sub" id="sweep-logon-ph-collect_targets-sub"></div>
+    </div>
+    <div class="autopwn-arrow">&rarr;</div>
+    <div class="autopwn-phase" id="sweep-logon-ph-scan">
+      <div class="autopwn-phase-icon">&#128225;</div>
+      <div class="autopwn-phase-label">Scan</div>
+      <div class="autopwn-phase-sub" id="sweep-logon-ph-scan-sub"></div>
+    </div>
+    <div class="autopwn-arrow">&rarr;</div>
+    <div class="autopwn-phase" id="sweep-logon-ph-report">
+      <div class="autopwn-phase-icon">&#128203;</div>
+      <div class="autopwn-phase-label">Report</div>
+      <div class="autopwn-phase-sub" id="sweep-logon-ph-report-sub"></div>
+    </div>
+  </div>
+  <div class="autopwn-stats">
+    <div class="autopwn-stat"><div class="autopwn-stat-l">Targets</div><div class="autopwn-stat-v" id="sweep-logon-stat-targets">0 / 0</div></div>
+    <div class="autopwn-stat"><div class="autopwn-stat-l">Critical</div><div class="autopwn-stat-v" id="sweep-logon-stat-critical" style="color:#da3633">0</div></div>
+    <div class="autopwn-stat"><div class="autopwn-stat-l">High</div><div class="autopwn-stat-v" id="sweep-logon-stat-high" style="color:#f85149">0</div></div>
+    <div class="autopwn-stat"><div class="autopwn-stat-l">Errors</div><div class="autopwn-stat-v" id="sweep-logon-stat-errors">0</div></div>
+  </div>
+  <div class="autopwn-bar-track"><div class="autopwn-bar-fill" id="sweep-logon-bar-fill" style="width:0%;background:#58a6ff"></div></div>
+  <div style="display:flex;gap:6px;margin-top:8px">
+    <button class="btn" onclick="showLogonBannerSweepResults()" style="font-size:11px">Show Findings</button>
+    <button class="btn" onclick="showLogonBannerSweepHistory()" style="font-size:11px">History</button>
+    <button class="btn write-op" onclick="resetLogonBannerSweepHistory()" style="font-size:11px;color:#f85149">Reset history</button>
+  </div>
+  <div class="autopwn-log" id="sweep-logon-log"></div>
+</div>
+
+<!-- Results modal -->
+<div class="modal-overlay" id="scan-logon-banners-results-modal">
+  <div class="modal" style="max-width:960px;width:95vw;max-height:90vh;overflow-y:auto">
+    <h3 style="color:#58a6ff">&#128269; Logon-Banner Sweep Results</h3>
+    <div style="display:flex;gap:4px;border-bottom:1px solid #30363d;margin-bottom:12px">
+      <button class="btn" id="sweep-logon-tab-findings" onclick="logonBannerSweepTab('findings')" style="border-bottom:2px solid #58a6ff">Findings</button>
+      <button class="btn" id="sweep-logon-tab-history" onclick="logonBannerSweepTab('history')">Run History</button>
+    </div>
+    <div id="sweep-logon-tab-body-findings" style="user-select:text;-webkit-user-select:text;cursor:text"></div>
+    <div id="sweep-logon-tab-body-history" style="display:none;user-select:text;-webkit-user-select:text;cursor:text"></div>
+    <div class="form-actions" style="margin-top:12px">
+      <button class="btn" onclick="closeModal('scan-logon-banners-results-modal')">Close</button>
     </div>
   </div>
 </div>
@@ -15021,6 +15131,436 @@ function showLogonBannerResults(sid, opts) {
   }
 }
 
+// ---------------------------------------------------------------------
+// Issue #68 PR4 — Logon-banner LANDSCAPE SWEEP.
+// Top-nav Actions entry + map ctx-menu entry both land here.  Mirrors
+// the pwspray surface structurally: config modal → launch → shared-
+// rectangle progress panel (close siblings first) → status poll loop
+// → results modal.
+// ---------------------------------------------------------------------
+
+let _sweepLogonPollTimer = null;
+
+// Shared helper used by both the modal preview AND the launch gate.
+function _sweepLogonEligibleCount() {
+  const nodes = mapState.nodes || {};
+  let eligible = 0;
+  for (const sid in nodes) {
+    const n = nodes[sid] || {};
+    const st = (n.system_type || '').toUpperCase();
+    if (st.indexOf('ABAP') < 0) continue;
+    const has = (n.instances || []).some(i =>
+      Object.entries(i.ports || {}).some(
+        ([p, s]) => s === 'dispatcher'
+                    || (parseInt(p, 10) >= 3200 && parseInt(p, 10) <= 3299)));
+    if (has) eligible++;
+  }
+  return eligible;
+}
+
+function showScanAllLogonBannersModal() {
+  // Empty-landscape precondition — mirrors showAutoPwnModal.  Alert
+  // + return rather than greying the top-nav item, matching the
+  // other landscape launchers (scanAllVulns, showPwsprayModal).
+  const nodes = mapState.nodes || {};
+  const nodeCount = Object.keys(nodes).length;
+  if (nodeCount < 1) {
+    alert('No systems on the map.');
+    return;
+  }
+  const eligible = _sweepLogonEligibleCount();
+  const info = document.getElementById('sweep-logon-banners-info');
+  if (info) {
+    info.textContent =
+      nodeCount + ' total nodes on the map; '
+      + eligible + ' eligible (ABAP + observed 32XX dispatcher)';
+  }
+  // Reset state on open.
+  document.getElementById('sweep-logon-patterns').value = '';
+  document.getElementById('sweep-logon-single-sid').value = '';
+  const landscapeRadio = document.querySelector(
+    'input[name="sweep-logon-scope"][value="landscape"]');
+  if (landscapeRadio) landscapeRadio.checked = true;
+  document.getElementById('scan-all-logon-banners-modal')
+    .classList.add('visible');
+}
+
+async function launchScanAllLogonBanners() {
+  const patterns = document.getElementById('sweep-logon-patterns').value || '';
+  const scopeRadio = document.querySelector(
+    'input[name="sweep-logon-scope"]:checked');
+  const scope = (scopeRadio && scopeRadio.value) || 'landscape';
+  const singleSidRaw = document.getElementById('sweep-logon-single-sid').value || '';
+  const singleSid = singleSidRaw.trim().toUpperCase();
+  if (scope === 'single' && !singleSid) {
+    alert('Enter a SID for single-system scope.');
+    return;
+  }
+  // Eligibility gate — refuse to launch when there's nothing to
+  // scan.  Backend would just land an empty run on
+  // state.logon_banner_runs; cheaper + clearer to catch it here.
+  if (scope === 'landscape') {
+    if (_sweepLogonEligibleCount() < 1) {
+      alert('No eligible systems — need at least one ABAP node with '
+            + 'an observed 32XX dispatcher.');
+      return;
+    }
+  } else if (scope === 'single') {
+    const n = (mapState.nodes || {})[singleSid];
+    if (!n) {
+      alert('System "' + singleSid + '" is not on the map.');
+      return;
+    }
+    const st = (n.system_type || '').toUpperCase();
+    const hasDisp = (n.instances || []).some(i =>
+      Object.entries(i.ports || {}).some(
+        ([p, s]) => s === 'dispatcher'
+                    || (parseInt(p, 10) >= 3200 && parseInt(p, 10) <= 3299)));
+    if (st.indexOf('ABAP') < 0) {
+      alert('"' + singleSid + '" is not an ABAP stack '
+            + '(system_type: ' + (n.system_type || 'unknown') + ').');
+      return;
+    }
+    if (!hasDisp) {
+      alert('"' + singleSid + '" has no observed 32XX dispatcher '
+            + '— run Standard Scan first.');
+      return;
+    }
+  }
+  const body = {
+    custom_patterns: patterns,
+    single_sid: scope === 'single' ? singleSid : '',
+    sids: [],
+  };
+  closeModal('scan-all-logon-banners-modal');
+  const r = await fetch('/api/actions/scan_logon_banners', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(body),
+  });
+  let payload;
+  try { payload = await r.json(); }
+  catch (_) { payload = {error: 'bad_response', message: 'non-json response'}; }
+  if (payload && payload.error) {
+    alert('Logon-banner sweep did not start: ' + (payload.message || payload.error));
+    return;
+  }
+  _sweepLogonShowProgressPanel(payload);
+  _sweepLogonPollStatus();
+}
+
+function _sweepLogonShowProgressPanel(launchResult) {
+  // Shared fixed-position rectangle — close siblings first so a
+  // running pwspray/AutoPwn panel doesn't invisibly cover us.
+  try { closeAutoPwnPanel(); } catch (_) {}
+  try { closePwsprayPanel(); } catch (_) {}
+  const panel = document.getElementById('scan-logon-banners-sweep-panel');
+  const scopeLabel = document.getElementById('sweep-logon-scope-label');
+  if (scopeLabel) {
+    scopeLabel.style.color = '#8b949e';
+    scopeLabel.textContent =
+      'Scope: ' + ((launchResult && launchResult.scope) || 'landscape')
+      + (launchResult && launchResult.custom_patterns
+         ? '  •  ' + launchResult.custom_patterns + ' operator regex'
+         : '');
+  }
+  const stopBtn = document.getElementById('sweep-logon-stop-btn');
+  const closeBtn = document.getElementById('sweep-logon-close-btn');
+  if (stopBtn) { stopBtn.style.display = ''; stopBtn.disabled = false;
+                 stopBtn.textContent = 'STOP'; }
+  if (closeBtn) closeBtn.style.display = 'none';
+  // Reset phase classes + stats + bar + log so a re-launch doesn't
+  // show stale numbers from the previous run.
+  ['collect_targets', 'scan', 'report'].forEach(k => {
+    const el = document.getElementById('sweep-logon-ph-' + k);
+    if (el) el.classList.remove('active', 'done');
+  });
+  const _reset_stat = (id, text) => {
+    const el = document.getElementById(id);
+    if (el) el.textContent = text;
+  };
+  _reset_stat('sweep-logon-stat-targets', '0 / 0');
+  _reset_stat('sweep-logon-stat-critical', '0');
+  _reset_stat('sweep-logon-stat-high', '0');
+  _reset_stat('sweep-logon-stat-errors', '0');
+  document.getElementById('sweep-logon-bar-fill').style.width = '0%';
+  document.getElementById('sweep-logon-log').innerHTML = '';
+  if (scopeLabel) scopeLabel.style.color = '#8b949e';
+  panel.classList.add('visible');
+}
+
+async function _sweepLogonPollStatus() {
+  try {
+    const r = await fetch('/api/actions/scan_logon_banners/status');
+    const st = await r.json();
+    if (st.error) {
+      // Terminal: the engine couldn't be loaded / is broken.  Mark
+      // phases done, surface the error on the scope label, flip
+      // STOP → Close, and DON'T re-poll (the earlier `throw` landed
+      // in the transient-catch below and silently retried forever).
+      const stopBtn = document.getElementById('sweep-logon-stop-btn');
+      const closeBtn = document.getElementById('sweep-logon-close-btn');
+      if (stopBtn) stopBtn.style.display = 'none';
+      if (closeBtn) closeBtn.style.display = '';
+      ['collect_targets', 'scan', 'report'].forEach(k => {
+        const el = document.getElementById('sweep-logon-ph-' + k);
+        if (el) { el.classList.remove('active'); el.classList.add('done'); }
+      });
+      const label = document.getElementById('sweep-logon-scope-label');
+      if (label) {
+        label.style.color = '#f85149';
+        label.textContent = 'Scope: error — ' + (st.message || st.error);
+      }
+      return;
+    }
+
+    // Phase strip — same contract as the pwspray poller.  PHASE_ORDER
+    // mirrors sapmap_logon_sweep.PHASE_ORDER on the backend; both
+    // sides are pinned by a test.
+    const phaseOrder = ['idle', 'collect_targets', 'scan', 'report', 'done'];
+    const currentIdx = phaseOrder.indexOf(st.phase);
+    ['collect_targets', 'scan', 'report'].forEach(k => {
+      const el = document.getElementById('sweep-logon-ph-' + k);
+      if (!el) return;
+      el.classList.remove('active', 'done');
+      const pIdx = phaseOrder.indexOf(k);
+      if (pIdx < currentIdx) el.classList.add('done');
+      else if (pIdx === currentIdx) el.classList.add('active');
+    });
+
+    // Stats + bar.
+    const total = Math.max(0, st.targets_total | 0);
+    const done = Math.max(0, st.targets_done | 0);
+    document.getElementById('sweep-logon-stat-targets').textContent =
+      done + ' / ' + total;
+    document.getElementById('sweep-logon-stat-critical').textContent =
+      (st.findings_critical | 0);
+    document.getElementById('sweep-logon-stat-high').textContent =
+      (st.findings_high | 0);
+    document.getElementById('sweep-logon-stat-errors').textContent =
+      (st.errors | 0);
+    const pct = total > 0 ? Math.round((done / total) * 100) : 0;
+    document.getElementById('sweep-logon-bar-fill').style.width = pct + '%';
+
+    const log = document.getElementById('sweep-logon-log');
+    if (log) {
+      log.innerHTML = (st.log_tail || []).map(
+        l => '<div class="cl-info">' + _escapeHtml(l) + '</div>').join('');
+      log.scrollTop = log.scrollHeight;
+    }
+
+    if (st.finished || !st.running) {
+      const stopBtn = document.getElementById('sweep-logon-stop-btn');
+      const closeBtn = document.getElementById('sweep-logon-close-btn');
+      if (stopBtn) stopBtn.style.display = 'none';
+      if (closeBtn) closeBtn.style.display = '';
+      // Mark all phase boxes done.
+      ['collect_targets', 'scan', 'report'].forEach(k => {
+        const el = document.getElementById('sweep-logon-ph-' + k);
+        if (el) { el.classList.remove('active'); el.classList.add('done'); }
+      });
+      if (st.aborted) {
+        const label = document.getElementById('sweep-logon-scope-label');
+        if (label) {
+          const prior = (label.textContent || '').split(' — aborted:')[0];
+          label.textContent = prior + ' — aborted: ' + st.aborted;
+          label.style.color = '#f85149';
+        }
+      }
+      return;   // Early return — no more polling.
+    }
+  } catch (e) { /* transient — try again */ }
+  _sweepLogonPollTimer = setTimeout(_sweepLogonPollStatus, 800);
+}
+
+function stopLogonBannersSweep() {
+  const btn = document.getElementById('sweep-logon-stop-btn');
+  if (btn) { btn.textContent = 'Stopping…'; btn.disabled = true; }
+  fetch('/api/scan/stop', {method: 'POST'});
+}
+
+function closeLogonBannersSweepPanel() {
+  document.getElementById('scan-logon-banners-sweep-panel')
+    .classList.remove('visible');
+  if (_sweepLogonPollTimer) {
+    clearTimeout(_sweepLogonPollTimer);
+    _sweepLogonPollTimer = null;
+  }
+}
+
+function logonBannerSweepTab(which) {
+  const tabs = ['findings', 'history'];
+  tabs.forEach(t => {
+    const tabBtn = document.getElementById('sweep-logon-tab-' + t);
+    const tabBody = document.getElementById('sweep-logon-tab-body-' + t);
+    if (!tabBtn || !tabBody) return;
+    if (t === which) {
+      tabBtn.style.borderBottom = '2px solid #58a6ff';
+      tabBody.style.display = '';
+    } else {
+      tabBtn.style.borderBottom = '2px solid transparent';
+      tabBody.style.display = 'none';
+    }
+  });
+}
+
+async function showLogonBannerSweepResults() {
+  // Pull a fresh /api/state tick before rendering so mapState.nodes
+  // holds the latest per-node logon_banner_findings — otherwise the
+  // operator can click "Show Findings" right after a sweep lands and
+  // see "every eligible banner was clean" because mapState hasn't
+  // caught up yet.
+  try { await pollUpdates(); } catch (_) {}
+  const r = await fetch('/api/actions/scan_logon_banners/runs');
+  const payload = await r.json();
+  const runs = (payload && payload.runs) || [];
+  await _renderLogonBannerSweepFindings(runs);
+  _renderLogonBannerSweepHistory(runs);
+  logonBannerSweepTab('findings');
+  document.getElementById('scan-logon-banners-results-modal')
+    .classList.add('visible');
+}
+
+function showLogonBannerSweepHistory() {
+  showLogonBannerSweepResults().then(() => logonBannerSweepTab('history'));
+}
+
+const _sweepLogonSevColor = s => (
+  s === 'CRITICAL' ? '#da3633' :
+  s === 'HIGH'     ? '#f85149' :
+  s === 'MEDIUM'   ? '#d29922' : '#58a6ff');
+
+async function _renderLogonBannerSweepFindings(runs) {
+  const body = document.getElementById('sweep-logon-tab-body-findings');
+  if (!runs.length) {
+    body.innerHTML = '<div style="padding:16px;color:#8b949e">'
+      + 'No sweep runs yet — launch the sweep from the Actions menu.'
+      + '</div>';
+    return;
+  }
+  const run = runs[0];
+  const sev = run.findings_by_severity || {};
+  const header =
+      '<div style="margin-bottom:12px;font-size:12px;color:#8b949e">'
+    + 'Latest run: <code>' + _escapeHtml(run.run_id || '?') + '</code>'
+    + '  &middot;  scope <code>' + _escapeHtml(run.scope || '?') + '</code>'
+    + '  &middot;  ' + (run.targets_done | 0) + ' / ' + (run.targets_total | 0)
+    + ' targets'
+    + '  &middot;  ' + (run.errors_count | 0) + ' error(s)'
+    + (run.aborted ? '  &middot;  <span style="color:#f85149">aborted: '
+       + _escapeHtml(run.aborted) + '</span>' : '')
+    + '</div>'
+    + '<div style="margin-bottom:12px">'
+    + ['CRITICAL', 'HIGH', 'MEDIUM', 'INFO'].map(k => {
+        const n = sev[k] || 0;
+        return '<span style="display:inline-block;padding:2px 8px;margin-right:6px;'
+             + 'border-radius:10px;font-size:11px;background:' + (n ? _sweepLogonSevColor(k) : '#21262d') + ';'
+             + 'color:' + (n ? '#fff' : '#8b949e') + ';">'
+             + k + ': ' + n + '</span>';
+      }).join('')
+    + '</div>';
+
+  // Walk per-node results and show each hit, pulling the full finding
+  // row from the node state (where the match cleartext lives) so
+  // operators see what was leaked.
+  const perNode = run.per_node || [];
+  const rows = [];
+  for (const pn of perNode) {
+    const node = (mapState.nodes || {})[pn.sid] || {};
+    const findings = node.logon_banner_findings || [];
+    for (const f of findings) {
+      rows.push(
+          '<tr>'
+        + '<td style="border-left:3px solid ' + _sweepLogonSevColor(f.severity)
+        +   ';padding-left:8px;color:' + _sweepLogonSevColor(f.severity)
+        +   ';font-weight:600;font-size:11px">' + _escapeHtml(f.severity) + '</td>'
+        + '<td><code>' + _escapeHtml(pn.sid) + '</code></td>'
+        + '<td><code>' + _escapeHtml(f.pattern_name) + '</code></td>'
+        + '<td style="color:#8b949e;font-size:11px">' + _escapeHtml(f.category) + '</td>'
+        + '<td style="font-family:monospace;font-size:11px;color:#f85149;word-break:break-all">'
+        +   _escapeHtml(f.match) + '</td>'
+        + '</tr>');
+    }
+  }
+  let emptyMessage;
+  if (!rows.length) {
+    if ((run.targets_total | 0) === 0) {
+      emptyMessage =
+        'No eligible targets matched this scope &mdash; nothing was '
+        + 'scanned.  Add an ABAP system with a 32XX dispatcher or '
+        + 'widen the scope.';
+    } else if (run.aborted) {
+      emptyMessage =
+        'Run aborted (' + _escapeHtml(run.aborted) + ') before '
+        + 'findings could be produced.';
+    } else {
+      emptyMessage =
+        'No findings in this run &mdash; every eligible banner was clean.';
+    }
+  }
+  const table = rows.length
+    ? '<table style="width:100%;border-collapse:collapse;font-size:12px">'
+      + '<thead><tr style="text-align:left;color:#8b949e;border-bottom:1px solid #30363d">'
+      +   '<th>Sev</th><th>SID</th><th>Pattern</th><th>Category</th><th>Match</th>'
+      + '</tr></thead><tbody>' + rows.join('') + '</tbody></table>'
+    : '<div style="padding:16px;color:#8b949e;text-align:center">'
+      + emptyMessage + '</div>';
+  body.innerHTML = header + table;
+}
+
+function _renderLogonBannerSweepHistory(runs) {
+  const body = document.getElementById('sweep-logon-tab-body-history');
+  if (!runs.length) {
+    body.innerHTML = '<div style="padding:16px;color:#8b949e">No runs yet.</div>';
+    return;
+  }
+  const rows = runs.map(run => {
+    const sev = run.findings_by_severity || {};
+    const crit = sev.CRITICAL || 0;
+    const high = sev.HIGH || 0;
+    const med = sev.MEDIUM || 0;
+    return '<tr>'
+      + '<td><code>' + _escapeHtml(run.run_id || '?') + '</code></td>'
+      + '<td>' + _escapeHtml(run.started_at || '?') + '</td>'
+      + '<td><code>' + _escapeHtml(run.scope || '?') + '</code></td>'
+      + '<td>' + (run.targets_done | 0) + ' / ' + (run.targets_total | 0) + '</td>'
+      + '<td style="color:#da3633">' + crit + '</td>'
+      + '<td style="color:#f85149">' + high + '</td>'
+      + '<td style="color:#d29922">' + med + '</td>'
+      + '<td>' + (run.errors_count | 0) + '</td>'
+      + '<td>' + (run.aborted ? '<span style="color:#f85149">'
+                   + _escapeHtml(run.aborted) + '</span>' : 'OK') + '</td>'
+      + '</tr>';
+  }).join('');
+  body.innerHTML =
+      '<table style="width:100%;border-collapse:collapse;font-size:12px">'
+    + '<thead><tr style="text-align:left;color:#8b949e;border-bottom:1px solid #30363d">'
+    +   '<th>Run</th><th>Started</th><th>Scope</th><th>Targets</th>'
+    +   '<th>CRIT</th><th>HIGH</th><th>MED</th><th>Errs</th><th>Status</th>'
+    + '</tr></thead><tbody>' + rows + '</tbody></table>';
+}
+
+async function resetLogonBannerSweepHistory() {
+  if (!confirm(
+      'Wipe the logon-banner sweep history?\\n\\n'
+      + 'This clears state.logon_banner_runs and the status singleton.  '
+      + 'Loot files on disk are KEPT.')) return;
+  if (!confirm(
+      'Last chance — type-equivalent confirm.  Really wipe?')) return;
+  const r = await fetch('/api/actions/scan_logon_banners/reset_history', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({confirm: true, i_accept: true}),
+  });
+  const payload = await r.json();
+  if (payload && payload.error) {
+    alert('Reset failed: ' + (payload.message || payload.error));
+    return;
+  }
+  // Rerender the panel so stats clear.
+  closeLogonBannersSweepPanel();
+}
+
 
 function closeModal(id) { document.getElementById(id).classList.remove('visible'); }
 function openLegend() {
@@ -19875,6 +20415,7 @@ document.getElementById('map-ctx-menu').addEventListener('click', function(e) {
     case 'map_propagate_all': propagateAll(); break;
     case 'map_cleanup_all': cleanupAll(); break;
     case 'map_scan_all_vulns': scanAllVulns(); break;
+    case 'map_scan_all_logon_banners': showScanAllLogonBannersModal(); break;
     case 'map_check_all_gw': checkAllGateways(); break;
     case 'map_check_all_betrusted': checkAllBetrusted(); break;
     case 'map_check_all_cve_31324': checkAllCve31324(); break;
