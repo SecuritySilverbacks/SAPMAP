@@ -624,6 +624,16 @@ class SAPNode:
     ms_port: int = 0                    # MS internal port found (39NN), 0 = not found
     ms_vulnerable: bool = False         # True if MS lacks ACL protection (CVE-2020-6207)
     ms_acl_protected: bool = False      # True if MS port reachable but ACL blocks our IP
+    # 10KBLAZE NAT escape hatch — the IP the TARGET sees us as, when
+    # SAPMAP runs behind a SNAT'ing router (VPN / Docker bridge /
+    # off-subnet host).  When set, try_betrusted_chain uses this
+    # verbatim instead of the kernel's auto-detected local IP, and
+    # — when attacker_ip_force is also True — suppresses betrusted()'s
+    # auto-swap to sock.getsockname()[0] so the DP blob carries the
+    # operator-chosen value.  Operator sets both via the per-node
+    # ctx-menu "Set 10KBLAZE Attacker IP..." entry.
+    attacker_ip_override: str = ""
+    attacker_ip_force: bool = False
     # kloris/SAPMAP#41 — True when the MS internal port speaks TLS
     # (system/secure_communication = ON).  Detected via a TLS
     # ClientHello probe in sap_ms_betrusted.probe_ms_tls_required.
@@ -1054,6 +1064,8 @@ class SAPNode:
             "ms_port": self.ms_port,
             "ms_vulnerable": self.ms_vulnerable,
             "ms_acl_protected": self.ms_acl_protected,
+            "attacker_ip_override": self.attacker_ip_override,
+            "attacker_ip_force":    bool(self.attacker_ip_force),
             "ms_secure_comms_required": self.ms_secure_comms_required,
             "cve_2025_31324_checked": self.cve_2025_31324_checked,
             "cve_2026_58240_checked": self.cve_2026_58240_checked,
@@ -1197,6 +1209,8 @@ class SAPNode:
             ms_port=d.get("ms_port", 0),
             ms_vulnerable=d.get("ms_vulnerable", False),
             ms_acl_protected=d.get("ms_acl_protected", False),
+            attacker_ip_override=d.get("attacker_ip_override", "") or "",
+            attacker_ip_force=bool(d.get("attacker_ip_force", False)),
             ms_secure_comms_required=d.get("ms_secure_comms_required", False),
             cve_2025_31324_checked=d.get("cve_2025_31324_checked", False),
             cve_2026_58240_checked=d.get("cve_2026_58240_checked", False),
