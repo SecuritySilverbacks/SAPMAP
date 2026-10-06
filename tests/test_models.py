@@ -79,6 +79,57 @@ def test_sapnode_roundtrip():
     assert restored.ms_acl_protected is False
 
 
+def test_sapnode_logon_banner_fields_roundtrip():
+    """Issue #68 PR3 — logon_banner_scan (summary) + logon_banner_findings
+    (per-row list) must survive save/load through to_dict/from_dict so
+    the GUI side-panel keeps rendering last-scan state across restarts.
+    """
+    summary = {
+        "run_id":          "logon_20261006T120000Z_abcdef",
+        "ts":              "2026-10-06T12:00:00Z",
+        "instance_nr":     "00",
+        "port":            3200,
+        "elapsed_s":       0.42,
+        "pair_count":      7,
+        "raw_text_bytes":  123,
+        "hits_by_severity": {"CRITICAL": 1, "HIGH": 0, "MEDIUM": 2, "INFO": 0},
+        "loot_text_path":  "loot/logon_banners/S4H/logon_X_00_3200.txt",
+        "loot_json_path":  "loot/logon_banners/S4H/logon_X_00_3200.json",
+        "error_kind":      None,
+    }
+    findings = [
+        {"severity": "CRITICAL", "pattern_name": "user_password_adjacent",
+         "category": "credentials", "match": "User sapmap00 Password Andinyougo",
+         "snippet": "...", "offset": 0,
+         "attack_capability": "creds.diag_login_screen_leak"},
+        {"severity": "MEDIUM", "pattern_name": "email_address",
+         "category": "pii", "match": "basis@example.com",
+         "snippet": "...", "offset": 50,
+         "attack_capability": "data.diag_login_screen_leak"},
+    ]
+    node = SAPNode(
+        sid="S4H",
+        logon_banner_scan=summary,
+        logon_banner_findings=findings,
+    )
+    d = node.to_dict()
+    restored = SAPNode.from_dict(d)
+    assert restored.logon_banner_scan == summary
+    assert restored.logon_banner_findings == findings
+
+
+def test_sapnode_logon_banner_fields_default_empty_when_not_set():
+    """A node that has never been scanned should round-trip with
+    empty-but-truthy defaults, not with KeyError or None."""
+    node = SAPNode(sid="S4H")
+    d = node.to_dict()
+    assert d["logon_banner_scan"] == {}
+    assert d["logon_banner_findings"] == []
+    restored = SAPNode.from_dict(d)
+    assert restored.logon_banner_scan == {}
+    assert restored.logon_banner_findings == []
+
+
 def test_sapnode_ms_fields_roundtrip():
     node = SAPNode(
         sid="S4H",

@@ -251,6 +251,22 @@ CAPABILITY_MAP: Dict[str, List[str]] = {
     # authenticated HTTP GET.  Data-from-repositories + cloud-service
     # discovery in one shot.
     "data.wd_backend_table_read": ["T1213", "T1526"],
+    # DIAG login-screen text scrape (issue #68).  The scan action itself
+    # is passive system-information discovery — fetch the login banner,
+    # parse the DYNT atoms, return the visible text.  The downstream
+    # creds./data. keys below cover WHAT the banner leaks when the admin
+    # posted something they shouldn't have.
+    "recon.logon_banner_scan":   ["T1082"],
+    # Clear-text credentials disclosed on the DIAG login banner — the
+    # banner acts as a plaintext credential file (admin pasted a service
+    # account + password on it so operators can self-serve, etc.).  Same
+    # T1552.001 mapping as wd_icmauth and btp_destinations.
+    "creds.diag_login_screen_leak": ["T1552.001"],
+    # Non-credential PII / infra data disclosed on the DIAG login banner
+    # — email addresses, phone numbers, internal IPs with contact cues.
+    # Banner acts as an information repository that leaks target
+    # metadata without authentication.
+    "data.diag_login_screen_leak": ["T1213"],
 
     # ---- Initial Access / Execution ----
     # NOTE: "exploit.10kblaze" is a historical capability key — it actually
