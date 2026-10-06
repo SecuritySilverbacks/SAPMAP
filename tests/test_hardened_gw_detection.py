@@ -268,3 +268,89 @@ def test_betrusted_chain_wires_in_trust_probe_before_poll():
     # Never kill the main attack path — the whole thing is in a try/
     # except that logs and continues.
     assert "MS trust probe skipped" in src
+
+
+# ---------------------------------------------------------------------------
+# attacker_ip source-mismatch auto-correct (A4H kernel 916 scenario,
+# user log 2026-10-06) — betrusted() must swap the auto-detected
+# routing-table IP for sock.getsockname()[0] when they differ, otherwise
+# MS silently drops MOD_STATE and SMMS never shows our entry.
+# ---------------------------------------------------------------------------
+
+def test_betrusted_accepts_attacker_ip_auto_detected_kwarg():
+    """The caller signals 'I auto-detected the IP via a routing-table
+    lookup — feel free to override me with the actual socket source
+    IP if they differ'.  Default is False so existing callers that
+    pass an explicit attacker_ip are honoured verbatim."""
+    import inspect
+    import sap_ms_betrusted
+    sig = inspect.signature(sap_ms_betrusted.betrusted)
+    assert "attacker_ip_auto_detected" in sig.parameters
+    assert sig.parameters["attacker_ip_auto_detected"].default is False
+
+
+def test_betrusted_chain_sets_auto_detected_flag_on_auto_path():
+    """When sap_betrusted_chain's try_betrusted_chain derives the IP
+    via _get_local_ip_towards (operator passed empty), it must pass
+    attacker_ip_auto_detected=True so betrusted() knows it can swap.
+    When the operator passed an explicit IP, the flag stays False."""
+    src = (REPO_ROOT / "modules" / "exploitation" / "sap_betrusted_chain.py"
+           ).read_text(encoding="utf-8")
+    # The auto-detected path sets the flag to True.
+    assert "attacker_ip_auto_detected = False" in src
+    assert "attacker_ip_auto_detected = True" in src
+    # The flag is threaded through into the betrusted() call.
+    assert "attacker_ip_auto_detected=attacker_ip_auto_detected" in src
+
+
+def test_betrusted_swap_log_cites_sock_getsockname():
+    """When betrusted() swaps the auto-detected IP for the actual
+    socket source, the log line must explain WHY (Docker-bridge /
+    VPN / multi-route) so the operator understands the correction."""
+    src = (REPO_ROOT / "modules" / "exploitation" / "sap_ms_betrusted.py"
+           ).read_text(encoding="utf-8")
+    assert "sock.getsockname" in src
+    # The swap log line
+    assert "auto-detected" in src
+    assert "swapping to" in src
+    # The explanatory hint
+    assert "Docker" in src and "VPN" in src
+
+
+def test_betrusted_warns_but_does_not_swap_when_operator_set_explicit_ip():
+    """When the operator explicitly passed attacker_ip (not auto-
+    detected), betrusted() must NOT silently swap — they may have a
+    reason (reverse tunnel, SAProuter translation).  Log a loud
+    warning but keep the operator's choice."""
+    src = (REPO_ROOT / "modules" / "exploitation" / "sap_ms_betrusted.py"
+           ).read_text(encoding="utf-8")
+    assert "silently discard MOD_STATE" in src
+    assert "Pass attacker_ip=" in src
+
+
+def test_probe_ms_server_list_returns_local_ip_field():
+    """The probe's own TCP source IP is a secondary needle candidate
+    — if the user-provided needle doesn't match but the probe's own
+    source IP does, that's a strong hint that the operator's
+    attacker_ip is wrong.  Pin: probe_ms_server_list must return a
+    local_ip key for the chain to use in its diagnostic message."""
+    # Hit an unreachable port to confirm the key is always present,
+    # not just on the happy path.
+    result = probe_ms_server_list(
+        "127.0.0.1", 1, needle="192.168.2.196", timeout=0.5)
+    assert "local_ip" in result
+    # On connect-fail the local_ip is empty (the socket never bound).
+    assert result["local_ip"] == ""
+
+
+def test_chain_surface_diagnostic_mismatch_hint():
+    """When the probe's local_ip differs from attacker_ip AND the
+    SERVER_LONG_LIST reply doesn't contain the needle, the chain
+    must emit a hint pointing to the actual source IP so the
+    operator sees the Docker-bridge / routing mismatch at a
+    glance."""
+    src = (REPO_ROOT / "modules" / "exploitation" / "sap_betrusted_chain.py"
+           ).read_text(encoding="utf-8")
+    assert "Probe's own TCP source was" in src
+    assert "Re-run with" in src
+    assert "attacker_ip=" in src
