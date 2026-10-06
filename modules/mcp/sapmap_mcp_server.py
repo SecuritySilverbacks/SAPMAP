@@ -444,7 +444,7 @@ def check_vulnerability(sid: str, vuln: str) -> str:
     Args:
         sid: Target system SID (or empty for landscape-wide checks)
         vuln: Vulnerability to check:
-            - gw: Gateway SAPXPG (10KBlaze)
+            - gw: Gateway SAPXPG (unauth reginfo/secinfo bypass)
             - ms: Message Server betrusted (CVE-2020-6207)
             - ms_info: Message Server text/dump info disclosure
                 (missing ms/acl_info + ms/HTTP/acl_info — SAP Notes
@@ -769,6 +769,111 @@ def autopwn(max_waves: int = 5, scan_gw: bool = True,
         "include_btp": include_btp,
     })
     _wait_for_tasks(timeout=3600)
+    return json.dumps(resp)
+
+
+# ===== TOOLS: Password Spraying (issue #69) =====
+
+
+@mcp.tool()
+def pwspray_sweep(dry_run: bool = True,
+                   cap_per_user: int = 1,
+                   purple_mode: bool = False,
+                   single_sid: str = "",
+                   accept_lockout_risk: bool = False,
+                   include_production: bool = False,
+                   accept_production_risk: bool = False) -> str:
+    """Launch the landscape password-spraying sweep (issue #69).
+
+    SAFE DEFAULT: ``dry_run=True`` resolves the pool + target matrix
+    + per-target lockout profile WITHOUT opening any sockets.  Live
+    spray requires BOTH ``dry_run=False`` AND
+    ``accept_lockout_risk=True`` — the backend returns HTTP 400
+    ``accept_lockout_risk_required`` otherwise.
+
+    The spray engine still enforces every lockout invariant:
+      * per-user cap clamped to [1, 2] (``cap_per_user`` is a
+        request; the engine floors to 1 when the target's lockout
+        policy is unknown)
+      * SAP* / DDIC + 14 service users skipped by default
+      * landscape-wide locked-user cache (any lock → ban)
+      * cross-target circuit breaker (3 locks → halt)
+      * audit JSONL writes pw_sha256_prefix, never cleartext
+
+    When ``purple_mode=True`` the engine also captures USR02 baseline
+    pre-spray + readback post-spray, computes LOCNT deltas per user,
+    and materialises ``loot/spray/<run_id>/purple_report.{md,html}``
+    — a blue-team deliverable enumerating the SAL class 00 numbers,
+    SM21 fragments and USR02 counter deltas the SOC's SIEM should
+    have correlated.  ``purple_mode`` is suppressed on a dry-run.
+
+    Args:
+        dry_run: Default True — resolves pool + target matrix only,
+                  no DIAG logon attempts.
+        cap_per_user: Attempts per (sid, client, user).  Clamped to
+                       [1, 2] server-side.
+        purple_mode: Capture USR02 baseline + readback + emit the
+                      blue-team purple_report deliverable.
+        single_sid: Empty = whole landscape; a SID = scope to one
+                     system.
+        accept_lockout_risk: REQUIRED alongside dry_run=False.
+        include_production: Include is_production=True nodes.
+                             REQUIRES accept_production_risk=True.
+        accept_production_risk: Second-factor for production.
+    """
+    if (ro := _read_only_guard()):
+        return ro
+    resp = _api("POST", "/api/actions/password_spray", {
+        "dry_run": dry_run,
+        "cap_per_user": cap_per_user,
+        "purple_mode": purple_mode,
+        "single_sid": single_sid,
+        "accept_lockout_risk": accept_lockout_risk,
+        "include_production": include_production,
+        "accept_production_risk": accept_production_risk,
+    })
+    # Surface the arm-gate / accept-risk / already-running refusals
+    # as actionable text rather than polling for a task that will
+    # never land.
+    if isinstance(resp, dict) and resp.get("error"):
+        return json.dumps(resp)
+    # Landscape sprays can run minutes — 1800s is twice the autopwn
+    # polling budget / landscape — enough margin for a 20-SID
+    # engagement.
+    _wait_for_tasks(timeout=1800)
+    return json.dumps(resp)
+
+
+@mcp.tool()
+def pwspray_status() -> str:
+    """Return the current password-spray status singleton (issue #69).
+
+    Reports running / finished / phase (idle | collect_pool |
+    profile_probe | baseline | spray | readback | report | done),
+    attempts_done / attempts_total, hits / locks counters, and the
+    aborted reason when non-empty.  Read-only — never writes.
+
+    Not arm-gated for READ: an unarmed session still returns
+    HTTP 200 with the idle default so a scripted monitor can
+    confirm the engine is quiescent before launching.  (A spray
+    LAUNCH is still 403-gated.)
+    """
+    resp = _api("GET", "/api/actions/password_spray/status")
+    return json.dumps(resp)
+
+
+@mcp.tool()
+def pwspray_runs() -> str:
+    """Return the password-spray run history (issue #69).
+
+    Each entry is a SprayRun.to_dict() with run_id, started_at,
+    finished_at, attempts_done, hits (list of {sid, client, user,
+    source_kind, source_sid, result}), locked_users (list of
+    usernames), aborted reason, loot_path (per-run on-disk audit
+    + optional purple_report), and purple_baseline_available /
+    purple_report_generated flags.  Newest-first.
+    """
+    resp = _api("GET", "/api/actions/password_spray/runs")
     return json.dumps(resp)
 
 

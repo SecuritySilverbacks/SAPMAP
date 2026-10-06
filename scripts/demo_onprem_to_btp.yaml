@@ -1,7 +1,7 @@
 # SAPMAP playbook: on-prem → BTP full lateral pivot
 #
 #   1. Discover S4H on the lab subnet
-#   2. Check Gateway (10KBlaze / SAPXPG) vulnerability
+#   2. Check Gateway SAPXPG (unauth reginfo/secinfo bypass) vulnerability
 #   3. Create a SAPMAP user with SAP_ALL via the GW exploit
 #   4. Download the ABAP SecStore (RSECTAB) so OAuth client_secret
 #      values become available
@@ -46,7 +46,8 @@ steps:
     mode: fast
     timeout: 600
 
-  # 2. Check Gateway for SAPXPG / 10KBlaze (CVE-2020-6207 family).
+  # 2. Check Gateway for SAPXPG (unauth reginfo/secinfo bypass; SAP
+  #    Note 1408081, CVE-2019-0330).
   #    On a stock SAP gateway with `gw/reg_no_conn_info=0` this
   #    answers True without any creds.
   - action: check_gw

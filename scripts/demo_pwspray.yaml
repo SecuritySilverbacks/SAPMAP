@@ -1,0 +1,65 @@
+# ----------------------------------------------------------------------------
+# demo_pwspray.yaml — Password-spraying playbook (issue #69)
+# ----------------------------------------------------------------------------
+#
+# Prerequisites:
+#   Run this playbook with --confirm when you flip dry_run: false:
+#     python3 sapmap.py --script scripts/demo_pwspray.yaml --confirm
+#
+# Default is DRY-RUN — the backend will resolve the pool + target matrix
+# and return a per-target budget preview WITHOUT opening any sockets.
+# A live sweep ALSO requires accept_lockout_risk: true in the step.
+# ----------------------------------------------------------------------------
+
+name: pwspray-landscape-demo
+description: >
+  Discovery scan → RFC enumeration → SecStore extraction to seed the
+  credential pool → DRY-RUN password spray across the landscape.
+  Flip dry_run and accept_lockout_risk to go live.
+
+steps:
+  # 1. Discovery + fingerprint
+  - action: scan
+    targets: "192.168.2.0/24"
+    mode: fast
+
+  # 2. For every pwned/credentialed ABAP node, run RFC + SecStore
+  #    enrichment so the credential pool sees SecStore / BTP / OA2C
+  #    entries BEFORE the spray resolves the pool.  (If you launch
+  #    the playbook against a clean landscape, these early steps are
+  #    the ones that put interesting pool entries on the table.)
+  - action: retrieve_rfcs
+    target: "all"
+  - action: download_secstore
+    target: "all"
+  - action: harvest_btp_creds
+    target: "all"
+
+  # 3. DRY-RUN password spray.  Default = safe preview.
+  - action: password_spray
+    dry_run: true
+    cap_per_user: 1
+    # Enable purple mode to pair each attempt with its expected
+    # SAL/SM21 signal + USR02 counter delta — the loot/spray/<run_id>/
+    # purple_report.{md,html} is the blue-team deliverable.
+    purple_mode: false
+
+  # ---- GO LIVE (uncomment to flip to a real spray) ----------------------
+  # Requires BOTH dry_run: false AND accept_lockout_risk: true.  The
+  # backend returns 400 accept_lockout_risk_required otherwise.
+  #
+  # - action: password_spray
+  #   dry_run: false
+  #   accept_lockout_risk: true
+  #   cap_per_user: 1               # [1, 2] — clamped server-side
+  #   single_sid: ""                # "" = whole landscape; set a SID
+  #                                 # to scope to one system
+  #   include_production: false     # true requires accept_production_risk
+  #   accept_production_risk: false
+  #   purple_mode: true             # writes blue-team deliverable
+  # ----------------------------------------------------------------------
+  #
+  # To export an engagement report after the spray, use the GUI
+  # (File → Export Report) or the HTTP endpoint /api/report/export —
+  # no script-step wrapper for report export is in sapmap_script.py.
+

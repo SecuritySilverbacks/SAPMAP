@@ -225,7 +225,6 @@ def main():
                              "Requires explicit written authorization for "
                              "active-evasion testing against in-scope "
                              "targets.")
-
     args = parser.parse_args()
 
     # Logging
