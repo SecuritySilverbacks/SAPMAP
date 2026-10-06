@@ -63,6 +63,60 @@ def test_password_user_adjacent_reversed_order():
     assert "password_user_adjacent" in _names(findings)
 
 
+def test_user_password_adjacent_bracketed_multiword_value_not_truncated():
+    """Regression pin — observed live on an authorized NPL lab banner
+    (2026-10-06): an admin posted ``User: Joris Password: <zou je wel
+    willen weten he?>`` as a joke, but the catalogue's ``\\S+`` capture
+    stopped at the first whitespace and showed only ``<zou`` in the
+    GUI results modal, hiding the fact the "password" was actually a
+    Dutch joke message.  The ``_VALUE_SHAPES`` alternation now
+    captures bracketed / quoted / parenthesised multi-word values as
+    alternatives to ``\\S+``, so operators see the full leaked string.
+    """
+    banner = "User: Joris Password: <zou je wel willen weten he?>"
+    findings = scan_text(banner)
+    hits = [f for f in findings
+            if f["pattern_name"] == "user_password_adjacent"]
+    assert hits, "regex failed to fire on the multi-word banner"
+    # The full "<...>" value must land in the match, including the
+    # closing bracket — operator reads it right off the UI without
+    # having to dig into the loot JSON.
+    assert "<zou je wel willen weten he?>" in hits[0]["match"]
+
+
+def test_user_password_adjacent_quoted_value_shapes_all_captured():
+    """Four common 'quoted' password-value shapes all land in the
+    match verbatim: <angle>, "double", 'single', [square], (paren).
+    Bare \\S+ remains the fallback so single-word values still work."""
+    cases = [
+        ("User: j Password: <multi word>",         "<multi word>"),
+        ("User: j Password: \"multi word\"",        '"multi word"'),
+        ("User: j Password: 'multi word'",         "'multi word'"),
+        ("User: j Password: [multi word]",         "[multi word]"),
+        ("User: j Password: (multi word)",         "(multi word)"),
+        ("User: j Password: SingleWord!",          "SingleWord!"),
+    ]
+    for banner, expected in cases:
+        findings = scan_text(banner)
+        hits = [f for f in findings
+                if f["pattern_name"] == "user_password_adjacent"]
+        assert hits, f"no match on {banner!r}"
+        assert expected in hits[0]["match"], (
+            f"expected {expected!r} in match {hits[0]['match']!r}")
+
+
+def test_password_user_adjacent_bracketed_value_shapes():
+    """Same ``_VALUE_SHAPES`` alternation on the password-first
+    reverse pattern — a banner that puts password before user with
+    a quoted value must still capture the full value."""
+    banner = 'Password: "my long value here" User: sapmap00'
+    findings = scan_text(banner)
+    hits = [f for f in findings
+            if f["pattern_name"] == "password_user_adjacent"]
+    assert hits, "reverse-order regex missed the quoted-value shape"
+    assert '"my long value here"' in hits[0]["match"]
+
+
 def test_user_password_adjacent_german_vocabulary():
     """SAP shops in DACH often post in German — the regex catalogue
     needs to cover 'Kennwort' and 'Passwort' not just 'password'."""
