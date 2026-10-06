@@ -153,6 +153,12 @@ def test_every_capability_in_attack_map_has_remediation_or_explicit_exemption():
         # always "fix the underlying channel" which is already
         # covered by lateral.gw_xpg / lateral.cve_2025_31324 / etc.
         "data.fs_list", "data.fs_download", "data.fs_upload",
+        # Logon-banner scan action (Issue #68) — passive DIAG read.
+        # No vendor fix: this is the scanner itself, not a target
+        # vulnerability.  Real security findings land as the paired
+        # creds.diag_login_screen_leak / data.diag_login_screen_leak
+        # capabilities, both of which DO have catalog entries.
+        "recon.logon_banner_scan",
     }
     missing = []
     for cap in sapmap_attack.CAPABILITY_MAP:
