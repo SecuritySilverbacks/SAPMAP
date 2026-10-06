@@ -44,7 +44,18 @@ import argparse
 from collections import OrderedDict
 
 # Reuse the connection and NI-framing helpers from the client-enum module.
-from sap_client_enum import _diag_connect, ni_send, ni_recv
+#
+# Dual-path import: SAPMAP loads modules both via the top-level
+# ``modules/*`` sys.path injection (regular dev / CLI runs) AND via the
+# packaged ``files.*`` layout used by the Bottle GUI backend when
+# ``modules/__init__.py`` has not been imported yet.  The sibling
+# ``sap_default_creds.py`` already uses this exact pattern — mirror it so
+# the GUI's lazy import does not crash with ``ModuleNotFoundError`` the
+# first time an operator triggers a logon-screen scan from the UI.
+try:
+    from sap_client_enum import _diag_connect, ni_send, ni_recv
+except ImportError:
+    from files.sap_client_enum import _diag_connect, ni_send, ni_recv
 
 
 # ============================================================================
@@ -270,11 +281,53 @@ def parse_dynt_atoms(value):
 # Value formatting / rendering (mirrors the original example)
 # ============================================================================
 
+def _decode_dyn_text(value):
+    """Decode a DYNT-atom text payload to str, tolerating UTF-16LE kernels.
+
+    The DIAG protocol advertises codepage=1100 (Latin-1 / UTF-8 lookalike)
+    in the TERM_INI handshake, but modern SAP Unicode kernels (7.5x+)
+    frequently return DYNT atom text as UTF-16LE on the wire regardless
+    of that advertised codepage.  A naive ``value.decode('utf-8',
+    errors='replace')`` turns the latter into ``"S\\x00A\\x00P\\x00..."``
+    — the embedded NULs survive and the secrets regex catalogue misses
+    every match.
+
+    Discriminating heuristic: in UTF-16LE-encoded ASCII text, byte 1
+    (the high byte of the first code unit) is ALWAYS 0, byte 3 is 0,
+    byte 5 is 0, ...  In classic UTF-8 ASCII with NUL padding
+    (DIAG fixed-width fields like DBNAME) the trailing bytes are
+    NUL but byte 1 is NOT.  Checking ``data[1] == 0`` AND
+    ``data[0]`` printable-ASCII catches real UTF-16LE text with no
+    false positives on NUL-padded UTF-8 strings.
+
+    Both decoders use ``errors='replace'`` so the function never
+    raises; trailing NULs are stripped.
+    """
+    if not isinstance(value, (bytes, bytearray)):
+        return value
+    data = bytes(value)
+    looks_utf16 = (
+        len(data) >= 4
+        and len(data) % 2 == 0
+        and 0x20 <= data[0] <= 0x7E
+        and data[1] == 0           # UTF-16LE ASCII char: high byte == 0
+    )
+    if looks_utf16:
+        return data.decode("utf-16-le", errors="replace").rstrip("\x00")
+    return data.decode("utf-8", errors="replace").rstrip("\x00")
+
+
 def _to_str(value):
-    """Decode item bytes to a string, dropping trailing NULs."""
-    if isinstance(value, bytes):
-        return value.decode("utf-8", errors="replace").rstrip("\x00")
-    return value
+    """Decode item bytes to a string, dropping trailing NULs.
+
+    Delegates to ``_decode_dyn_text`` so every call site that renders
+    DIAG item bytes also gets the UTF-16LE / Unicode-kernel fallback —
+    not just the DYNT atoms behind ``collect_text_info``.  SERV_INFO
+    fields (DBNAME, CPUNAME, KERNEL_VERSION, LANGUAGE, SESSION_TITLE,
+    SESSION_ICON) also come across as UTF-16LE on Unicode kernels and
+    would otherwise print as ``"A\\x00B\\x00C"`` instead of ``"ABC"``.
+    """
+    return _decode_dyn_text(value)
 
 
 def _fmt_language(value):
@@ -332,7 +385,11 @@ def collect_text_info(items):
         dico = OrderedDict()
         for atom in parse_dynt_atoms(val):
             var = _to_str(atom["name_text"]) if atom["name_text"] else ""
-            value = atom["field_text"].decode("utf-8", errors="replace") \
+            # Route the DYNT atom field_text through the same Unicode-
+            # kernel-aware decoder (see ``_decode_dyn_text``) so operator-
+            # posted banner strings on 7.5x+ systems don't come across
+            # as ``"S\x00A\x00P\x00..."``.
+            value = _decode_dyn_text(atom["field_text"]) \
                 if atom["field_text"] else ""
             key = "%s_%s" % (atom["row"], atom["col"])
             if key not in dico:
@@ -496,7 +553,21 @@ def fetch_login_items(host, port, options, terminal):
                   % len(login_screen))
             return None
 
-        return list(walk_items(login_screen))
+        # ``walk_items`` raises ValueError on a compressed DIAG response
+        # (byte 7 of the DIAG header != 0).  The pysap-era CLI tolerated
+        # that because an uncaught exception just exited; from the GUI's
+        # ``_bg`` worker it would kill the background task and leave the
+        # operator with no diagnostic.  Catch it here and return None so
+        # the caller surfaces a clean "compressed response, skipped"
+        # verdict instead of crashing the whole scan.
+        try:
+            return list(walk_items(login_screen))
+        except ValueError as exc:
+            print("[!] DIAG response is not a parseable login screen "
+                  "(%s).  Likely a compressed DIAG payload or an "
+                  "unknown item type the parser cannot skip past; "
+                  "treat as non-login-screen and move on." % exc)
+            return None
     finally:
         try:
             sock.close()
