@@ -456,10 +456,10 @@ def test_probe_ms_server_list_returns_local_ip_field():
 
 def test_chain_surface_diagnostic_mismatch_hint():
     """When the probe's local_ip differs from attacker_ip AND the
-    SERVER_LONG_LIST reply doesn't contain the needle AND the
-    secondary needle (probe local_ip) also missed, the chain must
-    emit a hint explaining what the operator is looking at — but
-    not tell them to "re-run with X" since betrusted now
+    SERVER_LONG_LIST reply is LARGE enough to contain real entries
+    AND still doesn't contain either needle, the chain must emit a
+    "both IPs missing" hint explaining what the operator is looking
+    at — but not tell them to "re-run with X" since betrusted now
     auto-swaps on its own (user log 2026-10-06)."""
     src = (REPO_ROOT / "modules" / "exploitation" / "sap_betrusted_chain.py"
            ).read_text(encoding="utf-8")
@@ -470,3 +470,29 @@ def test_chain_surface_diagnostic_mismatch_hint():
     import re as _re
     collapsed = _re.sub(r'"\s*\n\s*(f?)"', "", src)
     assert "betrusted should have auto-swapped" in collapsed
+
+
+def test_chain_probe_short_reply_treated_as_inconclusive():
+    """Follow-up (user log 2026-10-06): the MS strips the server
+    list for unauthenticated LOGIN_2 probe clients, returning a
+    short (~151 B) empty-ADM envelope regardless of whether the
+    inject landed.  The chain must NOT misinterpret that as "inject
+    never landed" — it is inconclusive.  Only a LARGE reply that is
+    missing both needles is a strong "inject failed" signal.
+
+    Threshold: 110 (MS header) + 36 (ADM extended header) + 104 (one
+    SERVER_LONG_LIST record) = 250 B.  Below that, there is no room
+    for even a single real entry."""
+    src = (REPO_ROOT / "modules" / "exploitation" / "sap_betrusted_chain.py"
+           ).read_text(encoding="utf-8")
+    assert "SHORT_REPLY_THRESHOLD = 250" in src
+    # The short-reply branch must emit a neutral informational
+    # message, not the alarming "inject never landed" one.
+    import re as _re
+    collapsed = _re.sub(r'"\s*\n\s*(f?)"', "", src)
+    assert "too short to contain any server-list entries" in collapsed
+    assert "NEITHER a confirmation nor a denial of the inject" in collapsed
+    # And must point the operator at the real signal: AD_GET_NILIST_
+    # PORT further down the log.
+    assert "AD_GET_NILIST_PORT" in src
+    assert "authoritative registration-committed signal" in collapsed
