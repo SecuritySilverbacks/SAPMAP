@@ -15473,12 +15473,22 @@ async function _renderLogonBannerSweepFindings(runs) {
           '<tr>'
         + '<td style="border-left:3px solid ' + _sweepLogonSevColor(f.severity)
         +   ';padding-left:8px;color:' + _sweepLogonSevColor(f.severity)
-        +   ';font-weight:600;font-size:11px">' + _escapeHtml(f.severity) + '</td>'
-        + '<td><code>' + _escapeHtml(pn.sid) + '</code></td>'
-        + '<td><code>' + _escapeHtml(f.pattern_name) + '</code></td>'
-        + '<td style="color:#8b949e;font-size:11px">' + _escapeHtml(f.category) + '</td>'
-        + '<td style="font-family:monospace;font-size:11px;color:#f85149;word-break:break-all">'
-        +   _escapeHtml(f.match) + '</td>'
+        +   ';font-weight:600;font-size:11px;vertical-align:top">'
+        +     _escapeHtml(f.severity) + '</td>'
+        + '<td style="vertical-align:top"><code>' + _escapeHtml(pn.sid) + '</code></td>'
+        + '<td style="vertical-align:top"><code>' + _escapeHtml(f.pattern_name) + '</code></td>'
+        + '<td style="color:#8b949e;font-size:11px;vertical-align:top">'
+        +   _escapeHtml(f.category) + '</td>'
+        // Match cell: block-level wrapper with overflow-wrap:anywhere
+        // so long cleartext (e.g. "User: X Password: <long value>")
+        // wraps inside the fixed-width Match column instead of
+        // overflowing the modal and getting clipped at the right edge.
+        + '<td style="font-family:monospace;font-size:11px;color:#f85149;'
+        +   'vertical-align:top">'
+        +   '<div style="overflow-wrap:anywhere;word-break:break-word;'
+        +     'white-space:pre-wrap">'
+        +     _escapeHtml(f.match)
+        +   '</div></td>'
         + '</tr>');
     }
   }
@@ -15499,7 +15509,21 @@ async function _renderLogonBannerSweepFindings(runs) {
     }
   }
   const table = rows.length
-    ? '<table style="width:100%;border-collapse:collapse;font-size:12px">'
+    // table-layout:fixed + explicit col widths so the Sev/SID/Pattern/
+    // Category columns stay narrow and the Match column takes the
+    // remaining space (and wraps inside its cell via the per-cell
+    // overflow-wrap:anywhere above).  Without this the Match cell
+    // expands to fit the longest value and gets clipped at the
+    // modal's right edge.
+    ? '<table style="width:100%;border-collapse:collapse;'
+      +   'font-size:12px;table-layout:fixed">'
+      + '<colgroup>'
+      +   '<col style="width:70px">'    // Sev
+      +   '<col style="width:70px">'    // SID
+      +   '<col style="width:200px">'   // Pattern
+      +   '<col style="width:90px">'    // Category
+      +   '<col>'                       // Match (expands to fill)
+      + '</colgroup>'
       + '<thead><tr style="text-align:left;color:#8b949e;border-bottom:1px solid #30363d">'
       +   '<th>Sev</th><th>SID</th><th>Pattern</th><th>Category</th><th>Match</th>'
       + '</tr></thead><tbody>' + rows.join('') + '</tbody></table>'
