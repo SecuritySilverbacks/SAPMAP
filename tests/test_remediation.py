@@ -67,6 +67,12 @@ def test_every_capability_in_attack_map_has_remediation_or_explicit_exemption():
         # to surface the SWEEP itself on the ATT&CK grid, not to
         # duplicate the vendor-fix guidance.
         "recon.brute_force_default",
+        # Purple-mode telemetry readback (issue #69) — operator-side
+        # defender-telemetry capture (expected SAL event classes,
+        # USR02.LOCNT deltas, SIEM-correlation strings).  Not a
+        # target vulnerability; the sprayed-credential HIT itself
+        # carries the real fix (creds.password_spray).
+        "creds.password_spray_purple_telemetry",
         # PSE export via LPE / ticket-forge chain — the fix (rotate
         # SAPSYS.pse + refresh STRUSTSSO2 trust) is covered by the
         # ticket-forgery remediation the parent key carries.
@@ -99,6 +105,12 @@ def test_every_capability_in_attack_map_has_remediation_or_explicit_exemption():
         "ransapware.encrypt", "ransapware.decrypt",
         # Tier 3 evasion — operator-side OPSEC, no target fix.
         "evasion.death_star", "evasion.rsau_disable",
+        # UCON toggle (issue #27) — operator-side OPSEC (temporarily
+        # disable the UCON allowlist to execute payload FMs, then
+        # restore).  Same shape as evasion.rsau_disable: no fix on
+        # the TARGET, defender's job is to detect the flip in SAL /
+        # SM21.  Read-only UCON probe is awareness-only.
+        "evasion.ucon_disable", "recon.ucon_status",
         # Persistence sub-actions covered by persist.create_user etc.
         "persist.sap_all_assign", "persist.ssh_key_plant",
         "persist.web_shell",

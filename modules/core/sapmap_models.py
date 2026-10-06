@@ -627,7 +627,7 @@ class SAPNode:
     # kloris/SAPMAP#41 — True when the MS internal port speaks TLS
     # (system/secure_communication = ON).  Detected via a TLS
     # ClientHello probe in sap_ms_betrusted.probe_ms_tls_required.
-    # When True, both 10KBLAZE (CVE-2020-6207) and CVE-2026-58240
+    # When True, both 10KBLAZE betrusted (SAP Note 2890213) and CVE-2026-58240
     # ASCS_GW rogue registration are BLOCKED at the wire layer —
     # SAPMAP does not speak SNC/SystemPKI yet.
     ms_secure_comms_required: bool = False
@@ -918,6 +918,49 @@ class SAPNode:
     # repeat opens (BSEG is huge; uncached COUNT(*) burns seconds).
     capability_row_counts: dict = field(default_factory=dict)
 
+    # Password-spraying (issue #69) — cached ABAP kernel lockout
+    # policy from the pre-flight probe (TH_GET_PARAMETER on
+    # login/fails_to_user_lock + login/failed_user_auto_unlock) +
+    # the audit-profile knobs read at the same time.  Keeps repeat
+    # waves cheap and lets the GUI render the attempt-math preview
+    # without re-probing.  Keys: fails_to_user_lock,
+    # failed_user_auto_unlock, rsau_enable, rsau_ip_only,
+    # probed_at, probed_with_user, ucon_state_at_probe.
+    lockout_profile: dict = field(default_factory=dict)
+    # Short summary of the last spray run that touched this node —
+    # drives the tooltip surface on the map node + the Set-DB-Type
+    # style card detail row.  Keys: run_id, ts, attempts, hits,
+    # locked_users (list of unames), coverage_notes.
+    spray_last_run: dict = field(default_factory=dict)
+    # Purple-mode per-attempt signal rows written only when
+    # SprayConfig.purple_mode is on — pairs each spray attempt with
+    # its expected SAL class/number + the observed USR02 counter
+    # delta.  Drives the "Defender View" tab in the results modal.
+    spray_purple_signals: list = field(default_factory=list)
+    # Per-node idempotency set (issue #69, PR5) — keyed as
+    # ``"client|user|pw_sha256_prefix"`` strings.  Written by the
+    # engine on every real attempt (hit / miss / locked) so a
+    # multi-wave AutoPwn doesn't re-fire the same triple on the
+    # next wave — the per-user cap and the lockout budget would
+    # otherwise effectively multiply by wave_count.  Persisted via
+    # to_dict as a sorted list; from_dict converts back to a set.
+    _pwspray_tested_triples: set = field(default_factory=set)
+    # Password-spray hit summaries (issue #69, PR5-de-gate).  One
+    # entry per HIT recorded during this engagement; the engine's
+    # post-hit authority probe populates ``authority_level`` as one
+    # of 'sap_all' / 'privileged' / 'unprivileged' / 'probe_failed'
+    # so the GUI can colour the node rim correctly:
+    #   sap_all        -> node.pwned = True + red rim (PWNED)
+    #   privileged     -> orange rim (working logon + roles, needs
+    #                     escalation)
+    #   unprivileged   -> yellow rim (working logon but no observed
+    #                     authorizations — probably dialog-only)
+    #   probe_failed   -> yellow rim (authority unknown)
+    # Each entry: {client, user, source_kind, source_sid,
+    #              pw_sha256_prefix, authority_level, profiles: list,
+    #              roles: list, note: str, ts: iso, run_id: str}
+    spray_hit_users: list = field(default_factory=list)
+
     # Computed helpers
     def has_access(self) -> bool:
         """True if we have any working credentials or created users."""
@@ -1100,6 +1143,12 @@ class SAPNode:
             "pp_verification_confirmed": self.pp_verification_confirmed,
             "capability_results": list(self.capability_results),
             "capability_row_counts": dict(self.capability_row_counts),
+            "lockout_profile": dict(self.lockout_profile or {}),
+            "spray_last_run": dict(self.spray_last_run or {}),
+            "spray_purple_signals": list(self.spray_purple_signals or []),
+            "_pwspray_tested_triples": sorted(
+                self._pwspray_tested_triples or set()),
+            "spray_hit_users": list(self.spray_hit_users or []),
         }
 
     @classmethod
@@ -1238,6 +1287,13 @@ class SAPNode:
             capability_results=list(d.get("capability_results", [])),
             capability_row_counts=dict(
                 d.get("capability_row_counts", {})),
+            lockout_profile=dict(d.get("lockout_profile", {})),
+            spray_last_run=dict(d.get("spray_last_run", {})),
+            spray_purple_signals=list(d.get("spray_purple_signals", [])),
+            _pwspray_tested_triples=set(
+                d.get("_pwspray_tested_triples", []) or []),
+            spray_hit_users=list(
+                d.get("spray_hit_users", []) or []),
         )
         return node
 
@@ -2088,6 +2144,27 @@ class SAPMAPState:
     # — the postex module that owns EvasionConfig already depends on
     # sapmap_models; reversing it would create a cycle.
     evasion: dict = field(default_factory=dict)
+    # Password-spraying bookkeeping (issue #69).
+    # ``spray_attempts_counter`` is keyed as ``"sid|client|user"`` and
+    # survives .sapmap round-trips so a crash-restart does NOT re-burn
+    # the per-user lockout budget.  Each value:
+    #   {count: int, last_result: str, last_at: iso,
+    #    locked_observed: bool, cap_computed: int, cap_source: str,
+    #    baseline_counter_at_probe: int}
+    spray_attempts_counter: dict = field(default_factory=dict)
+    # Landscape-wide locked-user cache.  ANY USER_LOCKED observation
+    # on ANY target adds the username here and REFUSES that user on
+    # every subsequent target in the engagement until the operator
+    # explicitly resets via /api/actions/password_spray/reset_history.
+    # Each value: {username: str, locked_on: list[[sid, client, at]],
+    #              unlock_eta: iso|None}
+    pwspray_locked_users: dict = field(default_factory=dict)
+    # Per-run summaries.  Full attempt streams live on disk under
+    # loot/spray/<run_id>/attempts.jsonl — keeps .sapmap small.  Each
+    # entry: {run_id, started_at, finished_at, config_snapshot,
+    #         totals, hits_count, locked_count, loot_path,
+    #         purple_report_generated}
+    spray_runs: list = field(default_factory=list)
     timestamp: str = ""
     version: str = "1.0"
 
@@ -2299,6 +2376,26 @@ class SAPMAPState:
             for s in (getattr(n, "ssh_access", None) or []):
                 if isinstance(s, dict) and s.get("from_sid") == old_sid:
                     s["from_sid"] = new_sid
+
+        # Password-spray bookkeeping (#69): keys embed the sid as
+        # "sid|client|user" — rewrite them so the per-user attempt
+        # budget survives a rename and the operator doesn't quietly
+        # get a fresh budget after a placeholder → real-SID swap.
+        if self.spray_attempts_counter:
+            renamed = {}
+            prefix = f"{old_sid}|"
+            for k, v in self.spray_attempts_counter.items():
+                if k.startswith(prefix):
+                    renamed[f"{new_sid}|{k[len(prefix):]}"] = v
+                else:
+                    renamed[k] = v
+            self.spray_attempts_counter = renamed
+        # The landscape-wide locked-users cache references sids inside
+        # each entry's locked_on list — rewrite in place.
+        for entry in (self.pwspray_locked_users or {}).values():
+            for row in (entry.get("locked_on") or []):
+                if row and len(row) >= 1 and row[0] == old_sid:
+                    row[0] = new_sid
 
         return ""
 
@@ -3245,6 +3342,9 @@ class SAPMAPState:
             "btp_subaccounts": {
                 u: n.to_dict() for u, n in self.btp_subaccounts.items()
             },
+            "spray_attempts_counter": dict(self.spray_attempts_counter or {}),
+            "pwspray_locked_users": dict(self.pwspray_locked_users or {}),
+            "spray_runs": list(self.spray_runs or []),
         }
 
     @classmethod
@@ -3276,6 +3376,11 @@ class SAPMAPState:
         state.dedupe_scc_nodes()
         for uuid, sub_d in d.get("btp_subaccounts", {}).items():
             state.btp_subaccounts[uuid] = BTPSubaccountNode.from_dict(sub_d)
+        state.spray_attempts_counter = dict(
+            d.get("spray_attempts_counter", {}))
+        state.pwspray_locked_users = dict(
+            d.get("pwspray_locked_users", {}))
+        state.spray_runs = list(d.get("spray_runs", []))
         # One-shot dedup pass: fold FQDN-keyed placeholder BTP nodes
         # (from earlier materialise_type_g_target runs) into any
         # real-UUID node that shares the same subdomain.  Handles

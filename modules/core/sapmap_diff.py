@@ -180,6 +180,14 @@ def compute_state_diff(baseline: SAPMAPState,
         "scc_nodes":   {"added": [], "removed": [], "changed": []},
         "trust_chains": {"added": [], "removed": []},
         "created_users": {"added": [], "removed": []},
+        # Password-spraying runs (issue #69, PR5).  Added entries
+        # are new SprayRun summaries keyed by run_id; removed is
+        # the rare case where state_a and state_b come from
+        # parallel engagements (or an operator ran reset_history
+        # between snapshots).  locked_users_added surfaces the
+        # defender-visible fallout.
+        "spray_runs":   {"added": [], "removed": [],
+                           "locked_users_added": []},
         "summary": {},
     }
 
@@ -315,6 +323,58 @@ def compute_state_diff(baseline: SAPMAPState,
     for k in sorted(set(base_users) - set(curr_users)):
         diff["created_users"]["removed"].append(_user_summary(base_users[k]))
 
+    # --- Password-spraying runs (issue #69, PR5) ---
+    # state.spray_runs is a list of SprayRun.to_dict() entries.
+    # Key by run_id for the delta; summarise only (never emit the
+    # per-attempt rows — those live in loot/spray/<run_id>/
+    # attempts.jsonl and would fan pw_sha256_prefix out across
+    # engagements if dumped here).
+    def _run_summary(r):
+        cfg = r.get("config_snapshot", {}) or {}
+        return {
+            "run_id":        r.get("run_id", ""),
+            "started_at":    r.get("started_at", ""),
+            "finished_at":   r.get("finished_at", ""),
+            "attempts_done": int(r.get("attempts_done", 0) or 0),
+            "hits_count":    len(r.get("hits", []) or []),
+            "locked_count":  len(r.get("locked_users", []) or []),
+            "aborted":       r.get("aborted", "") or "",
+            "purple_mode":   bool(cfg.get("purple_mode")),
+            "dry_run":       bool(cfg.get("dry_run")),
+            "scope":         str(cfg.get("scope_filter", {})),
+            "purple_report_generated": bool(
+                r.get("purple_report_generated")),
+            "loot_path":     r.get("loot_path", "") or "",
+        }
+
+    base_runs = {r.get("run_id", ""): r
+                  for r in (getattr(baseline, "spray_runs", []) or [])
+                  if r.get("run_id")}
+    curr_runs = {r.get("run_id", ""): r
+                  for r in (getattr(current, "spray_runs", []) or [])
+                  if r.get("run_id")}
+    for k in sorted(set(curr_runs) - set(base_runs)):
+        diff["spray_runs"]["added"].append(_run_summary(curr_runs[k]))
+    for k in sorted(set(base_runs) - set(curr_runs)):
+        diff["spray_runs"]["removed"].append(_run_summary(base_runs[k]))
+
+    # Newly-locked users (defender-visible fallout).  Set-diff on
+    # the keys of state.pwspray_locked_users.
+    base_locked = set(
+        (getattr(baseline, "pwspray_locked_users", {}) or {}).keys())
+    curr_locked = set(
+        (getattr(current, "pwspray_locked_users", {}) or {}).keys())
+    for user in sorted(curr_locked - base_locked):
+        entry = (getattr(current, "pwspray_locked_users", {})
+                 or {}).get(user, {}) or {}
+        rows = entry.get("locked_on") or []
+        first = rows[0] if rows else []
+        diff["spray_runs"]["locked_users_added"].append({
+            "username":        user,
+            "first_locked_sid": first[0] if len(first) >= 1 else "",
+            "first_locked_at":  first[2] if len(first) >= 3 else "",
+        })
+
     # --- Summary roll-up ---
     newly_pwned = [c["sid"] for c in diff["nodes"]["changed"]
                     if any(ch["field"] == "pwned" and ch["before"] is False
@@ -341,6 +401,15 @@ def compute_state_diff(baseline: SAPMAPState,
         "scc_removed":         len(diff["scc_nodes"]["removed"]),
         "users_created":       len(diff["created_users"]["added"]),
         "users_removed":       len(diff["created_users"]["removed"]),
+        # Password-spraying KPIs (PR5).
+        "spray_runs_added":    len(diff["spray_runs"]["added"]),
+        "spray_hits_added":    sum(
+            r["hits_count"] for r in diff["spray_runs"]["added"]),
+        "newly_locked_users":  len(
+            diff["spray_runs"]["locked_users_added"]),
+        "purple_runs_added":   sum(
+            1 for r in diff["spray_runs"]["added"]
+            if r.get("purple_mode")),
     }
     return diff
 
@@ -392,6 +461,12 @@ def build_diff_markdown(diff: dict) -> str:
         f"| SCCs removed     | {s['scc_removed']} |",
         f"| SAPMAP users created (delta) | {s['users_created']} |",
         f"| SAPMAP users removed (delta) | {s['users_removed']} |",
+        # Password-spraying KPIs (PR5).
+        f"| Password-spray runs (delta) | {s.get('spray_runs_added', 0)} |",
+        f"| Spray hits (delta) | {s.get('spray_hits_added', 0)} |",
+        f"| **Newly-locked users (defender-visible)** | "
+        f"**{s.get('newly_locked_users', 0)}** |",
+        f"| Purple-mode runs (delta) | {s.get('purple_runs_added', 0)} |",
         "",
     ]
 
@@ -548,6 +623,73 @@ def build_diff_markdown(diff: dict) -> str:
                 lines.append(f"- {_md_esc(u['sid'])} / {_md_esc(u['username'])}")
             lines.append("")
 
+    # Password-spraying runs (issue #69, PR5).
+    sr = diff.get("spray_runs", {}) or {}
+    if (sr.get("added") or sr.get("removed")
+            or sr.get("locked_users_added")):
+        lines += ["---", "", "## 🔓 Password spraying (delta)", ""]
+        if sr.get("added"):
+            lines.append(
+                f"### ➕ New runs ({len(sr['added'])})")
+            lines.append("")
+            for r in sr["added"]:
+                purple = " 🔮 purple" if r.get("purple_mode") else ""
+                dry = " (dry-run)" if r.get("dry_run") else ""
+                lines.append(
+                    f"- `{_md_esc(r['run_id'])}` — "
+                    f"{_md_esc(r['started_at'][:19])} → "
+                    f"{_md_esc((r.get('finished_at', '') or '—')[:19])}"
+                    f"{purple}{dry}"
+                )
+                lines.append(
+                    f"  - **{r['attempts_done']}** attempt(s), "
+                    f"**{r['hits_count']}** hit(s), "
+                    f"**{r['locked_count']}** lockout(s)"
+                    + (f" — aborted: `{_md_esc(r['aborted'])}`"
+                       if r.get("aborted") else "")
+                )
+                if r.get("purple_report_generated") and r.get("loot_path"):
+                    lines.append(
+                        f"  - Blue-team deliverable: "
+                        f"`{_md_esc(r['loot_path'])}/purple_report.{{md,html}}`"
+                    )
+            lines.append("")
+        if sr.get("locked_users_added"):
+            lines.append(
+                f"### 🚨 Newly-locked users "
+                f"({len(sr['locked_users_added'])})")
+            lines.append("")
+            for u in sr["locked_users_added"]:
+                lines.append(
+                    f"- **{_md_esc(u['username'])}** — first locked on "
+                    f"`{_md_esc(u.get('first_locked_sid', ''))}` at "
+                    f"{_md_esc(u.get('first_locked_at', ''))}"
+                )
+            lines.append("")
+        if sr.get("removed"):
+            # The rare case where reset_history ran between the two
+            # snapshots OR state_a and state_b come from parallel
+            # engagements.  Surface as an explicit operator-reset
+            # note so the engagement report doesn't silently lose
+            # the prior history.
+            lines.append(
+                f"### 🧹 Runs removed from history "
+                f"({len(sr['removed'])})")
+            lines.append("")
+            lines.append(
+                "_Likely cause: `reset_history` endpoint was called "
+                "between the two snapshots, or the snapshots come "
+                "from parallel engagements._")
+            lines.append("")
+            for r in sr["removed"]:
+                lines.append(
+                    f"- `{_md_esc(r['run_id'])}` — "
+                    f"{_md_esc(r['started_at'][:19])} "
+                    f"(**{r['attempts_done']}** attempt(s), "
+                    f"**{r['hits_count']}** hit(s))"
+                )
+            lines.append("")
+
     lines += ["---", "", "_End of diff._", ""]
     return "\n".join(lines)
 
@@ -691,6 +833,36 @@ def build_diff_html(diff: dict) -> str:
                                     for c in diff["trust_chains"]["removed"]) \
         or '<div class="muted">none</div>'
 
+    # Password-spraying runs (issue #69, PR5).
+    sr = diff.get("spray_runs", {}) or {}
+    spray_added_html = ""
+    for r in sr.get("added", []):
+        purple = ' <span class="badge">purple</span>' if r.get("purple_mode") else ''
+        dry = ' <span class="muted">(dry-run)</span>' if r.get("dry_run") else ''
+        spray_added_html += (
+            '<div class="entry">'
+            f'<code>{_hesc(r.get("run_id", ""))}</code> '
+            f'{_hesc(r.get("started_at", "")[:19])} &rarr; '
+            f'{_hesc((r.get("finished_at", "") or "—")[:19])}'
+            f'{purple}{dry}<br>'
+            f'<strong>{r.get("attempts_done", 0)}</strong> attempt(s), '
+            f'<strong style="color:#f85149">{r.get("hits_count", 0)}</strong> hit(s), '
+            f'<strong style="color:#f0883e">{r.get("locked_count", 0)}</strong> lockout(s)'
+            + (f' &mdash; aborted: <code>{_hesc(r.get("aborted", ""))}</code>'
+               if r.get("aborted") else '')
+            + '</div>')
+    spray_added_html = spray_added_html or '<div class="muted">none</div>'
+    locked_added_html = ""
+    for u in sr.get("locked_users_added", []):
+        locked_added_html += (
+            '<div class="entry">'
+            f'<strong>{_hesc(u.get("username", ""))}</strong> &mdash; '
+            f'first locked on <code>{_hesc(u.get("first_locked_sid", ""))}</code> '
+            f'at {_hesc(u.get("first_locked_at", ""))}'
+            '</div>')
+    locked_added_html = locked_added_html or \
+        '<div class="muted">none</div>'
+
     return f"""<!DOCTYPE html>
 <html lang="en"><head>
 <meta charset="utf-8">
@@ -784,6 +956,10 @@ def build_diff_html(diff: dict) -> str:
     {_delta_kpi("Trust chains added",     s['trust_chains_added'])}
     {_delta_kpi("Trust chains removed",   -s['trust_chains_removed'],
                  positive_is_bad=False)}
+    {_delta_kpi("Password-spray runs",    s.get('spray_runs_added', 0))}
+    {_delta_kpi("Spray hits",             s.get('spray_hits_added', 0))}
+    {_delta_kpi("Newly-locked users",     s.get('newly_locked_users', 0))}
+    {_delta_kpi("Purple-mode runs",       s.get('purple_runs_added', 0))}
   </div>
 
   <section>
@@ -802,6 +978,14 @@ def build_diff_html(diff: dict) -> str:
     {chains_added_html}
     <h3>Disappeared ({len(diff['trust_chains']['removed'])})</h3>
     {chains_removed_html}
+  </section>
+
+  <section>
+    <h2>🔓 Password spraying (issue #69)</h2>
+    <h3>New runs ({len(sr.get("added", []))})</h3>
+    {spray_added_html}
+    <h3>Newly-locked users &mdash; defender signal ({len(sr.get("locked_users_added", []))})</h3>
+    {locked_added_html}
   </section>
 
   <section>
