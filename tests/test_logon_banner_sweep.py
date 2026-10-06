@@ -986,6 +986,110 @@ def test_acquire_launch_slot_atomic_concurrent_launch_refused():
         f"exactly one thread must win the slot; got {results}")
 
 
+def test_rmdir_if_empty_removes_empty_dir(tmp_path):
+    from sapmap_logon_sweep import rmdir_if_empty
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    assert rmdir_if_empty(str(empty)) is True
+    assert not empty.exists()
+
+
+def test_rmdir_if_empty_keeps_non_empty_dir(tmp_path):
+    from sapmap_logon_sweep import rmdir_if_empty
+    nonempty = tmp_path / "nonempty"
+    nonempty.mkdir()
+    (nonempty / "x.txt").write_text("hello")
+    assert rmdir_if_empty(str(nonempty)) is False
+    assert nonempty.exists()
+
+
+def test_rmdir_if_empty_tolerates_missing_or_blank_path(tmp_path):
+    from sapmap_logon_sweep import rmdir_if_empty
+    assert rmdir_if_empty("") is False
+    assert rmdir_if_empty(str(tmp_path / "does_not_exist")) is False
+    # Also a FILE (not a dir) must be left alone.
+    f = tmp_path / "regular_file.txt"
+    f.write_text("x")
+    assert rmdir_if_empty(str(f)) is False
+    assert f.exists()
+
+
+def test_sweep_with_no_eligible_targets_removes_loot_husk(tmp_path):
+    """Regression pin — the sweep used to leave an empty
+    ``loot/logon_banners/<run_id>/`` directory behind every time the
+    scope resolved to zero eligible targets, every scan errored out,
+    or every banner was clean (operator observed ~20 husks after a
+    series of trial runs, screenshot 2026-10-06).  The engine must
+    now rmdir the per-run loot dir when it exits with no files
+    written to it, and blank the summary's ``loot_dir`` field so the
+    GUI history doesn't link to a vanished path.
+    """
+    import os
+    _reset_singleton()
+    _reset_status(scope="landscape")
+    # No ABAP+dispatcher nodes on the map → sweep ends with zero
+    # eligible targets.
+    state = _state()
+    summary = sw.sweep_landscape(
+        state,
+        LogonSweepConfig(jitter_max_s=0.0),
+        _scan_node_fn=lambda *a, **kw: {
+            "ok": True, "findings": [], "pair_count": 0,
+            "hits_by_severity": {"CRITICAL": 0, "HIGH": 0,
+                                  "MEDIUM": 0, "INFO": 0},
+            "loot_text_path": "", "loot_json_path": "",
+        },
+        _sleep_fn=lambda s: None,
+    )
+    # No husk left on disk.
+    if summary["loot_dir"]:
+        assert not os.path.isdir(summary["loot_dir"]), (
+            f"empty husk {summary['loot_dir']!r} should have been removed")
+    # Summary's loot_dir field is blanked when the husk was removed,
+    # so the GUI history + MCP /runs don't link to a vanished path.
+    assert summary["loot_dir"] == "" or not os.path.isdir(summary["loot_dir"])
+
+
+def test_sweep_with_content_keeps_loot_dir(tmp_path):
+    """Positive pin — when a per-node scan actually writes files, the
+    sweep's loot dir must be preserved (not accidentally rmdir'd)."""
+    import os
+    _reset_singleton()
+    _reset_status(scope="landscape")
+    inst = types.SimpleNamespace(instance_nr="00", ports={3200: "dispatcher"})
+    state = _state(
+        HIT=types.SimpleNamespace(
+            sid="HIT", system_type="ABAP",
+            instances=[inst], ip="10.0.0.1", hostname="h",
+            saprouter=""))
+
+    def _scan_with_real_file(host, port, **kw):
+        loot_dir = kw.get("loot_dir") or ""
+        if loot_dir:
+            os.makedirs(loot_dir, exist_ok=True)
+            with open(os.path.join(loot_dir, "witness.txt"), "w") as fh:
+                fh.write("real content")
+        return {
+            "ok": True, "findings": [], "pair_count": 1,
+            "raw_text_bytes": 10,
+            "hits_by_severity": {"CRITICAL": 0, "HIGH": 0,
+                                  "MEDIUM": 0, "INFO": 0},
+            "loot_text_path": os.path.join(loot_dir, "witness.txt"),
+            "loot_json_path": "",
+        }
+
+    summary = sw.sweep_landscape(
+        state, LogonSweepConfig(jitter_max_s=0.0),
+        _scan_node_fn=_scan_with_real_file,
+        _sleep_fn=lambda s: None,
+    )
+    assert summary["loot_dir"]
+    assert os.path.isdir(summary["loot_dir"])
+    # Cleanup the real-file lab bowl the test created.
+    import shutil
+    shutil.rmtree(summary["loot_dir"], ignore_errors=True)
+
+
 def test_state_logon_banner_runs_default_empty_list():
     """A legacy state loaded without the field roundtrips with an
     empty list, not with KeyError or None."""

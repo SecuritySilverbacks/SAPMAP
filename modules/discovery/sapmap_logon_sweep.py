@@ -320,6 +320,31 @@ def _resolve_loot_dir(run_id: str) -> str:
     return base
 
 
+def rmdir_if_empty(path: str) -> bool:
+    """``os.rmdir`` the given directory iff it exists AND contains no
+    files or subdirectories.  Returns True when the dir was removed,
+    False when it was kept (missing, non-dir, or non-empty) or
+    removing it failed.
+
+    Used by the landscape sweep + the per-node PR3 route to clean up
+    the ``ensure_loot_dir`` reservation when the sweep / scan ended
+    without writing any files (zero eligible targets, cancel before
+    the first scan, every per-node scan failed to produce output,
+    etc.).  Without this cleanup each sweep attempt leaves an empty
+    ``loot/logon_banners/<run_id>/`` husk behind — operators observed
+    ~20 accumulated after a short series of trial runs.
+    """
+    try:
+        if not path or not os.path.isdir(path):
+            return False
+        if os.listdir(path):
+            return False
+        os.rmdir(path)
+        return True
+    except OSError:
+        return False
+
+
 # ---------------------------------------------------------------------------
 # Core orchestrator
 # ---------------------------------------------------------------------------
@@ -399,6 +424,9 @@ def sweep_landscape(
                 aborted="cancelled mid-sweep",
                 per_node=per_node_results)
             _append_run_to_state(state, summary)
+            # Clean up the loot dir if the mid-sweep cancel landed
+            # before any per-node scan wrote anything.
+            rmdir_if_empty(loot_dir)
             return summary
 
         _set_phase_progress(i, len(targets))
@@ -525,6 +553,13 @@ def sweep_landscape(
         per_node=per_node_results)
     _append_run_to_state(state, summary)
     _finalise_status(aborted="")
+    # Clean up the sweep's loot dir if no per-node scan wrote anything
+    # into it (every scan errored, every banner was clean + loot_dir
+    # was skipped by scan_node's "write only on raw_text or findings"
+    # guard, etc.).  Prevents empty husk accumulation under
+    # loot/logon_banners/ across repeated sweep attempts.
+    if rmdir_if_empty(loot_dir):
+        summary["loot_dir"] = ""
     return summary
 
 
