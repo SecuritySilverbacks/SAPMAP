@@ -379,6 +379,66 @@ def test_betrusted_force_attacker_ip_disables_swap():
     assert "silently discard MOD_STATE" in src
 
 
+def test_betrusted_chain_retries_trust_probe_with_probe_local_ip():
+    """When the first SERVER_LONG_LIST lookup misses because
+    attacker_ip is stale (betrusted's internal swap moved on but the
+    chain still holds the pre-swap value), the chain must retry with
+    the probe's own local_ip as the needle.  Otherwise the operator
+    sees a confusing "does NOT contain" message immediately before
+    the GW poll proves the exploit chain is actually working from
+    the correct IP (user log 2026-10-06)."""
+    src = (REPO_ROOT / "modules" / "exploitation" / "sap_betrusted_chain.py"
+           ).read_text(encoding="utf-8")
+    # The chain calls probe_ms_server_list a second time with
+    # needle=_probe_local_ip when the first call missed.
+    assert "_probe_secondary = _probe_ms(" in src
+    assert "needle=_probe_local_ip" in src
+    # Positive log path when the secondary needle lands.
+    assert "the actual TCP source IP" in src
+    assert "betrusted auto-swapped" in src
+
+
+def test_betrusted_chain_final_message_differentiates_hardened_vs_timeout():
+    """The final "trust never arrived" message must distinguish
+    "we aborted on hardened_reject after N seconds" from "we timed
+    out waiting for propagation after the full 1500s budget".
+    Previously the message hard-coded max_wait and said "not trusted
+    after 1500s" even when the hardened-reject path exited in 20s
+    (user log 2026-10-06)."""
+    src = (REPO_ROOT / "modules" / "exploitation" / "sap_betrusted_chain.py"
+           ).read_text(encoding="utf-8")
+    # The poll loop tracks why it exited.
+    assert 'poll_exit_reason = "poll_timeout"' in src
+    assert 'poll_exit_reason = "vulnerable"' in src
+    assert 'poll_exit_reason = "hardened_reject"' in src
+    # Final message branches on the reason.
+    assert 'if poll_exit_reason == "hardened_reject":' in src
+    assert "Target is NOT exploitable via unauth" in src
+    assert "SAP Note 2808158" in src
+    # And the timeout path reports the actual elapsed time, not
+    # max_wait.
+    assert 'Gateway not trusted after {elapsed}s' in src
+
+
+def test_create_user_betrusted_chain_distinguishes_hardened_from_user_cancel():
+    """When try_betrusted_chain self-aborts on hardened_reject, the
+    outer create_user_betrusted_chain wrapper must NOT print the
+    misleading "10KBLAZE chain cancelled by user" message.  It
+    reads the poll_exit_reason stamp on the node to distinguish."""
+    src = (REPO_ROOT / "modules" / "exploitation" / "sap_betrusted_chain.py"
+           ).read_text(encoding="utf-8")
+    # The stamp is written in both the hardened + user-cancel paths
+    # of try_betrusted_chain so the outer wrapper always has data.
+    assert '"_last_betrusted_poll_exit_reason"' in src
+    assert '"hardened_reject"' in src
+    assert '"user_cancel"' in src
+    # The outer wrapper reads the stamp and skips the "cancelled by
+    # user" + "Phase 2 anyway" paths when hardened_reject is the
+    # real reason.
+    assert "poll_reason = getattr(" in src
+    assert 'poll_reason == "hardened_reject"' in src
+
+
 def test_probe_ms_server_list_returns_local_ip_field():
     """The probe's own TCP source IP is a secondary needle candidate
     — if the user-provided needle doesn't match but the probe's own
@@ -396,12 +456,17 @@ def test_probe_ms_server_list_returns_local_ip_field():
 
 def test_chain_surface_diagnostic_mismatch_hint():
     """When the probe's local_ip differs from attacker_ip AND the
-    SERVER_LONG_LIST reply doesn't contain the needle, the chain
-    must emit a hint pointing to the actual source IP so the
-    operator sees the Docker-bridge / routing mismatch at a
-    glance."""
+    SERVER_LONG_LIST reply doesn't contain the needle AND the
+    secondary needle (probe local_ip) also missed, the chain must
+    emit a hint explaining what the operator is looking at — but
+    not tell them to "re-run with X" since betrusted now
+    auto-swaps on its own (user log 2026-10-06)."""
     src = (REPO_ROOT / "modules" / "exploitation" / "sap_betrusted_chain.py"
            ).read_text(encoding="utf-8")
     assert "Probe's own TCP source was" in src
-    assert "Re-run with" in src
-    assert "attacker_ip=" in src
+    # betrusted now does the swap automatically — operator doesn't
+    # need to re-run with a different IP.  Match whitespace-insensitive
+    # because the explanatory text wraps across string literals.
+    import re as _re
+    collapsed = _re.sub(r'"\s*\n\s*(f?)"', "", src)
+    assert "betrusted should have auto-swapped" in collapsed
