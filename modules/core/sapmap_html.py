@@ -1268,6 +1268,7 @@ body {
       <div class="ctx-item" data-action="exploit_windows_lpe">&#9889; Escalate to SYSTEM (auto: EfsPotato / GodPotato / MiniPlasma)</div>
       <div class="ctx-item" data-action="betrusted">&#128272; Betrusted — Inject Trusted IP (10KBLAZE)</div>
       <div class="ctx-item" data-action="create_user_betrusted">&#128272; Create User (10KBLAZE Full Chain)</div>
+      <div class="write-op ctx-item" data-action="set_attacker_ip" title="Override the attacker IP that 10KBLAZE / betrusted injects into the Gateway trust list.  Only needed when SAPMAP runs behind a SNAT'ing router (VPN / Docker-bridge / off-subnet host) — the auto-detect returns your LOCAL IP, but the GW sees the SNAT'd apparent source IP and the trust check fails even on a vulnerable kernel.  Set this to the IP the TARGET sees you as.">&#128269; Set 10KBLAZE Attacker IP (NAT override)&hellip;</div>
       <div class="ctx-item" data-action="exploit_cve_58240_register">&#9889; Register Rogue ASCS Gateway (CVE-2026-58240)</div>
       <div class="ctx-item" data-action="exploit_cve_58240_unregister">&#128245; Unregister Rogue ASCS Gateway (cleanup)</div>
       <div class="ctx-item" data-action="create_user_java">&#128100; Create User (Java UME)</div>
@@ -3325,6 +3326,50 @@ body {
     <div id="sweep-logon-tab-body-history" style="display:none;user-select:text;-webkit-user-select:text;cursor:text"></div>
     <div class="form-actions" style="margin-top:12px">
       <button class="btn" onclick="closeModal('scan-logon-banners-results-modal')">Close</button>
+    </div>
+  </div>
+</div>
+
+<!-- =========================================================================
+     10KBLAZE NAT Attacker-IP Override modal.  Operator sets the IP the
+     TARGET sees them as when SAPMAP runs behind a SNAT'ing router
+     (VPN / Docker-bridge / off-subnet host).  Persists on the node;
+     try_betrusted_chain reads it on every subsequent 10KBLAZE run.
+     ========================================================================= -->
+<div class="modal-overlay" id="set-attacker-ip-modal">
+  <div class="modal" style="width:95vw;max-width:580px;max-height:90vh;overflow-y:auto">
+    <h3 style="color:#58a6ff">&#128269; Set 10KBLAZE Attacker IP (NAT override)</h3>
+    <div id="set-attacker-ip-info" style="font-size:12px;color:#8b949e;margin-bottom:10px"></div>
+    <p style="font-size:12px;color:#8b949e;line-height:1.5">
+      Only needed when SAPMAP runs behind a SNAT'ing router (VPN,
+      Docker-bridge, off-subnet host).  The auto-detect returns your
+      LOCAL kernel IP, but the GW compares its F_SAP_INIT trust list
+      against the SNAT'd source IP the target actually sees — so even
+      on a vulnerable kernel the exploit fails with a misleading
+      <code>hardened_reject</code> verdict.
+    </p>
+    <p style="font-size:12px;color:#8b949e;line-height:1.5">
+      Enter the IP the <strong>target</strong> sees you as (e.g. your
+      VPN exit, your Docker bridge gateway, your corporate NAT).  Leave
+      blank to clear the override and go back to auto-detect.
+    </p>
+    <div class="form-row" style="margin-top:12px">
+      <label>Attacker IP (what the target sees)</label>
+      <input type="text" id="set-attacker-ip-value"
+             placeholder="192.168.2.42  —  blank clears"
+             style="width:220px;font-family:monospace">
+    </div>
+    <div class="form-row" style="margin-top:12px">
+      <label style="display:flex;align-items:center;gap:8px;font-size:12px">
+        <input type="checkbox" id="set-attacker-ip-force">
+        Force (bypass the auto-swap to sock.getsockname()) &mdash;
+        <span style="color:#8b949e;font-weight:normal">recommended ON when overriding; betrusted() would otherwise overwrite your value with the kernel-local IP.</span>
+      </label>
+    </div>
+    <div id="set-attacker-ip-warning" style="margin-top:10px;color:#d29922;font-size:12px;display:none"></div>
+    <div class="form-actions" style="margin-top:12px">
+      <button class="btn btn-primary" onclick="saveSetAttackerIp()">Save</button>
+      <button class="btn" onclick="closeModal('set-attacker-ip-modal')">Cancel</button>
     </div>
   </div>
 </div>
@@ -8699,6 +8744,11 @@ async function ctxAction(action) {
       if (ip && ip.trim()) {
         await api('POST', `node/${sid}/betrusted`, { attacker_ip: ip.trim(), nilist_wait: 30 });
       }
+      break;
+    }
+    case 'set_attacker_ip': {
+      // Open the modal pre-filled with the current override (if any).
+      showSetAttackerIpModal(sid);
       break;
     }
     case 'create_user_betrusted': {
@@ -15585,6 +15635,57 @@ async function resetLogonBannerSweepHistory() {
   closeLogonBannersSweepPanel();
 }
 
+
+// ---------------------------------------------------------------------
+// 10KBLAZE NAT override — Set Attacker IP modal.
+// ---------------------------------------------------------------------
+
+async function showSetAttackerIpModal(sid) {
+  // Stash sid on the modal + pre-fill current override value.
+  const modal = document.getElementById('set-attacker-ip-modal');
+  modal.dataset.sid = sid;
+  const n = (mapState.nodes || {})[sid] || {};
+  const host = n.ip || n.hostname || '?';
+  document.getElementById('set-attacker-ip-info').textContent =
+    sid + '  →  target ' + host;
+  // Reload current override from the backend (persistent on node).
+  let cur = {attacker_ip: '', force: false};
+  try {
+    cur = await api('GET', `node/${sid}/get_attacker_ip`);
+    if (!cur) cur = {attacker_ip: '', force: false};
+  } catch (_) {}
+  document.getElementById('set-attacker-ip-value').value =
+    cur.attacker_ip || '';
+  document.getElementById('set-attacker-ip-force').checked =
+    !!cur.force;
+  document.getElementById('set-attacker-ip-warning').style.display = 'none';
+  modal.classList.add('visible');
+  document.getElementById('set-attacker-ip-value').focus();
+}
+
+async function saveSetAttackerIp() {
+  const modal = document.getElementById('set-attacker-ip-modal');
+  const sid = (modal && modal.dataset && modal.dataset.sid)
+              || selectedNodeSid;
+  if (!sid) { alert('No system selected.'); return; }
+  const ip = document.getElementById('set-attacker-ip-value').value.trim();
+  const force = document.getElementById('set-attacker-ip-force').checked;
+  const r = await api('POST', `node/${sid}/set_attacker_ip`, {
+    attacker_ip: ip,
+    force: force,
+  });
+  if (r && r.error) {
+    alert('Save failed: ' + (r.message || r.error));
+    return;
+  }
+  if (r && r.nat_warning) {
+    const w = document.getElementById('set-attacker-ip-warning');
+    w.textContent = '⚠️ ' + r.nat_warning;
+    w.style.display = '';
+    return;    // leave the modal open so operator can re-check
+  }
+  closeModal('set-attacker-ip-modal');
+}
 
 function closeModal(id) { document.getElementById(id).classList.remove('visible'); }
 function openLegend() {
