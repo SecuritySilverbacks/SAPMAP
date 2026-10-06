@@ -107,6 +107,28 @@ def test_hardened_reject_does_not_fire_on_p3():
     assert info.get("hardened_reject") is not True
 
 
+def test_hardened_reject_fires_on_long_frame_with_gw_id_zero():
+    """A4H kernel 916 pads the reject envelope well past 64 bytes —
+    long enough for extract_ascii_strings to find the CPIC counter
+    the parser was mis-treating as a conv_id (user log 2026-10-06,
+    conv_ids like 77096266 climbing monotonically across unrelated
+    TCP connections).  The hardened signal must fire on gw_id==0
+    regardless of frame length, so long as the F_SAP_INIT header
+    shape matches."""
+    header = bytes.fromhex("06ca03000013") + struct.pack("!H", 0x0000)
+    # 400 bytes with an 8-digit ASCII counter embedded (what the GW's
+    # internal CPIC counter looks like leaking into the reject envelope).
+    body = bytes([0x00]) * 100 + b"77096266" + bytes([0x00]) * 284
+    frame = header + body
+    assert len(frame) == 400
+    info = parse_response(frame, "F_SAP_INIT")
+    assert info["hardened_reject"] is True
+    assert info["error"] is True
+    assert info["gw_id"] == 0
+    # conv_id must be cleared even though the counter is present.
+    assert info["conv_id"] is None
+
+
 def test_hardened_reject_does_not_fire_on_long_f_sap_init_reply():
     """A vulnerable gateway's F_SAP_INIT reply is 420-520 bytes with a
     non-zero gw_id in the header.  Build a synthetic 400-byte reply
@@ -124,8 +146,7 @@ def test_hardened_reject_does_not_fire_on_long_f_sap_init_reply():
 
 def test_hardened_reject_does_not_fire_on_short_frame_with_nonzero_gw_id():
     """gw_id != 0 means the GW DID allocate state for us — the
-    short-frame heuristic must only fire when gw_id==0 AND the frame
-    is short, both conditions required."""
+    check must only fire when gw_id==0, period."""
     header = bytes.fromhex("06ca03000013") + struct.pack("!H", 0x0042)
     frame = header + bytes([0x00]) * 16   # 24 bytes, nonzero gw_id
     info = parse_response(frame, "F_SAP_INIT")
@@ -304,28 +325,58 @@ def test_betrusted_chain_sets_auto_detected_flag_on_auto_path():
 
 
 def test_betrusted_swap_log_cites_sock_getsockname():
-    """When betrusted() swaps the auto-detected IP for the actual
-    socket source, the log line must explain WHY (Docker-bridge /
-    VPN / multi-route) so the operator understands the correction."""
+    """When betrusted() swaps the attacker_ip for the actual socket
+    source, the log line must explain WHY (VPN / Docker-bridge /
+    multi-route) so the operator understands the correction."""
     src = (REPO_ROOT / "modules" / "exploitation" / "sap_ms_betrusted.py"
            ).read_text(encoding="utf-8")
     assert "sock.getsockname" in src
-    # The swap log line
     assert "auto-detected" in src
-    assert "swapping to" in src
-    # The explanatory hint
-    assert "Docker" in src and "VPN" in src
+    assert "swapping dp_addr_from" in src
+    # The explanatory hint must cite the common root causes.
+    assert "VPN" in src
 
 
-def test_betrusted_warns_but_does_not_swap_when_operator_set_explicit_ip():
-    """When the operator explicitly passed attacker_ip (not auto-
-    detected), betrusted() must NOT silently swap — they may have a
-    reason (reverse tunnel, SAProuter translation).  Log a loud
-    warning but keep the operator's choice."""
+def test_betrusted_swaps_both_auto_and_explicit_by_default():
+    """Follow-up (user log 2026-10-06, VPN scenario): the swap must
+    fire regardless of whether attacker_ip was auto-detected or set
+    explicitly by the operator.  A GUI operator who filled in the
+    pre-populated routing-table IP has no way to know that was wrong
+    — if we only warn, the betrusted injection fails every time.
+    The MS binds registrations to the TCP source IP, so swapping is
+    "correct by construction"."""
     src = (REPO_ROOT / "modules" / "exploitation" / "sap_ms_betrusted.py"
            ).read_text(encoding="utf-8")
+    # Both reason strings — auto AND explicit — route to the SAME
+    # swap action, not two different ones.
+    assert "attacker_ip was auto-detected as" in src
+    # String literals split across lines — collapse whitespace before
+    # matching so the test does not depend on exact wrapping.
+    import re as _re
+    collapsed = _re.sub(r'"\s*\n\s*(f?)"', "", src)
+    assert "does NOT match the actual TCP source IP" in collapsed
+    assert "swapping dp_addr_from" in src
+    # And the swap assignment happens unconditionally for the
+    # non-force path.
+    assert "attacker_ip = actual_src_ip" in src
+
+
+def test_betrusted_force_attacker_ip_disables_swap():
+    """Escape hatch for reverse-tunnel / NAT setups where the
+    operator genuinely wants dp_addr_from to differ from the TCP
+    source.  force_attacker_ip=True keeps their choice; default
+    False triggers the swap."""
+    import inspect
+    import sap_ms_betrusted
+    sig = inspect.signature(sap_ms_betrusted.betrusted)
+    assert "force_attacker_ip" in sig.parameters
+    assert sig.parameters["force_attacker_ip"].default is False
+    src = (REPO_ROOT / "modules" / "exploitation" / "sap_ms_betrusted.py"
+           ).read_text(encoding="utf-8")
+    # The force branch logs that it is honoring the operator but
+    # expects the MS to silently discard MOD_STATE.
+    assert "force_attacker_ip=True so" in src
     assert "silently discard MOD_STATE" in src
-    assert "Pass attacker_ip=" in src
 
 
 def test_probe_ms_server_list_returns_local_ip_field():
