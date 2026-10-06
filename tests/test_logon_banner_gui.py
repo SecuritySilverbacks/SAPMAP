@@ -178,12 +178,16 @@ def test_route_emits_coverage_marker_on_clean_banner(gui_src: str):
 
 def test_route_not_in_write_routes(gui_src: str):
     """User explicitly green-lit shipping without the write-op
-    pattern because the scan is purely read-only."""
+    pattern because the PER-NODE scan is purely read-only.  Note the
+    LANDSCAPE sweep (/api/actions/scan_logon_banners, added by PR4)
+    IS a write-op — it spawns a daemon-thread sweep + mutates
+    state.logon_banner_runs — so that route is in WRITE_ROUTES.
+    This pin covers only the per-node path."""
     m = re.search(r"WRITE_ROUTES = frozenset\(\{(.*?)\}\)",
                    gui_src, re.DOTALL)
     assert m, "WRITE_ROUTES frozenset not found"
     body = m.group(1)
-    assert '/scan_logon_banners' not in body
+    assert '/api/node/<sid>/scan_logon_banners' not in body
 
 
 def test_route_accepts_both_list_and_string_custom_patterns(gui_src: str):
