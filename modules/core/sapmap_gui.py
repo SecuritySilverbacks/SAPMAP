@@ -16659,6 +16659,292 @@ def create_app(api: SAPMAPApi) -> Bottle:
         return json.dumps({"status": "started"})
 
     # ------------------------------------------------------------------
+    # Logon-banner secret scan (issue #68).  Pure read: opens one DIAG
+    # session to the dispatcher, scrapes the login screen's DYNT atom
+    # text, runs it through the sap_logon_text_secrets regex catalogue,
+    # emits findings for anything caught.  No account touched, no
+    # command run, no state mutated on target.  Operator picked
+    # "okay to ship without the standard write-op pattern, this is
+    # not intrusive at all" in the plan survey — route is still
+    # considered a scan verb (shows up under the Scanning submenu).
+    # ------------------------------------------------------------------
+
+    @app.route("/api/node/<sid>/scan_logon_banners", method="POST")
+    def node_scan_logon_banners(sid):
+        response.content_type = "application/json"
+        node = api.state.get_node(sid)
+        if not node:
+            response.status = 404
+            return json.dumps({"error": "node_not_found",
+                                "message": f"Node {sid} not found"})
+
+        # ABAP-only — DIAG login banners are an ABAP-stack surface.
+        # Pure-Java (and SAProuter / BO) don't expose a DIAG dispatcher.
+        system_type = (node.system_type or "").upper()
+        if "ABAP" not in system_type:
+            response.status = 400
+            return json.dumps({
+                "error": "not_abap",
+                "message": (
+                    f"Logon-banner scan needs an ABAP dispatcher; "
+                    f"this node is '{node.system_type or 'unknown'}'"),
+            })
+
+        host = node.ip or node.hostname
+        if not host:
+            response.status = 400
+            return json.dumps({"error": "no_host",
+                                "message": f"No IP/hostname on {sid}"})
+
+        # Dispatcher-port lookup — reuse the pwspray/default_creds
+        # convention of 'svc == dispatcher OR 3200 <= port <= 3299'.
+        # Do NOT blind-guess 3200+instance_nr: the port must have
+        # been labelled by an earlier scan.
+        disp_port = 0
+        instance_nr = ""
+        for inst in node.instances:
+            for port, svc in (inst.ports or {}).items():
+                if not isinstance(port, int):
+                    continue
+                if svc == "dispatcher" or (3200 <= port <= 3299):
+                    disp_port = port
+                    instance_nr = inst.instance_nr or ""
+                    break
+            if disp_port:
+                break
+        if not disp_port:
+            response.status = 400
+            return json.dumps({
+                "error": "no_dispatcher",
+                "message": (
+                    f"{sid}: no 32XX dispatcher port on any instance; "
+                    f"run a Standard Scan first"),
+            })
+
+        # Defensive body shape: Bottle hands us whatever JSON parsed
+        # to (dict / list / scalar).  Treat anything that isn't a
+        # dict as "no body" so a hand-crafted POST of `[1,2]` or `42`
+        # returns a clean 400 later rather than crashing in `.get`.
+        _raw_body = request.json
+        if not isinstance(_raw_body, dict):
+            if _raw_body is not None:
+                response.status = 400
+                return json.dumps({
+                    "error": "bad_body",
+                    "message": "body must be a JSON object",
+                })
+            _raw_body = {}
+        raw_patterns = _raw_body.get("custom_patterns")
+        # Accept either a list of pattern strings or a single textarea
+        # blob (one pattern per line).  Anything else → 400 with a
+        # clear code (int / bool / dict etc. are not valid shapes;
+        # scan_text wants a list of str).
+        if raw_patterns is None or raw_patterns == "":
+            custom_patterns = []
+        elif isinstance(raw_patterns, str):
+            custom_patterns = [ln for ln in raw_patterns.splitlines()
+                               if ln.strip()]
+        elif isinstance(raw_patterns, (list, tuple)):
+            custom_patterns = [
+                str(p) for p in raw_patterns
+                if isinstance(p, (str, bytes)) and str(p).strip()]
+        else:
+            response.status = 400
+            return json.dumps({
+                "error": "bad_custom_patterns",
+                "message": (
+                    "custom_patterns must be a string (textarea blob) "
+                    "or a list of strings"),
+            })
+
+        def _run():
+            try:
+                from sap_logon_banner_scan import scan_node, make_run_id
+            except ImportError as exc:
+                print(f"[-] {sid}: sap_logon_banner_scan not available: {exc}")
+                return
+            try:
+                from sapmap_state import ensure_loot_dir
+            except ImportError:
+                ensure_loot_dir = None  # fallback — scan still runs, no loot
+            try:
+                import sapmap_stop
+            except ImportError:
+                sapmap_stop = None
+
+            # DIAG terminal-name spoof when Tier-1 detected rsau/ip_only=0.
+            # Same pattern as node_check_default_creds + node_password_spray.
+            try:
+                from sapmap_evasion import (effective_diag_terminal,
+                                             EvasionConfig)
+                evasion = EvasionConfig.from_dict(api.state.evasion or {})
+                term, spoofed = effective_diag_terminal(node, evasion)
+            except Exception:
+                term, spoofed = "", False
+            if spoofed and term:
+                print(f"[*] {sid}: DIAG terminal spoof active for "
+                      f"logon-banner scan — '{term}'")
+
+            run_id = make_run_id()
+            loot_dir = ""
+            if ensure_loot_dir is not None:
+                # SID path safety: SAP SIDs are uppercase alnum (3-8
+                # chars), but SAPMAP also mints placeholder SIDs for
+                # SAProuter targets, BTPDISC_*, TMS edges, etc.  A
+                # scanner-derived SID with slashes or dots would let
+                # ensure_loot_dir escape loot/ because the helper does
+                # a bare os.path.join (no sanitation).  Reject anything
+                # that isn't [A-Za-z0-9_-] before splicing.
+                import re as _re
+                safe_sid = _re.sub(r"[^A-Za-z0-9_-]", "_", sid or "")[:64]
+                try:
+                    loot_dir = ensure_loot_dir(
+                        f"logon_banners/{safe_sid or 'UNKNOWN'}")
+                except Exception as exc:  # pragma: no cover
+                    print(f"[-] {sid}: loot dir unavailable: {exc}")
+                    loot_dir = ""
+
+            try:
+                result = scan_node(
+                    host, disp_port,
+                    sid=sid, instance_nr=instance_nr,
+                    saprouter=node.saprouter or "",
+                    terminal=term or "",
+                    custom_patterns=custom_patterns or None,
+                    run_id=run_id,
+                    loot_dir=loot_dir or None,
+                    cancel_check=(sapmap_stop.is_stop_requested
+                                  if sapmap_stop is not None else None),
+                )
+            except Exception as exc:
+                print(f"[-] {sid}: logon-banner scan failed: {exc}")
+                try:
+                    emit_finding(
+                        "MEDIUM", sid,
+                        f"Logon-banner scan failed: {exc}",
+                        ref="logon_banner.exception",
+                        attack_capability="recon.logon_banner_scan")
+                except Exception:
+                    pass
+                return
+
+            # Persist last-run summary + redacted findings onto the
+            # node so the GUI side-panel renders it next poll.  Strip
+            # the per-finding `context` dict — the node already carries
+            # sid/host identity; no need to duplicate it per row.
+            node.logon_banner_scan = {
+                "run_id":          result.get("run_id"),
+                "ts":              result.get("ts"),
+                "instance_nr":     result.get("instance_nr"),
+                "port":            result.get("port"),
+                "elapsed_s":       result.get("elapsed_s"),
+                "pair_count":      result.get("pair_count"),
+                "raw_text_bytes":  result.get("raw_text_bytes"),
+                "hits_by_severity": result.get("hits_by_severity") or {},
+                "loot_text_path":  result.get("loot_text_path") or "",
+                "loot_json_path":  result.get("loot_json_path") or "",
+                "error_kind":      result.get("error_kind"),
+                "error":           result.get("error"),
+                "terminal_spoof":  bool(spoofed and term),
+                "custom_pattern_count": len(custom_patterns),
+            }
+            node.logon_banner_findings = [
+                {k: v for k, v in f.items() if k != "context"}
+                for f in (result.get("findings") or [])
+                if (f.get("category") or "").lower() not in ("coverage",)
+            ]
+
+            # Emit a bus finding per hit — one call per hit so each
+            # one lands with its own severity + attack_capability
+            # (so creds vs data lanes in the ATT&CK heatmap stay
+            # distinct, and CRITICAL/HIGH show up in the top banner).
+            #
+            # Cleartext hygiene: the finding BUS message cannot carry
+            # the raw match.  CRITICAL/HIGH bus events are auto-
+            # mirrored onto node.findings (persisted in .sapmap state
+            # + engagement report), and the (sev, node, msg) tuple
+            # also drives the 60s dedup window — two different leaked
+            # creds with the same severity would otherwise collapse
+            # into one finding.  So the message gets a redacted
+            # fingerprint (match-sha256 prefix + length), and the
+            # full match lives on node.logon_banner_findings for the
+            # side-panel to render, plus on the gitignored loot JSON
+            # for forensics.
+            import hashlib as _hashlib
+            emitted = 0
+            for f in result.get("findings") or []:
+                sev = (f.get("severity") or "INFO").upper()
+                cat = (f.get("category") or "").lower()
+                if cat == "coverage":
+                    continue
+                cap = f.get("attack_capability") or (
+                    "data.diag_login_screen_leak")
+                _match = f.get("match") or ""
+                _digest = _hashlib.sha256(
+                    _match.encode("utf-8", "replace")).hexdigest()[:12] \
+                    if _match else "noval"
+                _mlen = len(_match)
+                try:
+                    emit_finding(
+                        sev, sid,
+                        f"Logon-banner leak: {f.get('pattern_name')} "
+                        f"({f.get('category')}) — "
+                        f"sha256:{_digest} ({_mlen} chars); "
+                        f"see side-panel / loot/logon_banners/ for cleartext",
+                        ref=f"logon_banner.{f.get('pattern_name')}"
+                            f".{_digest}",
+                        meta={
+                            "pattern_name": f.get("pattern_name"),
+                            "category":     f.get("category"),
+                            "match_sha256_prefix": _digest,
+                            "match_length":        _mlen,
+                            "offset":              f.get("offset"),
+                            "run_id":              result.get("run_id"),
+                            "loot_text_path":
+                                result.get("loot_text_path") or "",
+                        },
+                        attack_capability=cap)
+                    emitted += 1
+                except Exception:  # pragma: no cover — don't poison the thread
+                    pass
+
+            # Scan-complete marker — one INFO (clean banner) or MEDIUM
+            # (scan errored) summary line so operators can tell
+            # 'scanned, nothing to flag' from 'never scanned'.
+            if result.get("error_kind"):
+                try:
+                    emit_finding(
+                        "MEDIUM", sid,
+                        f"Logon-banner scan: {result['error_kind']} "
+                        f"({result.get('error') or 'no detail'})",
+                        ref="logon_banner.scan_error",
+                        attack_capability="recon.logon_banner_scan")
+                except Exception:
+                    pass
+            elif emitted == 0:
+                try:
+                    emit_finding(
+                        "INFO", sid,
+                        f"Logon-banner scan complete — "
+                        f"{result.get('pair_count', 0)} field(s) "
+                        f"scraped, no secrets detected",
+                        ref="logon_banner.no_hits",
+                        attack_capability="recon.logon_banner_scan")
+                except Exception:
+                    pass
+
+        _bg(f"{sid}:scan_logon_banners",
+            f"{sid}: Scan logon banner", _run)
+        return json.dumps({
+            "status":          "started",
+            "sid":             sid,
+            "host":            host,
+            "dispatcher_port": disp_port,
+            "instance_nr":     instance_nr,
+            "custom_patterns": len(custom_patterns),
+        })
+
+    # ------------------------------------------------------------------
     # Password spraying (issue #69) — per-node + landscape pool routes.
     # No kernel arm gate: the operator safety story lives in the UI
     # confirm dialogs + the engine's own lockout invariants (per-user

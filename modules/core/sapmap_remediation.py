@@ -1150,6 +1150,92 @@ CATALOG: Dict[str, Remediation] = {
         severity_if_delayed="HIGH",
     ),
 
+    "creds.diag_login_screen_leak": Remediation(
+        fix_summary=(
+            "Remove the leaked credential text from the SAP logon "
+            "banner / client-copy welcome message"
+        ),
+        fix_steps=[
+            "Transaction SE61 → document class SYSTEM, name "
+            "SAPLOGON_INFO_<CLIENT> (or the client-specific login-info "
+            "doc you use).  Edit the banner to remove any user/password "
+            "pairs, named service accounts near password labels (SAP*, "
+            "DDIC, EARLYWATCH, SOLMAN_ADMIN, …), AWS access-key IDs, "
+            "bearer tokens, JWT snippets, or private-key headers.  "
+            "Save.  The DIAG login screen refreshes on the next TERM_INI.",
+            "Rotate every credential that WAS on the banner — treat "
+            "them as compromised.  Anyone who could reach the "
+            "dispatcher (32NN) has already read them.",
+            "Transaction SM30 → table TPARA / parameter login/login_info "
+            "(if your landscape uses that table-driven path instead).",
+            "Review who can edit the SE61 document class SYSTEM "
+            "(authorisation S_DOKU_AUT) and limit it to the Basis team.",
+        ],
+        verification=[
+            "Re-run SAPMAP → Scan Logon Banner for Secrets on this node.  "
+            "The scan must land zero CRITICAL findings and the "
+            "logon_banner_scan.hits_by_severity.CRITICAL counter must be 0.",
+            "From an unprivileged host run a bare DIAG init against the "
+            "dispatcher (SAP GUI → New Connection → System ID with no "
+            "login) and confirm the pre-login message no longer contains "
+            "the leaked text.",
+        ],
+        refs=[
+            ("SAP Note 205487 — SE61 SAPLOGON_INFO document editing",
+             "https://launchpad.support.sap.com/#/notes/205487"),
+            ("SAP help — Login screen customising",
+             "https://help.sap.com/docs/SAP_NETWEAVER_750/"
+             "a2d7a65f54ef4cf78fdf9d2dde55fe85/"
+             "4ef0c0b4388e4c0ea80ff0d6dd4b1f27.html"),
+            _attack("T1552.001"),
+        ],
+        requires_restart=False,
+        effort_minutes=15,       # SE61 edit + rotate the exposed creds
+        severity_if_delayed="CRITICAL",
+    ),
+
+    "data.diag_login_screen_leak": Remediation(
+        fix_summary=(
+            "Remove PII / infra data (emails, phone numbers, internal "
+            "IPs) from the SAP logon banner"
+        ),
+        fix_steps=[
+            "Transaction SE61 → document class SYSTEM, name "
+            "SAPLOGON_INFO_<CLIENT>.  Scrub the banner of named support "
+            "contacts, phone numbers, support-desk email addresses, "
+            "internal hostnames and IP addresses with connect/host/server "
+            "cues.  Replace them with a generic 'contact your IT service "
+            "desk' line.  The banner is readable to any pre-auth DIAG "
+            "connect, including the public internet when the dispatcher "
+            "isn't behind SNC.",
+            "If a named individual's contact info was on the banner, "
+            "notify them — their info is now in attacker reconnaissance "
+            "sets.  Review whether to rotate internal phone numbers / "
+            "email aliases based on how long the leak was live.",
+            "If internal IPs were on the banner, add them to the "
+            "network-perimeter watchlist — they're now a known pivot "
+            "target for anyone who scraped the banner.",
+        ],
+        verification=[
+            "Re-run SAPMAP → Scan Logon Banner for Secrets.  The scan "
+            "must land zero MEDIUM findings in the data.* category "
+            "(email_address / phone_e164 / phone_local / "
+            "ipv4_near_contact_cue / ipv6_compressed).",
+            "From an unprivileged host confirm the scrubbed banner has "
+            "no @-signs, no +<country-code> digit strings, and no "
+            "<N>.<N>.<N>.<N> patterns within 40 chars of connect/server "
+            "/host/goto keywords.",
+        ],
+        refs=[
+            ("SAP Note 205487 — SE61 SAPLOGON_INFO document editing",
+             "https://launchpad.support.sap.com/#/notes/205487"),
+            _attack("T1213"),
+        ],
+        requires_restart=False,
+        effort_minutes=15,
+        severity_if_delayed="MEDIUM",
+    ),
+
     "snc.scan": Remediation(
         fix_summary=(
             "Enable SNC on every dispatcher and SAProuter listening port "

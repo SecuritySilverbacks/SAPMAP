@@ -961,6 +961,18 @@ class SAPNode:
     #              roles: list, note: str, ts: iso, run_id: str}
     spray_hit_users: list = field(default_factory=list)
 
+    # Issue #68 — DIAG login-banner scan.
+    # ``logon_banner_scan`` is the last-run summary dict (keys: run_id,
+    # ts, instance_nr, port, elapsed_s, pair_count, raw_text_bytes,
+    # hits_by_severity, loot_text_path, loot_json_path, error_kind,
+    # error, terminal).  ``logon_banner_findings`` is the per-finding
+    # list from ``scan_text`` (keys: severity, pattern_name, category,
+    # match, snippet, offset, context, attack_capability).  Both are
+    # overwritten on each rescan — the loot files on disk are the
+    # cross-session audit trail.
+    logon_banner_scan: dict = field(default_factory=dict)
+    logon_banner_findings: list = field(default_factory=list)
+
     # Computed helpers
     def has_access(self) -> bool:
         """True if we have any working credentials or created users."""
@@ -1149,6 +1161,9 @@ class SAPNode:
             "_pwspray_tested_triples": sorted(
                 self._pwspray_tested_triples or set()),
             "spray_hit_users": list(self.spray_hit_users or []),
+            "logon_banner_scan": dict(self.logon_banner_scan or {}),
+            "logon_banner_findings": list(
+                self.logon_banner_findings or []),
         }
 
     @classmethod
@@ -1294,6 +1309,9 @@ class SAPNode:
                 d.get("_pwspray_tested_triples", []) or []),
             spray_hit_users=list(
                 d.get("spray_hit_users", []) or []),
+            logon_banner_scan=dict(d.get("logon_banner_scan", {}) or {}),
+            logon_banner_findings=list(
+                d.get("logon_banner_findings", []) or []),
         )
         return node
 
