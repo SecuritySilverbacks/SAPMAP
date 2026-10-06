@@ -2610,6 +2610,13 @@ def create_app(api: SAPMAPApi) -> Bottle:
         "/api/actions/password_spray",
         "/api/actions/password_spray/pool/wordlist",
         "/api/actions/password_spray/reset_history",
+        # Issue #68 PR4 — logon-banner sweep.  The POST launcher is a
+        # write-op (spawns a daemon-thread sweep + mutates
+        # state.logon_banner_runs).  The GET /status and GET /runs
+        # endpoints stay OUT of this set so --read-only operators can
+        # still watch an in-flight sweep + read history.
+        "/api/actions/scan_logon_banners",
+        "/api/actions/scan_logon_banners/reset_history",
         # SCC destructive / auth
         "/api/scc/<host>/probe_creds",
         "/api/scc/<host>/pull_mappings",
@@ -16943,6 +16950,316 @@ def create_app(api: SAPMAPApi) -> Bottle:
             "instance_nr":     instance_nr,
             "custom_patterns": len(custom_patterns),
         })
+
+    # ------------------------------------------------------------------
+    # Logon-banner LANDSCAPE SWEEP (issue #68 PR4).  Iterates every
+    # ABAP node on the map that has an observed 32XX dispatcher, runs
+    # scan_node per node, emits one bus finding per hit (same shape as
+    # the per-node route), appends a redacted run summary to
+    # state.logon_banner_runs.  Status singleton lives on the engine
+    # module (sapmap_logon_sweep._status) — AutoPwn / pwspray pattern.
+    # ------------------------------------------------------------------
+
+    @app.route("/api/actions/scan_logon_banners", method="POST")
+    def actions_scan_logon_banners():
+        response.content_type = "application/json"
+
+        # Defensive body shape — same contract as the per-node route.
+        _raw_body = request.json
+        if not isinstance(_raw_body, dict):
+            if _raw_body is not None:
+                response.status = 400
+                return json.dumps({
+                    "error": "bad_body",
+                    "message": "body must be a JSON object",
+                })
+            _raw_body = {}
+
+        raw_patterns = _raw_body.get("custom_patterns")
+        if raw_patterns is None or raw_patterns == "":
+            custom_patterns = []
+        elif isinstance(raw_patterns, str):
+            custom_patterns = [ln for ln in raw_patterns.splitlines()
+                               if ln.strip()]
+        elif isinstance(raw_patterns, (list, tuple)):
+            custom_patterns = [
+                str(p) for p in raw_patterns
+                if isinstance(p, (str, bytes)) and str(p).strip()]
+        else:
+            response.status = 400
+            return json.dumps({
+                "error": "bad_custom_patterns",
+                "message": (
+                    "custom_patterns must be a string (textarea blob) "
+                    "or a list of strings"),
+            })
+
+        raw_single_sid = _raw_body.get("single_sid")
+        if raw_single_sid is None:
+            single_sid = None
+        elif isinstance(raw_single_sid, str):
+            single_sid = raw_single_sid.strip() or None
+        else:
+            response.status = 400
+            return json.dumps({
+                "error": "bad_single_sid",
+                "message": "single_sid must be a string",
+            })
+        raw_sids = _raw_body.get("sids") or []
+        if raw_sids and not isinstance(raw_sids, (list, tuple)):
+            response.status = 400
+            return json.dumps({
+                "error": "bad_sids",
+                "message": "sids must be a list of SID strings",
+            })
+        sids_list = [
+            str(s).strip() for s in raw_sids
+            if isinstance(s, (str, bytes)) and str(s).strip()]
+
+        # Atomic refuse-concurrent + seed-status.  The engine's
+        # acquire_launch_slot wraps the (check running, mark
+        # running=True) transition in a lock so two near-simultaneous
+        # POSTs can't both pass the 409 guard and both spawn _bg
+        # threads — which would clobber the single-writer invariant
+        # AND reset the global STOP flag mid-sweep via _bg's
+        # unconditional sapmap_stop.reset_stop().
+        try:
+            import sapmap_logon_sweep as _sw
+            scope_label = (
+                ("sids:%d" % len(sids_list)) if sids_list
+                else (("single:" + single_sid) if single_sid
+                      else "landscape"))
+            if not _sw.acquire_launch_slot(scope=scope_label):
+                response.status = 409
+                return json.dumps({
+                    "error": "scan_logon_banners_already_running",
+                    "message": (
+                        "A logon-banner sweep is already in progress.  "
+                        "Press STOP in the progress panel (or POST "
+                        "/api/scan/stop) and wait for it to finish, "
+                        "then launch again."),
+                })
+        except ImportError as exc:
+            response.status = 500
+            return json.dumps({
+                "error":   "scan_logon_banners_engine_unavailable",
+                "message": str(exc),
+            })
+
+        def _run():
+            try:
+                from sap_logon_banner_scan import make_run_id as _mkid
+                from sapmap_logon_sweep import (
+                    sweep_landscape as _sweep,
+                    LogonSweepConfig as _Cfg,
+                    _finalise_status as _finalise)
+            except ImportError as exc:
+                print(f"[-] scan_logon_banners sweep "
+                       f"not available: {exc}")
+                try:
+                    _finalise(aborted=f"import_error: {exc}")
+                except Exception:
+                    pass
+                return
+            try:
+                import sapmap_stop
+            except ImportError:
+                sapmap_stop = None
+
+            cfg = _Cfg(
+                single_sid=(single_sid or ""),
+                sids=list(sids_list),
+                custom_patterns=list(custom_patterns),
+            )
+
+            # Per-node emit-and-persist callback: mirrors the per-node
+            # PR3 route's _run block so a swept node ends up with the
+            # same node.logon_banner_scan / logon_banner_findings and
+            # the same findings-bus events.
+            import hashlib as _hashlib
+
+            def _on_node_finding(sid, result, node):
+                # Mirror PR3's redacted bus-finding emit per hit.
+                for f in (result.get("findings") or []):
+                    sev = (f.get("severity") or "INFO").upper()
+                    cat = (f.get("category") or "").lower()
+                    if cat == "coverage":
+                        continue
+                    cap = f.get("attack_capability") or (
+                        "data.diag_login_screen_leak")
+                    _match = f.get("match") or ""
+                    _digest = (_hashlib.sha256(
+                        _match.encode("utf-8", "replace")
+                    ).hexdigest()[:12] if _match else "noval")
+                    _mlen = len(_match)
+                    try:
+                        emit_finding(
+                            sev, sid,
+                            f"Logon-banner leak: {f.get('pattern_name')} "
+                            f"({f.get('category')}) — "
+                            f"sha256:{_digest} ({_mlen} chars); "
+                            f"see side-panel / loot/logon_banners/ "
+                            f"for cleartext",
+                            ref=f"logon_banner.{f.get('pattern_name')}"
+                                f".{_digest}",
+                            meta={
+                                "pattern_name": f.get("pattern_name"),
+                                "category":     f.get("category"),
+                                "match_sha256_prefix": _digest,
+                                "match_length":        _mlen,
+                                "offset":              f.get("offset"),
+                                "run_id":              result.get("run_id"),
+                                "loot_text_path":
+                                    result.get("loot_text_path") or "",
+                                "sweep_scope":         True,
+                            },
+                            attack_capability=cap)
+                    except Exception:  # pragma: no cover
+                        pass
+
+                # Mutate node.logon_banner_scan / _findings so the
+                # per-node side-panel immediately shows the swept
+                # result — same subset the per-node route builds.
+                node.logon_banner_scan = {
+                    "run_id":          result.get("run_id"),
+                    "ts":              result.get("ts"),
+                    "instance_nr":     result.get("instance_nr"),
+                    "port":            result.get("port"),
+                    "elapsed_s":       result.get("elapsed_s"),
+                    "pair_count":      result.get("pair_count"),
+                    "raw_text_bytes":  result.get("raw_text_bytes"),
+                    "hits_by_severity":
+                        result.get("hits_by_severity") or {},
+                    "loot_text_path":  result.get("loot_text_path") or "",
+                    "loot_json_path":  result.get("loot_json_path") or "",
+                    "error_kind":      result.get("error_kind"),
+                    "error":           result.get("error"),
+                    "terminal_spoof":  False,
+                    "custom_pattern_count": len(custom_patterns),
+                    "sweep_scope":     True,
+                }
+                node.logon_banner_findings = [
+                    {k: v for k, v in f.items() if k != "context"}
+                    for f in (result.get("findings") or [])
+                    if (f.get("category") or "").lower() != "coverage"
+                ]
+
+            try:
+                _sweep(
+                    api.state, cfg,
+                    cancel_check=(sapmap_stop.is_stop_requested
+                                   if sapmap_stop is not None else None),
+                    on_node_finding=_on_node_finding,
+                )
+            except Exception as exc:
+                print(f"[-] scan_logon_banners sweep failed: {exc}")
+                try:
+                    _finalise(aborted=f"exception: {exc}")
+                except Exception:
+                    pass
+
+        _bg("_scan_logon_banners_sweep",
+            "Scan Logon Banners (landscape sweep)", _run)
+
+        try:
+            final_scope = ("sids:%d" % len(sids_list)) if sids_list \
+                          else (("single:" + single_sid) if single_sid
+                                else "landscape")
+        except Exception:
+            final_scope = "landscape"
+        return json.dumps({
+            "status":          "started",
+            "scope":           final_scope,
+            "sids_count":      len(sids_list),
+            "single_sid":      single_sid or "",
+            "custom_patterns": len(custom_patterns),
+        })
+
+    @app.route("/api/actions/scan_logon_banners/status")
+    def actions_scan_logon_banners_status():
+        """Thin delegate — returns the engine's module-global
+        LogonSweepStatus singleton serialised as JSON.  Single-writer
+        invariant: only the one _bg thread spawned by the launch
+        route mutates it.
+        """
+        response.content_type = "application/json"
+        try:
+            from sapmap_logon_sweep import get_status
+            return json.dumps(get_status())
+        except Exception as e:
+            response.status = 500
+            return json.dumps({
+                "error":   "scan_logon_banners_status_unavailable",
+                "message": str(e),
+            })
+
+    @app.route("/api/actions/scan_logon_banners/runs")
+    def actions_scan_logon_banners_runs():
+        """Per-run history — ``state.logon_banner_runs`` sorted
+        newest-first.  Each entry is the ``_build_summary`` dict shape:
+        no cleartext matches, only severity counts + loot paths +
+        per-node OK/error status."""
+        response.content_type = "application/json"
+        runs = list(getattr(api.state, "logon_banner_runs", []) or [])
+        runs_sorted = sorted(
+            runs, key=lambda r: r.get("started_at", ""), reverse=True)
+        return json.dumps({"ok": True, "runs": runs_sorted})
+
+    @app.route(
+        "/api/actions/scan_logon_banners/reset_history", method="POST")
+    def actions_scan_logon_banners_reset_history():
+        """Wipe ``state.logon_banner_runs`` and reset the status
+        singleton.  Two-step confirm (operator must send
+        ``{"confirm": true, "i_accept": true}``) to force reading
+        the warning in the modal."""
+        response.content_type = "application/json"
+        _body = request.json
+        if not isinstance(_body, dict):
+            response.status = 400
+            return json.dumps({
+                "error": "bad_body",
+                "message": "body must be a JSON object",
+            })
+        if not (_body.get("confirm") is True
+                and _body.get("i_accept") is True):
+            response.status = 400
+            return json.dumps({
+                "error": "double_confirm_required",
+                "message": (
+                    "pass {\"confirm\": true, \"i_accept\": true} to "
+                    "clear the logon-banner sweep history"),
+            })
+        # Refuse while a sweep is in flight.  Resetting _status mid-
+        # sweep would clobber the engine's single-writer target_done
+        # bookkeeping + leave orphan loot without a history entry.
+        try:
+            from sapmap_logon_sweep import get_status as _sweep_status
+            if _sweep_status().get("running"):
+                response.status = 409
+                return json.dumps({
+                    "error": "scan_logon_banners_running",
+                    "message": (
+                        "A sweep is in progress — press STOP in the "
+                        "progress panel and let it finish before "
+                        "wiping the history."),
+                })
+        except Exception:
+            pass
+        api.state.logon_banner_runs = []
+        try:
+            import sapmap_logon_sweep as _sw
+            _sw._status = _sw.LogonSweepStatus()
+        except Exception:
+            pass
+        try:
+            emit_finding(
+                "HIGH", "LANDSCAPE",
+                "Logon-banner sweep history wiped by operator",
+                ref="logon_banner.history_wipe",
+                attack_capability="recon.logon_banner_scan")
+        except Exception:
+            pass
+        return json.dumps({"ok": True, "runs_remaining": 0})
 
     # ------------------------------------------------------------------
     # Password spraying (issue #69) — per-node + landscape pool routes.

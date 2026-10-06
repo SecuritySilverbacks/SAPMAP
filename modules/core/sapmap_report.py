@@ -1563,6 +1563,184 @@ def _pwspray_section(state: SAPMAPState) -> list:
     return out
 
 
+def _logon_banners_section(state: SAPMAPState) -> list:
+    """Issue #68 PR4 — Logon-banner secret sweep summary.  Reads from
+    ``state.logon_banner_runs`` + per-node ``logon_banner_scan`` /
+    ``logon_banner_findings`` written by the PR3 route and the PR4
+    sweep engine's ``on_node_finding`` callback.  Returns ``[]`` when
+    there are no sweeps on record so the section is gated out.
+    """
+    runs = list(getattr(state, "logon_banner_runs", []) or [])
+    if not runs:
+        return []
+    runs_sorted = sorted(
+        runs, key=lambda r: r.get("started_at", ""), reverse=True)
+    out: list = []
+    out.append("## Logon-banner secret sweep (issue #68)")
+    out.append("")
+    out.append(
+        "Pure-read DIAG scrape of every ABAP dispatcher's login-screen "
+        "DYNT atoms, classified through the sap_logon_text_secrets "
+        "regex catalogue.  Flags admin-posted credentials, SAP "
+        "service-account names near password labels, AWS keys / "
+        "private keys / JWTs / bearer tokens, email addresses, phone "
+        "numbers and infra IPs.  Full per-finding cleartext lives on "
+        "the on-disk loot bundle (gitignored) and the per-node side-"
+        "panel; the bus / this report store severity counts + "
+        "sha256-fingerprints only.")
+    out.append("")
+    total_targets = sum(int(r.get("targets_done", 0) or 0)
+                        for r in runs)
+    total_crit = sum(
+        int((r.get("findings_by_severity") or {}).get("CRITICAL", 0) or 0)
+        for r in runs)
+    total_high = sum(
+        int((r.get("findings_by_severity") or {}).get("HIGH", 0) or 0)
+        for r in runs)
+    total_med = sum(
+        int((r.get("findings_by_severity") or {}).get("MEDIUM", 0) or 0)
+        for r in runs)
+    total_errs = sum(int(r.get("errors_count", 0) or 0) for r in runs)
+    out.extend(_stat_table([
+        ("Runs", str(len(runs))),
+        ("Targets scanned (all runs)", str(total_targets)),
+        ("CRITICAL findings", str(total_crit)),
+        ("HIGH findings", str(total_high)),
+        ("MEDIUM findings", str(total_med)),
+        ("Scan errors", str(total_errs)),
+    ]))
+    out.append("")
+    for r in runs_sorted:
+        rid = r.get("run_id", "?")
+        sev = r.get("findings_by_severity") or {}
+        out.append(f"### Run `{_esc(rid)}`")
+        out.append("")
+        out.extend(_stat_table([
+            ("Started", (r.get("started_at", "") or "")[:19]),
+            ("Finished", (r.get("finished_at", "") or "—")[:19]),
+            ("Scope", _esc(r.get("scope", ""))),
+            ("Targets", f"{r.get('targets_done', 0)} / "
+                        f"{r.get('targets_total', 0)}"),
+            ("CRITICAL", str(sev.get("CRITICAL", 0))),
+            ("HIGH", str(sev.get("HIGH", 0))),
+            ("MEDIUM", str(sev.get("MEDIUM", 0))),
+            ("INFO", str(sev.get("INFO", 0))),
+            ("Errors", str(r.get("errors_count", 0))),
+            ("Loot dir", _esc(r.get("loot_dir", "") or "—")),
+            ("Aborted", _esc(r.get("aborted", "") or "—")),
+        ]))
+        out.append("")
+        per_node = r.get("per_node") or []
+        if per_node:
+            out.append("| SID | OK | CRIT | HIGH | MED | Pairs | Error |")
+            out.append("| --- | --- | --- | --- | --- | --- | --- |")
+            for pn in per_node:
+                hbs = pn.get("hits_by_severity") or {}
+                out.append(
+                    f"| {_esc(pn.get('sid',''))} "
+                    f"| {'yes' if pn.get('ok') else 'no'} "
+                    f"| {hbs.get('CRITICAL', 0)} "
+                    f"| {hbs.get('HIGH', 0)} "
+                    f"| {hbs.get('MEDIUM', 0)} "
+                    f"| {pn.get('pair_count', 0)} "
+                    f"| {_esc(pn.get('error_kind', '') or '')} |")
+            out.append("")
+    return out
+
+
+def _html_logon_banners_section(state: SAPMAPState) -> str:
+    """HTML variant of _logon_banners_section.  Returns ``''`` when
+    there are no sweeps on record so the TOC entry is gated by
+    truthy-check (sapmap_report convention)."""
+    runs = list(getattr(state, "logon_banner_runs", []) or [])
+    if not runs:
+        return ""
+    import html as _html
+    runs_sorted = sorted(
+        runs, key=lambda r: r.get("started_at", ""), reverse=True)
+    total_targets = sum(int(r.get("targets_done", 0) or 0) for r in runs)
+    total_crit = sum(
+        int((r.get("findings_by_severity") or {}).get("CRITICAL", 0) or 0)
+        for r in runs)
+    total_high = sum(
+        int((r.get("findings_by_severity") or {}).get("HIGH", 0) or 0)
+        for r in runs)
+    total_med = sum(
+        int((r.get("findings_by_severity") or {}).get("MEDIUM", 0) or 0)
+        for r in runs)
+    total_errs = sum(int(r.get("errors_count", 0) or 0) for r in runs)
+
+    parts: list = []
+    parts.append('<section id="sec-logon-banners">')
+    parts.append(
+        '<h2>&#128269; Logon-banner secret sweep '
+        '<small>(issue #68)</small></h2>')
+    parts.append(
+        '<p>Pure-read DIAG scrape of every ABAP dispatcher\'s '
+        'login-screen DYNT atoms, classified through the '
+        '<code>sap_logon_text_secrets</code> regex catalogue.  '
+        'Full per-finding cleartext lives on the on-disk loot bundle '
+        '(gitignored) and the per-node side-panel; the bus and this '
+        'report store severity counts + sha256-fingerprints only.</p>')
+    parts.append(
+        '<table class="stat-table"><tbody>'
+        f'<tr><td>Runs</td><td>{len(runs)}</td></tr>'
+        f'<tr><td>Targets scanned (all runs)</td><td>{total_targets}</td></tr>'
+        f'<tr><td>CRITICAL findings</td>'
+        f'<td style="color:#f85149">{total_crit}</td></tr>'
+        f'<tr><td>HIGH findings</td>'
+        f'<td style="color:#db6d28">{total_high}</td></tr>'
+        f'<tr><td>MEDIUM findings</td>'
+        f'<td style="color:#d4a72c">{total_med}</td></tr>'
+        f'<tr><td>Scan errors</td><td>{total_errs}</td></tr>'
+        '</tbody></table>')
+
+    for r in runs_sorted:
+        rid = r.get("run_id", "?")
+        sev = r.get("findings_by_severity") or {}
+        parts.append(
+            f'<h3>Run <code>{_html.escape(str(rid))}</code></h3>')
+        parts.append(
+            '<table class="stat-table"><tbody>'
+            f'<tr><td>Started</td><td>{_html.escape((r.get("started_at", "") or "")[:19])}</td></tr>'
+            f'<tr><td>Finished</td><td>{_html.escape((r.get("finished_at", "") or "—")[:19])}</td></tr>'
+            f'<tr><td>Scope</td><td><code>{_html.escape(str(r.get("scope", "")))}</code></td></tr>'
+            f'<tr><td>Targets</td>'
+            f'<td>{r.get("targets_done", 0)} / {r.get("targets_total", 0)}</td></tr>'
+            f'<tr><td>CRITICAL</td><td style="color:#f85149">{sev.get("CRITICAL", 0)}</td></tr>'
+            f'<tr><td>HIGH</td><td style="color:#db6d28">{sev.get("HIGH", 0)}</td></tr>'
+            f'<tr><td>MEDIUM</td><td style="color:#d4a72c">{sev.get("MEDIUM", 0)}</td></tr>'
+            f'<tr><td>INFO</td><td>{sev.get("INFO", 0)}</td></tr>'
+            f'<tr><td>Errors</td><td>{r.get("errors_count", 0)}</td></tr>'
+            f'<tr><td>Loot dir</td><td><code>{_html.escape(r.get("loot_dir", "") or "—")}</code></td></tr>'
+            f'<tr><td>Aborted</td><td>{_html.escape(r.get("aborted", "") or "—")}</td></tr>'
+            '</tbody></table>')
+        per_node = r.get("per_node") or []
+        if per_node:
+            rows_html = []
+            for pn in per_node:
+                hbs = pn.get("hits_by_severity") or {}
+                rows_html.append(
+                    '<tr>'
+                    f'<td><code>{_html.escape(str(pn.get("sid", "")))}</code></td>'
+                    f'<td>{"yes" if pn.get("ok") else "no"}</td>'
+                    f'<td style="color:#f85149">{hbs.get("CRITICAL", 0)}</td>'
+                    f'<td style="color:#db6d28">{hbs.get("HIGH", 0)}</td>'
+                    f'<td style="color:#d4a72c">{hbs.get("MEDIUM", 0)}</td>'
+                    f'<td>{pn.get("pair_count", 0)}</td>'
+                    f'<td>{_html.escape(str(pn.get("error_kind", "") or ""))}</td>'
+                    '</tr>')
+            parts.append(
+                '<table class="grid"><thead><tr>'
+                '<th>SID</th><th>OK</th><th>CRIT</th><th>HIGH</th>'
+                '<th>MED</th><th>Pairs</th><th>Error</th>'
+                '</tr></thead><tbody>'
+                + "".join(rows_html)
+                + '</tbody></table>')
+    parts.append('</section>')
+    return "\n".join(parts)
+
+
 def _html_pwspray_section(state: SAPMAPState) -> str:
     """HTML variant of _pwspray_section — self-contained markup
     for the engagement HTML report.  Returns '' when there are no
@@ -2474,6 +2652,11 @@ def build_markdown_report(state: SAPMAPState,
     pwspray_section = _pwspray_section(state)
     if pwspray_section:
         sections.extend(pwspray_section)
+        sections.append("---")
+        sections.append("")
+    logon_banners_section = _logon_banners_section(state)
+    if logon_banners_section:
+        sections.extend(logon_banners_section)
         sections.append("---")
         sections.append("")
     sections.extend(_per_system_table(state))
@@ -4327,6 +4510,7 @@ def build_html_report(state: SAPMAPState,
     persistence_html = _html_persistence_section(state)
     evasion_html = _html_evasion_section(state)
     pwspray_section_html = _html_pwspray_section(state)
+    logon_banners_section_html = _html_logon_banners_section(state)
 
     # Table of contents — one row per section that actually rendered.
     # Section IDs match the anchors on the <section id="..."> tags
@@ -4340,6 +4524,8 @@ def build_html_report(state: SAPMAPState,
         ("sec-chains",        "🔗 Trust chains",          True),
         ("sec-pwspray",       "🔓 Password spraying",
                               bool(pwspray_section_html)),
+        ("sec-logon-banners", "🔍 Logon-banner secrets",
+                              bool(logon_banners_section_html)),
         ("sec-inventory",     "🗺️ Landscape inventory",   True),
         ("sec-credentials",   "🔑 Recovered credentials", True),
         ("sec-capability",    "📊 User capability inventory",
@@ -4585,6 +4771,8 @@ def build_html_report(state: SAPMAPState,
   </section>
 
   {pwspray_section_html}
+
+  {logon_banners_section_html}
 
   <section id="sec-inventory">
     <h2>🗺️ Landscape inventory</h2>
