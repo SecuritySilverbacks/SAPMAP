@@ -2509,6 +2509,190 @@ def _resolve_probe_target(state, conn):
     return None
 
 
+def parse_landscape_xml_into_state(state, xml_text,
+                                    no_scan_appservers=False,
+                                    import_appservers_fn=None):
+    """Parse a SAP UI Landscape / SAPGUILandscape XML and add systems
+    into ``state``.  Pure function (no Bottle request/response) so unit
+    tests can exercise it directly.  Raises ValueError on bad XML.
+
+    Issue SecuritySilverbacks/SAPMAP#105 — supports BOTH:
+
+      1. Messageserver-linked ``<Service msid="…"/>`` entries whose SID
+         comes from ``systemid=`` (unless it is the SAP Logon sentinel
+         "@01" etc, in which case the node is marked
+         ``discovered_via_xml=True`` and the SID is synthesized from the
+         service `name` so a Standard Scan promotes it to the real SID
+         via RFC_SYSTEM_INFO).
+      2. Direct-connect ``<Service server="host:port"/>`` entries with
+         no messageserver link — the common case in SAPGUILandscape.xml
+         exports.  Also flagged ``discovered_via_xml=True``.
+
+    De-dup by ``(host, port_int)`` within one import so sibling
+    "direct" + "via SAProuter" entries for the same backend don't
+    produce two cards for the same endpoint.
+
+    Returns the summary dict the HTTP route serializes verbatim:
+      {status, systems: [...], added: [sid, ...], skipped: [sid, ...],
+       dupes: [{name, host, port}, ...]}
+    """
+    import xml.etree.ElementTree as ET
+    try:
+        root = ET.fromstring(xml_text)
+    except ET.ParseError as e:
+        raise ValueError(str(e))
+
+    # SAP UI Landscape XML links each <Service> to its message server
+    # by UUID: Service.msid == Messageserver.uuid.
+    ms_by_uuid = {}
+    for ms in root.iter("Messageserver"):
+        uuid = (ms.get("uuid") or "").strip()
+        if not uuid:
+            continue
+        ms_by_uuid[uuid] = {
+            "name": ms.get("name", ""),
+            "host": ms.get("host", ""),
+            "port": ms.get("port", ""),
+        }
+
+    def _is_sentinel_sid(s):
+        """SAP Logon writes '@01', '@02', … as placeholders meaning
+        'SID not yet determined'.  Any systemid starting with '@' is a
+        sentinel; empty is also effectively a sentinel."""
+        return (not s) or s.startswith("@")
+
+    def _derive_sid_from_name(name, host):
+        """Produce a stable, operator-recognizable placeholder SID
+        when the real SID is unknown — first 3 uppercase alnum chars
+        of the service `name` (SAP SIDs are always 3 chars), with a
+        host-based fallback for pathological cases."""
+        cleaned = "".join(ch for ch in (name or "").upper()
+                          if ch.isalnum())
+        if len(cleaned) >= 3:
+            return f"XML_{cleaned[:3]}"
+        host_sani = "".join(
+            ch if (ch.isalnum() or ch in "_-") else "_"
+            for ch in (host or "unknown"))[:16]
+        return f"XML_{host_sani}"
+
+    systems = []
+    added = []
+    skipped = []
+    dupes = []
+    seen_endpoints = set()  # (host.lower(), port_int) within THIS import
+
+    for svc in root.iter("Service"):
+        svc_name = (svc.get("name") or "").strip()
+        svc_sid = (svc.get("systemid") or "").strip().upper()
+        svc_desc = (svc.get("description") or "").strip()
+        svc_msid = (svc.get("msid") or "").strip()
+        svc_srv = (svc.get("server") or "").strip()
+        svc_type = (svc.get("type") or "").strip().upper()
+
+        ms = ms_by_uuid.get(svc_msid) if svc_msid else None
+        host = ""
+        port_str = ""
+        port_label = ""
+        if ms and ms.get("host"):
+            host = ms["host"]
+            port_str = ms["port"]
+            port_label = "sapms"
+        elif svc_srv and ":" in svc_srv and svc_srv.upper() != "SPACE":
+            # SAP Logon's literal "SPACE" = "no server configured".
+            host, _, port_str = svc_srv.partition(":")
+            host = host.strip()
+            port_str = port_str.strip()
+            try:
+                _p = int(port_str)
+                if 3200 <= _p <= 3299:
+                    port_label = "dispatcher"
+                elif 3300 <= _p <= 3399:
+                    port_label = "gateway"
+                elif 3600 <= _p <= 3699:
+                    port_label = "sapms"
+            except ValueError:
+                port_label = ""
+        else:
+            continue
+
+        if not host:
+            continue
+
+        try:
+            port_int = int(port_str)
+            if port_int <= 0:
+                port_int = None
+        except (TypeError, ValueError):
+            port_int = None
+
+        endpoint_key = (host.lower(), port_int)
+        if endpoint_key in seen_endpoints:
+            dupes.append({"name": svc_name, "host": host,
+                           "port": port_str})
+            continue
+        seen_endpoints.add(endpoint_key)
+
+        placeholder = False
+        if _is_sentinel_sid(svc_sid):
+            sid = _derive_sid_from_name(svc_name, host)
+            placeholder = True
+        else:
+            sid = svc_sid
+
+        if state.get_node(sid):
+            skipped.append(sid)
+            continue
+
+        inst_nr = "00"
+        if port_int is not None:
+            if 3200 <= port_int <= 3299:
+                inst_nr = f"{port_int - 3200:02d}"
+            elif 3300 <= port_int <= 3399:
+                inst_nr = f"{port_int - 3300:02d}"
+            elif 3600 <= port_int <= 3699:
+                inst_nr = f"{port_int - 3600:02d}"
+
+        ports = {port_int: port_label} if port_int and port_label else {}
+        instance = InstanceInfo(instance_nr=inst_nr, ip=host,
+                                 ports=ports)
+        node = SAPNode(
+            sid=sid, hostname=host, ip=host,
+            instances=[instance],
+            sapology_data={
+                "description": svc_desc,
+                "xml_service_name": svc_name,
+                "xml_type": svc_type,
+                "xml_sentinel_sid": svc_sid if placeholder else "",
+            },
+            discovered_via_xml=placeholder,
+        )
+        state.add_node(node)
+        added.append(sid)
+        systems.append({
+            "sid": sid, "name": svc_name,
+            "description": svc_desc,
+            "host": host, "port": port_str,
+            "placeholder": placeholder,
+        })
+        _tag = "placeholder" if placeholder else "fingerprinted"
+        print(f"[+] Imported {_tag} system {sid} "
+              f"(name={svc_name!r}) -> {host}:{port_str or '?'} "
+              f"as {port_label or 'instance'} {inst_nr}")
+
+        if (ms and not no_scan_appservers and port_int
+                and import_appservers_fn is not None):
+            n = import_appservers_fn(node, host, port_int)
+            if n:
+                print(f"[+] {sid}: imported {n} application server(s)")
+
+    print(f"[*] Landscape XML: {len(systems)} system(s) imported "
+          f"(added {len(added)}, skipped-existing {len(skipped)}, "
+          f"dedup-dup-endpoint {len(dupes)})")
+
+    return {"status": "ok", "systems": systems, "added": added,
+            "skipped": skipped, "dupes": dupes}
+
+
 def _import_appserver_instances(node, ms_host: str, ms_port) -> int:
     """Fan out from a Message Server to its application servers and add
     dispatcher (32NN) + gateway (33NN) InstanceInfo pairs to ``node``.
@@ -5381,13 +5565,18 @@ def create_app(api: SAPMAPApi) -> Bottle:
         threads = int(cfg.get("threads", 30))
         port_timeout = float(cfg.get("port_timeout", 3.0))
 
-        # Placeholder vs real node — mode selector.  Any of the three
+        # Placeholder vs real node — mode selector.  Any of the four
         # "discovered_via" flags counts; a fresh node created by the
         # Type-3 ping loop has none of them and is treated as real.
+        # discovered_via_xml (issue #105) covers SAPGUILandscape.xml /
+        # SAP UI Landscape XML imports where the SID was unknown at
+        # import time ("@01" sentinel or no messageserver link) and
+        # the Standard Scan should promote it to the real SID.
         is_placeholder = bool(
             getattr(node, "discovered_via_btp", False)
             or getattr(node, "discovered_via_wd_sid", "")
-            or getattr(node, "discovered_via_rfc_g", False))
+            or getattr(node, "discovered_via_rfc_g", False)
+            or getattr(node, "discovered_via_xml", False))
 
         def _merge_scan_into_existing(existing, scanned):
             """Fold ``scanned`` port/instance/metadata into
@@ -19241,117 +19430,26 @@ def create_app(api: SAPMAPApi) -> Bottle:
 
     @app.route("/api/import_landscape_xml", method="POST")
     def api_import_landscape_xml():
-        """Import SAP systems from a SAP UI Landscape XML.
-
-        Joins each <Service> to its <Messageserver> (Service.msid ==
-        Messageserver.uuid) and plots one node per system using the
-        service's SID + description and the message server's host + port.
-        """
-
-        no_scan_appservers = (request.query.get('no_scan')=='1')
-
+        """Import SAP systems from a SAP UI Landscape / SAPGUILandscape
+        XML — thin wrapper around parse_landscape_xml_into_state (which
+        does all the real work and is directly unit-testable)."""
+        no_scan_appservers = (request.query.get('no_scan') == '1')
         response.content_type = "application/json"
-        import xml.etree.ElementTree as ET
-
-        # request.body is a file-like object; read the raw POST payload.
         raw = request.body.read()
         if isinstance(raw, bytes):
             raw = raw.decode("utf-8", errors="replace")
         if not raw.strip():
             return json.dumps({"error": "Empty request body"})
-
         try:
-            root = ET.fromstring(raw)
-        except ET.ParseError as e:
-            print (f"[-]  Invalid XML: {e}")
-            return json.dumps({"error": f"Invalid XML: {e}"})
-
-        # SAP UI Landscape XML links each <Service> to its message server
-        # by UUID: Service.msid == Messageserver.uuid.  Index the message
-        # servers by UUID first, then walk the services and join.
-        ms_by_uuid = {}
-        for ms in root.iter("Messageserver"):
-            uuid = (ms.get("uuid") or "").strip()
-            if not uuid:
-                continue
-            ms_by_uuid[uuid] = {
-                "name": ms.get("name", ""),
-                "host": ms.get("host", ""),
-                "port": ms.get("port", ""),
-            }
-
-        systems = []     # joined {name, description, host, port} objects
-        added = []       # SIDs newly plotted this import
-        skipped = []     # SIDs already present in state
-        for svc in root.iter("Service"):
-            ms = ms_by_uuid.get((svc.get("msid") or "").strip())
-            if not ms:
-                # No matching message server for this service — nothing to plot.
-                continue
-
-            # Joined object: SID from the service, description from the
-            # service, host + port from its message server.
-            system = {
-                "name": svc.get("systemid", ""),       # e.g. "SDA"
-                "description": svc.get("description", ""),
-                "host": ms.get("host", ""),
-                "port": ms.get("port", ""),
-            }
-            systems.append(system)
-
-            sid = system["name"].strip().upper()
-            if not sid:
-                continue
-
-            # Already in state? Skip — don't clobber a discovered node.
-            if api.state.get_node(sid):
-                skipped.append(sid)
-                continue
-
-            host = system["host"]
-            port = system["port"]
-
-            # Derive the instance number from the external MS port
-            # (sapms<SID> = 36NN); fall back to "00" when it doesn't fit.
-            inst_nr = "00"
-            try:
-                p = int(port)
-                if 3600 <= p <= 3699:
-                    inst_nr = f"{p - 3600:02d}"
-            except (TypeError, ValueError):
-                p = None
-
-            ports = {p: "sapms"} if p else {}
-            instance = InstanceInfo(instance_nr=inst_nr, ip=host, ports=ports)
-            node = SAPNode(
-                sid=sid,
-                hostname=host,
-                ip=host,
-                instances=[instance],
-                sapology_data={"description": system["description"]},
+            summary = parse_landscape_xml_into_state(
+                api.state, raw,
+                no_scan_appservers=no_scan_appservers,
+                import_appservers_fn=_import_appserver_instances,
             )
-            api.state.add_node(node)
-            added.append(sid)
-            print(f"[+] Imported system {sid} ({system['description']}) "
-                  f"-> {host}:{port} as sapms instance {inst_nr}")
-
-            # Fan out from the message server to its application servers,
-            # adding a dispatcher (32NN) + gateway (33NN) instance pair for
-            # each DIA server — unless the operator asked for file-import only.
-            if not no_scan_appservers:
-                n = _import_appserver_instances(node, host, p)
-                if n:
-                    print(f"[+] {sid}: imported {n} application server(s)")
-
-        print(f"[*] Landscape XML: {len(systems)} system(s) joined "
-              f"(added {len(added)}, skipped {len(skipped)})")
-
-        return json.dumps({
-            "status": "ok",
-            "systems": systems,
-            "added": added,
-            "skipped": skipped,
-        })
+        except ValueError as e:
+            print(f"[-] Invalid XML: {e}")
+            return json.dumps({"error": f"Invalid XML: {e}"})
+        return json.dumps(summary)
 
     # -- Business Impact Assessment --
     @app.route("/api/node/<sid>/impact/assess", method="POST")
