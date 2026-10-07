@@ -551,3 +551,90 @@ def test_chain_probe_short_reply_treated_as_inconclusive():
     # PORT further down the log.
     assert "AD_GET_NILIST_PORT" in src
     assert "authoritative registration-committed signal" in collapsed
+
+
+# ---------------------------------------------------------------------------
+# APPC-trailer disambiguation (2026-10-07 classifier refinement)
+# ---------------------------------------------------------------------------
+
+def _hardened_frame_with_appc(appc_rc: int, sap_rc: int = 0) -> bytes:
+    """Build an 80-byte F_SAP_INIT reject envelope with the APPC trailer
+    at bytes 32-39 set to (appc_rc, sap_rc).  Byte 0-1 = 06 CA (SAPRFC
+    v6 header + F_SAP_INIT reply opcode), bytes 6-7 = 00 00 (gw_id=0),
+    rest zero-padded to 80 bytes (the shape NPL kernel 753 returns)."""
+    frame = bytearray(80)
+    frame[0] = 0x06   # SAPRFC version
+    frame[1] = 0xCA   # F_SAP_INIT reply opcode
+    # bytes[6:8] gw_id stays 00 00
+    struct.pack_into("!I", frame, 32, appc_rc)
+    struct.pack_into("!I", frame, 36, sap_rc)
+    return bytes(frame)
+
+
+def test_appc_rc_0x06_classifies_as_source_ip_not_trusted():
+    """APPC_RC = 0x06 (CM_SECURITY_NOT_VALID) means the GW rejected our
+    source IP, NOT that reginfo blocked the TP.  Classifier must NOT
+    upgrade this to hardened_reject — the betrusted poll loop should
+    keep polling because trust propagation may still land."""
+    info = parse_response(_hardened_frame_with_appc(0x06), "F_SAP_INIT")
+    assert info["error"] is True
+    assert info["gw_id"] == 0
+    assert info["appc_rc"] == 0x06
+    assert info.get("gw_reject_reason") == "source_ip_not_trusted"
+    assert info.get("hardened_reject") is not True, (
+        "APPC_RC=0x06 is trust-list miss, NOT reginfo hardening — "
+        "setting hardened_reject here would make the poll loop bail "
+        "prematurely on a chain that could still land")
+    assert "CM_SECURITY_NOT_VALID" in info["error_msg"]
+    assert "internal_hosts" in info["error_msg"]
+
+
+def test_appc_rc_0x09_classifies_as_reginfo_kernel_deny():
+    """APPC_RC = 0x09 (CM_TPN_NOT_RECOGNIZED) is a definitive reginfo /
+    secinfo deny — the TP name is blocked at the kernel ACL evaluator."""
+    info = parse_response(_hardened_frame_with_appc(0x09), "F_SAP_INIT")
+    assert info["appc_rc"] == 0x09
+    assert info.get("gw_reject_reason") == "reginfo_kernel_deny"
+    assert info.get("hardened_reject") is True
+    assert "sapxpg" in info["error_msg"]
+    assert "2808158" in info["error_msg"]
+
+
+def test_appc_rc_0x0a_classifies_as_reginfo_kernel_deny():
+    """APPC_RC = 0x0A (CM_TP_NOT_AVAILABLE_NO_RETRY) is the sibling
+    reginfo-deny return code — same classification as 0x09."""
+    info = parse_response(_hardened_frame_with_appc(0x0A), "F_SAP_INIT")
+    assert info["appc_rc"] == 0x0A
+    assert info.get("gw_reject_reason") == "reginfo_kernel_deny"
+    assert info.get("hardened_reject") is True
+
+
+def test_appc_rc_zero_preserves_default_hardened_verdict():
+    """NPL kernel 753 + S4H kernel 793 both return APPC_RC=0 with the
+    short reject envelope (verified live 2026-10-07 via SSH-tunnel
+    probe from 127.0.0.1).  The classifier MUST continue to call this
+    hardened_reject — the default-deny gw/sec_info posture doesn't
+    carry a distinguishing APPC trailer, and the betrusted chain's
+    kernel-gated patience + NAT_SOURCE_MISMATCH probe catch the
+    handful of false-positive scenarios."""
+    info = parse_response(_hardened_frame_with_appc(0x00), "F_SAP_INIT")
+    assert info["appc_rc"] == 0x00
+    assert info.get("gw_reject_reason") == "reginfo_default_or_unknown"
+    assert info.get("hardened_reject") is True, (
+        "APPC_RC=0 with gw_id=0 is the empirically-observed signature "
+        "of post-2808158 reginfo hardening on NPL/S4H — must preserve "
+        "the hardened_reject verdict to avoid regressing the fix")
+
+
+def test_short_frame_without_appc_trailer_falls_back():
+    """Frames shorter than 40 bytes (e.g., A4H kernel 916's 24-byte
+    reject envelope) can't carry an APPC trailer.  Classifier must
+    gracefully fall back to the default hardened_reject verdict."""
+    short_frame = bytes.fromhex(
+        "06ca03000013000000000000000000000000000000000000"
+    )
+    assert len(short_frame) == 24
+    info = parse_response(short_frame, "F_SAP_INIT")
+    assert info["appc_rc"] is None
+    assert info.get("gw_reject_reason") == "reginfo_default_or_unknown"
+    assert info.get("hardened_reject") is True
