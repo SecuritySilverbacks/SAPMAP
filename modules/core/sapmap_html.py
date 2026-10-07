@@ -19427,7 +19427,10 @@ async function doLandscapeImport ()
       // processed together with the "only file import" preference.
       const res = await fetch('/api/import_landscape_xml?no_scan=' + (noScan ? '1' : '0'), opts);
 
-      if (res.error) alert('Load failed: ' + res.error);
+      // fetch() resolves to a Response object; the backend's {"error": ...}
+      // lives in the JSON body, so parse it before checking.
+      const data = await res.json();
+      if (data.error) { alert('Load failed: ' + data.error); return; }
       // Reset cursors + dismissal state so the restored findings snapshot
       // reappears in the banner/drawer/bell on the next poll.
       findingsCursor = 0;
