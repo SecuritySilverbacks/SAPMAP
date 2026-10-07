@@ -10803,6 +10803,7 @@ function showDetails(sid, opts) {
     <h3>${escHtml(n.sid)} System Details</h3>
     ${renderPhaseProgress(getPhaseProgress(n, sid))}
     <div class="detail-section">
+      <div class="detail-row"><span class="detail-key">Description</span><span class="detail-val">${escHtml(n.sapology_data.description)}</span></div>
       <div class="detail-row"><span class="detail-key">SID</span><span class="detail-val">${escHtml(n.sid)}</span></div>
       <div class="detail-row"><span class="detail-key">Type</span><span class="detail-val">${escHtml(n.system_type)}</span></div>
       <div class="detail-row"><span class="detail-key">Hostname</span><span class="detail-val">${escHtml(n.hostname)}</span></div>
