@@ -19286,7 +19286,7 @@ def create_app(api: SAPMAPApi) -> Bottle:
             # service, host + port from its message server.
             system = {
                 "name": svc.get("systemid", ""),       # e.g. "SDA"
-                "description": svc.get("description", ""),
+                "description": svc.get("name", ""),
                 "host": ms.get("host", ""),
                 "port": ms.get("port", ""),
             }
