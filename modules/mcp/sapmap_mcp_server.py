@@ -877,6 +877,79 @@ def pwspray_runs() -> str:
     return json.dumps(resp)
 
 
+# ===== TOOLS: Logon-Banner Sweep (issue #68) =====
+
+@mcp.tool()
+def scan_logon_banners_sweep(single_sid: str = "",
+                               custom_patterns: str = "") -> str:
+    """Launch the landscape DIAG logon-banner secret sweep (issue #68).
+
+    Opens one DIAG session to every ABAP dispatcher on the map (or
+    to one SID if ``single_sid`` is set), scrapes the login screen's
+    DYNT atom text, and classifies it with the sap_logon_text_secrets
+    regex catalogue.  Pure read: no account touched, no command
+    executed, no lockout risk.
+
+    Raw banner text + findings JSON land in
+    ``loot/logon_banners/<run_id>/`` per sweep.  CRITICAL / HIGH hits
+    bubble into the findings bus with sha256-redacted messages; full
+    cleartext stays on the per-node side-panel source (operator sees
+    exactly what was leaked) and on the gitignored loot files.
+
+    Args:
+        single_sid: Empty string = whole landscape (default).  Set to
+            one SID to scope the sweep to that system only.
+        custom_patterns: Optional operator-regex textarea blob — one
+            pattern per line, optional ``SEV:`` prefix (CRITICAL /
+            HIGH / MEDIUM / INFO); blank lines + ``# comments`` are
+            skipped.  Matches the per-node ctx-menu modal's shape.
+
+    Returns:
+        JSON string with ``{status, scope, custom_patterns, …}``.
+        After the started response, call ``scan_logon_banners_runs``
+        for the finished run's redacted summary (severity counts +
+        per-node OK/error status + loot paths).  Full cleartext
+        matches live on the on-disk loot JSON.
+    """
+    resp = _api("POST", "/api/actions/scan_logon_banners", {
+        "single_sid":      single_sid or "",
+        "custom_patterns": custom_patterns or "",
+    })
+    if isinstance(resp, dict) and resp.get("error"):
+        return json.dumps(resp)
+    _wait_for_tasks(timeout=1800)
+    return json.dumps(resp)
+
+
+@mcp.tool()
+def scan_logon_banners_status() -> str:
+    """Return the current logon-banner sweep status singleton (issue #68).
+
+    Reports running / finished / phase (idle / collect_targets / scan
+    / report / done), phase_progress, run_id, scope, targets_total,
+    targets_done, severity counts, errors, aborted reason, and the
+    tail of the live log.  Read-only — never writes.
+    """
+    resp = _api("GET", "/api/actions/scan_logon_banners/status")
+    return json.dumps(resp)
+
+
+@mcp.tool()
+def scan_logon_banners_runs() -> str:
+    """Return the logon-banner sweep run history (issue #68).
+
+    Each entry is one sweep summary with ``run_id``, ``started_at``,
+    ``finished_at``, ``scope``, ``targets_total`` /
+    ``targets_done``, ``findings_by_severity``, ``errors_count``,
+    ``loot_dir``, ``aborted``, and a per-node breakdown ``per_node``
+    (``sid``, OK / error kind, severity counts, loot paths).
+    Newest-first.  No cleartext — matches live only on loot JSON
+    + per-node side-panel state.
+    """
+    resp = _api("GET", "/api/actions/scan_logon_banners/runs")
+    return json.dumps(resp)
+
+
 # ===== TOOLS: Data Extraction =====
 
 @mcp.tool()

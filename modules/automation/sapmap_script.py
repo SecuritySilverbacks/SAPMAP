@@ -82,6 +82,8 @@ Supported actions:
     check_all_snc, check_all_vulns,
     # Password spraying (dry_run default; live needs accept_lockout_risk)
     password_spray,
+    # Logon-banner secret sweep (pure read, no risk gate)
+    scan_logon_banners,
     # State management
     save_state, load_state,
     # Tier 3 evasion (--allow-evasion + --confirm required)
@@ -675,6 +677,26 @@ def _map_step(step: dict) -> tuple:
                 step.get("accept_production_risk", False)),
             "cap_per_user": int(step.get("cap_per_user", 1) or 1),
             "purple_mode": bool(step.get("purple_mode", False)),
+        }, True)
+
+    # -----------------------------------------------------------------
+    # Logon-banner secret sweep (issue #68, PR4)
+    # -----------------------------------------------------------------
+    if action == "scan_logon_banners":
+        # Landscape-wide DIAG logon-banner secret scan.  Pure read —
+        # no account touched, no command executed, no lockout risk —
+        # so no risk-ack gate.  Scope defaults to the whole landscape;
+        # ``single_sid`` scopes to one SID (same semantics as
+        # password_spray).  ``custom_patterns`` is the textarea blob
+        # (string, one pattern per line, optional "SEV:" prefix) that
+        # scan_text parses for tenant-specific keywords.
+        #
+        # Knobs (all optional):
+        #   single_sid:      str  (default "" = whole landscape)
+        #   custom_patterns: str  (default "" = catalogue only)
+        return ("POST", "/api/actions/scan_logon_banners", {
+            "single_sid":      (step.get("single_sid") or "").strip(),
+            "custom_patterns": (step.get("custom_patterns") or ""),
         }, True)
 
     # -----------------------------------------------------------------
@@ -1274,6 +1296,8 @@ _ACTION_LABELS = {
     "autopwn":                    "Running AutoPwn convergence loop",
     # Password spraying (issue #69, PR5).
     "password_spray":             "Running password spray",
+    # Logon-banner secret sweep (issue #68, PR4).
+    "scan_logon_banners":         "Scanning logon banners",
     # Node metadata overrides
     "set_type":                   "Setting system type",
     "set_db_type":                "Setting DB type",

@@ -624,6 +624,16 @@ class SAPNode:
     ms_port: int = 0                    # MS internal port found (39NN), 0 = not found
     ms_vulnerable: bool = False         # True if MS lacks ACL protection (CVE-2020-6207)
     ms_acl_protected: bool = False      # True if MS port reachable but ACL blocks our IP
+    # 10KBLAZE NAT escape hatch — the IP the TARGET sees us as, when
+    # SAPMAP runs behind a SNAT'ing router (VPN / Docker bridge /
+    # off-subnet host).  When set, try_betrusted_chain uses this
+    # verbatim instead of the kernel's auto-detected local IP, and
+    # — when attacker_ip_force is also True — suppresses betrusted()'s
+    # auto-swap to sock.getsockname()[0] so the DP blob carries the
+    # operator-chosen value.  Operator sets both via the per-node
+    # ctx-menu "Set 10KBLAZE Attacker IP..." entry.
+    attacker_ip_override: str = ""
+    attacker_ip_force: bool = False
     # kloris/SAPMAP#41 — True when the MS internal port speaks TLS
     # (system/secure_communication = ON).  Detected via a TLS
     # ClientHello probe in sap_ms_betrusted.probe_ms_tls_required.
@@ -961,6 +971,18 @@ class SAPNode:
     #              roles: list, note: str, ts: iso, run_id: str}
     spray_hit_users: list = field(default_factory=list)
 
+    # Issue #68 — DIAG login-banner scan.
+    # ``logon_banner_scan`` is the last-run summary dict (keys: run_id,
+    # ts, instance_nr, port, elapsed_s, pair_count, raw_text_bytes,
+    # hits_by_severity, loot_text_path, loot_json_path, error_kind,
+    # error, terminal).  ``logon_banner_findings`` is the per-finding
+    # list from ``scan_text`` (keys: severity, pattern_name, category,
+    # match, snippet, offset, context, attack_capability).  Both are
+    # overwritten on each rescan — the loot files on disk are the
+    # cross-session audit trail.
+    logon_banner_scan: dict = field(default_factory=dict)
+    logon_banner_findings: list = field(default_factory=list)
+
     # Computed helpers
     def has_access(self) -> bool:
         """True if we have any working credentials or created users."""
@@ -1042,6 +1064,8 @@ class SAPNode:
             "ms_port": self.ms_port,
             "ms_vulnerable": self.ms_vulnerable,
             "ms_acl_protected": self.ms_acl_protected,
+            "attacker_ip_override": self.attacker_ip_override,
+            "attacker_ip_force":    bool(self.attacker_ip_force),
             "ms_secure_comms_required": self.ms_secure_comms_required,
             "cve_2025_31324_checked": self.cve_2025_31324_checked,
             "cve_2026_58240_checked": self.cve_2026_58240_checked,
@@ -1149,6 +1173,9 @@ class SAPNode:
             "_pwspray_tested_triples": sorted(
                 self._pwspray_tested_triples or set()),
             "spray_hit_users": list(self.spray_hit_users or []),
+            "logon_banner_scan": dict(self.logon_banner_scan or {}),
+            "logon_banner_findings": list(
+                self.logon_banner_findings or []),
         }
 
     @classmethod
@@ -1182,6 +1209,8 @@ class SAPNode:
             ms_port=d.get("ms_port", 0),
             ms_vulnerable=d.get("ms_vulnerable", False),
             ms_acl_protected=d.get("ms_acl_protected", False),
+            attacker_ip_override=d.get("attacker_ip_override", "") or "",
+            attacker_ip_force=bool(d.get("attacker_ip_force", False)),
             ms_secure_comms_required=d.get("ms_secure_comms_required", False),
             cve_2025_31324_checked=d.get("cve_2025_31324_checked", False),
             cve_2026_58240_checked=d.get("cve_2026_58240_checked", False),
@@ -1294,6 +1323,9 @@ class SAPNode:
                 d.get("_pwspray_tested_triples", []) or []),
             spray_hit_users=list(
                 d.get("spray_hit_users", []) or []),
+            logon_banner_scan=dict(d.get("logon_banner_scan", {}) or {}),
+            logon_banner_findings=list(
+                d.get("logon_banner_findings", []) or []),
         )
         return node
 
@@ -2165,6 +2197,15 @@ class SAPMAPState:
     #         totals, hits_count, locked_count, loot_path,
     #         purple_report_generated}
     spray_runs: list = field(default_factory=list)
+
+    # Per-sweep summaries for the issue #68 DIAG logon-banner scanner.
+    # Each entry: {run_id, started_at, finished_at, scope, targets_total,
+    #              targets_done, findings_by_severity, errors_count,
+    #              loot_dir, aborted}
+    # Full per-finding data stays on the per-node ``logon_banner_findings``
+    # (so the GUI side-panel keeps rendering) + on the on-disk loot
+    # bundle at ``loot/logon_banners/<run_id>/``.
+    logon_banner_runs: list = field(default_factory=list)
     timestamp: str = ""
     version: str = "1.0"
 
@@ -3345,6 +3386,7 @@ class SAPMAPState:
             "spray_attempts_counter": dict(self.spray_attempts_counter or {}),
             "pwspray_locked_users": dict(self.pwspray_locked_users or {}),
             "spray_runs": list(self.spray_runs or []),
+            "logon_banner_runs": list(self.logon_banner_runs or []),
         }
 
     @classmethod
@@ -3381,6 +3423,7 @@ class SAPMAPState:
         state.pwspray_locked_users = dict(
             d.get("pwspray_locked_users", {}))
         state.spray_runs = list(d.get("spray_runs", []))
+        state.logon_banner_runs = list(d.get("logon_banner_runs", []))
         # One-shot dedup pass: fold FQDN-keyed placeholder BTP nodes
         # (from earlier materialise_type_g_target runs) into any
         # real-UUID node that shares the same subdomain.  Handles

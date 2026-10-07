@@ -2615,6 +2615,9 @@ def create_app(api: SAPMAPApi) -> Bottle:
         "/api/node/<sid>/exploit_cve_2025_31324",
         "/api/node/<sid>/lpe",
         "/api/node/<sid>/betrusted_chain",
+        # NAT escape-hatch override — writes attacker_ip_override on the
+        # node, driving the 10KBLAZE betrusted chain's attacker IP.
+        "/api/node/<sid>/set_attacker_ip",
         "/api/node/<sid>/dpmon_sapstar",
         # Ticket forgery + fanout
         "/api/node/<sid>/forge_ticket",
@@ -2674,6 +2677,13 @@ def create_app(api: SAPMAPApi) -> Bottle:
         "/api/actions/password_spray",
         "/api/actions/password_spray/pool/wordlist",
         "/api/actions/password_spray/reset_history",
+        # Issue #68 PR4 — logon-banner sweep.  The POST launcher is a
+        # write-op (spawns a daemon-thread sweep + mutates
+        # state.logon_banner_runs).  The GET /status and GET /runs
+        # endpoints stay OUT of this set so --read-only operators can
+        # still watch an in-flight sweep + read history.
+        "/api/actions/scan_logon_banners",
+        "/api/actions/scan_logon_banners/reset_history",
         # SCC destructive / auth
         "/api/scc/<host>/probe_creds",
         "/api/scc/<host>/pull_mappings",
@@ -8836,8 +8846,11 @@ def create_app(api: SAPMAPApi) -> Bottle:
             return json.dumps({"error": f"Node {sid} not found"})
 
         attacker_ip = data.get("attacker_ip", "").strip()
-        if not attacker_ip:
-            return json.dumps({"error": "attacker_ip is required"})
+        # attacker_ip empty = auto-detect (routing table + sock.getsockname
+        # swap, same as the automated 10KBLAZE chain path).  Operator may
+        # also set it per-node via Set 10KBLAZE Attacker IP; try_betrusted
+        # _chain reads node.attacker_ip_override as a secondary fallback.
+        force_attacker_ip = bool(data.get("force_attacker_ip", False))
 
         if not node.ms_port:
             return json.dumps({"error": "MS internal port not known — run Check MS first"})
@@ -8850,20 +8863,25 @@ def create_app(api: SAPMAPApi) -> Bottle:
 
         def _run():
             try:
+                _ip_desc = attacker_ip or "<auto-detect>"
+                _force_desc = " (force=True)" if force_attacker_ip else ""
                 print(f"[*] {sid}: Running betrusted attack on "
                       f"{node.ip or node.hostname}:{node.ms_port} "
-                      f"→ injecting {attacker_ip} into gateway trust list")
+                      f"→ injecting {_ip_desc} into gateway trust list"
+                      f"{_force_desc}")
                 # try_betrusted_chain keeps the MS connection alive while polling GW
                 ok = sapmap_exploit.try_betrusted_chain(
                     node, api.state,
                     attacker_ip=attacker_ip,
                     nilist_wait=nilist_wait,
                     stop_event=stop_event,
+                    force_attacker_ip=force_attacker_ip,
                 )
                 if stop_event.is_set():
                     pass   # exploit already logged cancellation
                 elif ok:
-                    print(f"[+] {sid}: Gateway now TRUSTED from {attacker_ip} "
+                    print(f"[+] {sid}: Gateway now TRUSTED from "
+                          f"{attacker_ip or 'auto-detected IP'} "
                           f"— GW exploit is available")
                 else:
                     print(f"[-] {sid}: Gateway did not become trusted. "
@@ -8874,6 +8892,85 @@ def create_app(api: SAPMAPApi) -> Bottle:
 
         _bg(key, "Betrusted Attack", _run)
         return json.dumps({"status": "started"})
+
+    @app.route("/api/node/<sid>/set_attacker_ip", method="POST")
+    def node_set_attacker_ip(sid):
+        """Persist the operator's 10KBLAZE attacker IP override on
+        the node.  Used when SAPMAP runs behind a SNAT'ing router
+        (VPN / Docker / off-subnet) and the operator knows the IP
+        the TARGET sees them as.
+
+        Body:
+          {
+            "attacker_ip":        "192.168.2.42",  # "" clears the override
+            "force":              true,            # bypass auto-swap in betrusted
+          }
+
+        Returns {ok, attacker_ip, force, nat_warning}.
+        """
+        response.content_type = "application/json"
+        node = api.state.get_node(sid)
+        if not node:
+            response.status = 404
+            return json.dumps({"error": "node_not_found",
+                                "message": f"Node {sid} not found"})
+        data = request.json if isinstance(request.json, dict) else {}
+        raw_ip = (data.get("attacker_ip") or "").strip()
+        force = bool(data.get("force", False))
+        # Permissive IPv4 shape check — only validate when non-empty so
+        # a blank value clears the override cleanly.
+        if raw_ip:
+            parts = raw_ip.split(".")
+            if (len(parts) != 4
+                    or not all(p.isdigit() and 0 <= int(p) <= 255
+                                for p in parts)):
+                response.status = 400
+                return json.dumps({
+                    "error": "bad_attacker_ip",
+                    "message": "attacker_ip must be an IPv4 address or empty",
+                })
+        node.attacker_ip_override = raw_ip
+        node.attacker_ip_force = force if raw_ip else False
+        # Diagnostic — if the operator set an IP that's STILL on a
+        # different /24 from the target, warn.  Doesn't block the save;
+        # the operator may have reasons (e.g. jumpbox IP they'll test
+        # from later).
+        host = node.ip or node.hostname or ""
+        warning = ""
+        if raw_ip and host:
+            try:
+                from sap_ms_info_disclosure import subnet_mismatch
+                if subnet_mismatch(raw_ip, host):
+                    warning = (
+                        f"Note: {raw_ip} is still on a different /24 "
+                        f"from target {host}.  Save kept — but double-"
+                        f"check that this really is the IP the target "
+                        f"sees you as.")
+            except Exception:
+                pass
+        return json.dumps({
+            "ok":              True,
+            "sid":             sid,
+            "attacker_ip":     node.attacker_ip_override,
+            "force":           node.attacker_ip_force,
+            "nat_warning":     warning,
+        })
+
+    @app.route("/api/node/<sid>/get_attacker_ip")
+    def node_get_attacker_ip(sid):
+        """Return the per-node 10KBLAZE attacker IP override, if any."""
+        response.content_type = "application/json"
+        node = api.state.get_node(sid)
+        if not node:
+            response.status = 404
+            return json.dumps({"error": "node_not_found",
+                                "message": f"Node {sid} not found"})
+        return json.dumps({
+            "ok":           True,
+            "sid":          sid,
+            "attacker_ip":  getattr(node, "attacker_ip_override", "") or "",
+            "force":        bool(getattr(node, "attacker_ip_force", False)),
+        })
 
     @app.route("/api/node/<sid>/create_user", method="POST")
     def node_create_user(sid):
@@ -16721,6 +16818,627 @@ def create_app(api: SAPMAPApi) -> Bottle:
 
         _bg(f"{sid}:default_creds", "Check Default Accounts", _run)
         return json.dumps({"status": "started"})
+
+    # ------------------------------------------------------------------
+    # Logon-banner secret scan (issue #68).  Pure read: opens one DIAG
+    # session to the dispatcher, scrapes the login screen's DYNT atom
+    # text, runs it through the sap_logon_text_secrets regex catalogue,
+    # emits findings for anything caught.  No account touched, no
+    # command run, no state mutated on target.  Operator picked
+    # "okay to ship without the standard write-op pattern, this is
+    # not intrusive at all" in the plan survey — route is still
+    # considered a scan verb (shows up under the Scanning submenu).
+    # ------------------------------------------------------------------
+
+    @app.route("/api/node/<sid>/scan_logon_banners", method="POST")
+    def node_scan_logon_banners(sid):
+        response.content_type = "application/json"
+        node = api.state.get_node(sid)
+        if not node:
+            response.status = 404
+            return json.dumps({"error": "node_not_found",
+                                "message": f"Node {sid} not found"})
+
+        # ABAP-only — DIAG login banners are an ABAP-stack surface.
+        # Pure-Java (and SAProuter / BO) don't expose a DIAG dispatcher.
+        system_type = (node.system_type or "").upper()
+        if "ABAP" not in system_type:
+            response.status = 400
+            return json.dumps({
+                "error": "not_abap",
+                "message": (
+                    f"Logon-banner scan needs an ABAP dispatcher; "
+                    f"this node is '{node.system_type or 'unknown'}'"),
+            })
+
+        host = node.ip or node.hostname
+        if not host:
+            response.status = 400
+            return json.dumps({"error": "no_host",
+                                "message": f"No IP/hostname on {sid}"})
+
+        # Dispatcher-port lookup — reuse the pwspray/default_creds
+        # convention of 'svc == dispatcher OR 3200 <= port <= 3299'.
+        # Do NOT blind-guess 3200+instance_nr: the port must have
+        # been labelled by an earlier scan.
+        disp_port = 0
+        instance_nr = ""
+        for inst in node.instances:
+            for port, svc in (inst.ports or {}).items():
+                if not isinstance(port, int):
+                    continue
+                if svc == "dispatcher" or (3200 <= port <= 3299):
+                    disp_port = port
+                    instance_nr = inst.instance_nr or ""
+                    break
+            if disp_port:
+                break
+        if not disp_port:
+            response.status = 400
+            return json.dumps({
+                "error": "no_dispatcher",
+                "message": (
+                    f"{sid}: no 32XX dispatcher port on any instance; "
+                    f"run a Standard Scan first"),
+            })
+
+        # Defensive body shape: Bottle hands us whatever JSON parsed
+        # to (dict / list / scalar).  Treat anything that isn't a
+        # dict as "no body" so a hand-crafted POST of `[1,2]` or `42`
+        # returns a clean 400 later rather than crashing in `.get`.
+        _raw_body = request.json
+        if not isinstance(_raw_body, dict):
+            if _raw_body is not None:
+                response.status = 400
+                return json.dumps({
+                    "error": "bad_body",
+                    "message": "body must be a JSON object",
+                })
+            _raw_body = {}
+        raw_patterns = _raw_body.get("custom_patterns")
+        # Accept either a list of pattern strings or a single textarea
+        # blob (one pattern per line).  Anything else → 400 with a
+        # clear code (int / bool / dict etc. are not valid shapes;
+        # scan_text wants a list of str).
+        if raw_patterns is None or raw_patterns == "":
+            custom_patterns = []
+        elif isinstance(raw_patterns, str):
+            custom_patterns = [ln for ln in raw_patterns.splitlines()
+                               if ln.strip()]
+        elif isinstance(raw_patterns, (list, tuple)):
+            custom_patterns = [
+                str(p) for p in raw_patterns
+                if isinstance(p, (str, bytes)) and str(p).strip()]
+        else:
+            response.status = 400
+            return json.dumps({
+                "error": "bad_custom_patterns",
+                "message": (
+                    "custom_patterns must be a string (textarea blob) "
+                    "or a list of strings"),
+            })
+
+        def _run():
+            try:
+                from sap_logon_banner_scan import scan_node, make_run_id
+            except ImportError as exc:
+                print(f"[-] {sid}: sap_logon_banner_scan not available: {exc}")
+                return
+            try:
+                from sapmap_state import ensure_loot_dir
+            except ImportError:
+                ensure_loot_dir = None  # fallback — scan still runs, no loot
+            try:
+                import sapmap_stop
+            except ImportError:
+                sapmap_stop = None
+
+            # DIAG terminal-name spoof when Tier-1 detected rsau/ip_only=0.
+            # Same pattern as node_check_default_creds + node_password_spray.
+            try:
+                from sapmap_evasion import (effective_diag_terminal,
+                                             EvasionConfig)
+                evasion = EvasionConfig.from_dict(api.state.evasion or {})
+                term, spoofed = effective_diag_terminal(node, evasion)
+            except Exception:
+                term, spoofed = "", False
+            if spoofed and term:
+                print(f"[*] {sid}: DIAG terminal spoof active for "
+                      f"logon-banner scan — '{term}'")
+
+            run_id = make_run_id()
+            loot_dir = ""
+            if ensure_loot_dir is not None:
+                # SID path safety: SAP SIDs are uppercase alnum (3-8
+                # chars), but SAPMAP also mints placeholder SIDs for
+                # SAProuter targets, BTPDISC_*, TMS edges, etc.  A
+                # scanner-derived SID with slashes or dots would let
+                # ensure_loot_dir escape loot/ because the helper does
+                # a bare os.path.join (no sanitation).  Reject anything
+                # that isn't [A-Za-z0-9_-] before splicing.
+                import re as _re
+                safe_sid = _re.sub(r"[^A-Za-z0-9_-]", "_", sid or "")[:64]
+                try:
+                    loot_dir = ensure_loot_dir(
+                        f"logon_banners/{safe_sid or 'UNKNOWN'}")
+                except Exception as exc:  # pragma: no cover
+                    print(f"[-] {sid}: loot dir unavailable: {exc}")
+                    loot_dir = ""
+
+            try:
+                result = scan_node(
+                    host, disp_port,
+                    sid=sid, instance_nr=instance_nr,
+                    saprouter=node.saprouter or "",
+                    terminal=term or "",
+                    custom_patterns=custom_patterns or None,
+                    run_id=run_id,
+                    loot_dir=loot_dir or None,
+                    cancel_check=(sapmap_stop.is_stop_requested
+                                  if sapmap_stop is not None else None),
+                )
+            except Exception as exc:
+                # Clean up the per-SID loot dir if the scan crashed
+                # before writing anything, so operators don't see empty
+                # husks accumulating under loot/logon_banners/<SID>/
+                # after a run of failed scans.
+                try:
+                    from sapmap_logon_sweep import rmdir_if_empty as _rie
+                    _rie(loot_dir)
+                except Exception:
+                    pass
+                print(f"[-] {sid}: logon-banner scan failed: {exc}")
+                try:
+                    emit_finding(
+                        "MEDIUM", sid,
+                        f"Logon-banner scan failed: {exc}",
+                        ref="logon_banner.exception",
+                        attack_capability="recon.logon_banner_scan")
+                except Exception:
+                    pass
+                return
+
+            # Persist last-run summary + redacted findings onto the
+            # node so the GUI side-panel renders it next poll.  Strip
+            # the per-finding `context` dict — the node already carries
+            # sid/host identity; no need to duplicate it per row.
+            node.logon_banner_scan = {
+                "run_id":          result.get("run_id"),
+                "ts":              result.get("ts"),
+                "instance_nr":     result.get("instance_nr"),
+                "port":            result.get("port"),
+                "elapsed_s":       result.get("elapsed_s"),
+                "pair_count":      result.get("pair_count"),
+                "raw_text_bytes":  result.get("raw_text_bytes"),
+                "hits_by_severity": result.get("hits_by_severity") or {},
+                "loot_text_path":  result.get("loot_text_path") or "",
+                "loot_json_path":  result.get("loot_json_path") or "",
+                "error_kind":      result.get("error_kind"),
+                "error":           result.get("error"),
+                "terminal_spoof":  bool(spoofed and term),
+                "custom_pattern_count": len(custom_patterns),
+            }
+            node.logon_banner_findings = [
+                {k: v for k, v in f.items() if k != "context"}
+                for f in (result.get("findings") or [])
+                if (f.get("category") or "").lower() not in ("coverage",)
+            ]
+
+            # Emit a bus finding per hit — one call per hit so each
+            # one lands with its own severity + attack_capability
+            # (so creds vs data lanes in the ATT&CK heatmap stay
+            # distinct, and CRITICAL/HIGH show up in the top banner).
+            #
+            # Cleartext hygiene: the finding BUS message cannot carry
+            # the raw match.  CRITICAL/HIGH bus events are auto-
+            # mirrored onto node.findings (persisted in .sapmap state
+            # + engagement report), and the (sev, node, msg) tuple
+            # also drives the 60s dedup window — two different leaked
+            # creds with the same severity would otherwise collapse
+            # into one finding.  So the message gets a redacted
+            # fingerprint (match-sha256 prefix + length), and the
+            # full match lives on node.logon_banner_findings for the
+            # side-panel to render, plus on the gitignored loot JSON
+            # for forensics.
+            import hashlib as _hashlib
+            emitted = 0
+            for f in result.get("findings") or []:
+                sev = (f.get("severity") or "INFO").upper()
+                cat = (f.get("category") or "").lower()
+                if cat == "coverage":
+                    continue
+                cap = f.get("attack_capability") or (
+                    "data.diag_login_screen_leak")
+                _match = f.get("match") or ""
+                _digest = _hashlib.sha256(
+                    _match.encode("utf-8", "replace")).hexdigest()[:12] \
+                    if _match else "noval"
+                _mlen = len(_match)
+                try:
+                    emit_finding(
+                        sev, sid,
+                        f"Logon-banner leak: {f.get('pattern_name')} "
+                        f"({f.get('category')}) — "
+                        f"sha256:{_digest} ({_mlen} chars); "
+                        f"see side-panel / loot/logon_banners/ for cleartext",
+                        ref=f"logon_banner.{f.get('pattern_name')}"
+                            f".{_digest}",
+                        meta={
+                            "pattern_name": f.get("pattern_name"),
+                            "category":     f.get("category"),
+                            "match_sha256_prefix": _digest,
+                            "match_length":        _mlen,
+                            "offset":              f.get("offset"),
+                            "run_id":              result.get("run_id"),
+                            "loot_text_path":
+                                result.get("loot_text_path") or "",
+                        },
+                        attack_capability=cap)
+                    emitted += 1
+                except Exception:  # pragma: no cover — don't poison the thread
+                    pass
+
+            # Scan-complete marker — one INFO (clean banner) or MEDIUM
+            # (scan errored) summary line so operators can tell
+            # 'scanned, nothing to flag' from 'never scanned'.
+            if result.get("error_kind"):
+                try:
+                    emit_finding(
+                        "MEDIUM", sid,
+                        f"Logon-banner scan: {result['error_kind']} "
+                        f"({result.get('error') or 'no detail'})",
+                        ref="logon_banner.scan_error",
+                        attack_capability="recon.logon_banner_scan")
+                except Exception:
+                    pass
+            elif emitted == 0:
+                try:
+                    emit_finding(
+                        "INFO", sid,
+                        f"Logon-banner scan complete — "
+                        f"{result.get('pair_count', 0)} field(s) "
+                        f"scraped, no secrets detected",
+                        ref="logon_banner.no_hits",
+                        attack_capability="recon.logon_banner_scan")
+                except Exception:
+                    pass
+
+            # Clean up the per-SID loot dir when the scan finished
+            # cleanly BUT scan_node skipped the loot write (its
+            # ``if raw_text or findings`` guard — happens on connect
+            # error, SNC-required reject, or any path where the DIAG
+            # round-trip returned no field text).  Keeps empty husks
+            # out of loot/logon_banners/<SID>/ across runs of failed
+            # scans.
+            if loot_dir and not (
+                    result.get("loot_text_path")
+                    or result.get("loot_json_path")):
+                try:
+                    from sapmap_logon_sweep import rmdir_if_empty as _rie
+                    _rie(loot_dir)
+                except Exception:
+                    pass
+
+        _bg(f"{sid}:scan_logon_banners",
+            f"{sid}: Scan logon banner", _run)
+        return json.dumps({
+            "status":          "started",
+            "sid":             sid,
+            "host":            host,
+            "dispatcher_port": disp_port,
+            "instance_nr":     instance_nr,
+            "custom_patterns": len(custom_patterns),
+        })
+
+    # ------------------------------------------------------------------
+    # Logon-banner LANDSCAPE SWEEP (issue #68 PR4).  Iterates every
+    # ABAP node on the map that has an observed 32XX dispatcher, runs
+    # scan_node per node, emits one bus finding per hit (same shape as
+    # the per-node route), appends a redacted run summary to
+    # state.logon_banner_runs.  Status singleton lives on the engine
+    # module (sapmap_logon_sweep._status) — AutoPwn / pwspray pattern.
+    # ------------------------------------------------------------------
+
+    @app.route("/api/actions/scan_logon_banners", method="POST")
+    def actions_scan_logon_banners():
+        response.content_type = "application/json"
+
+        # Defensive body shape — same contract as the per-node route.
+        _raw_body = request.json
+        if not isinstance(_raw_body, dict):
+            if _raw_body is not None:
+                response.status = 400
+                return json.dumps({
+                    "error": "bad_body",
+                    "message": "body must be a JSON object",
+                })
+            _raw_body = {}
+
+        raw_patterns = _raw_body.get("custom_patterns")
+        if raw_patterns is None or raw_patterns == "":
+            custom_patterns = []
+        elif isinstance(raw_patterns, str):
+            custom_patterns = [ln for ln in raw_patterns.splitlines()
+                               if ln.strip()]
+        elif isinstance(raw_patterns, (list, tuple)):
+            custom_patterns = [
+                str(p) for p in raw_patterns
+                if isinstance(p, (str, bytes)) and str(p).strip()]
+        else:
+            response.status = 400
+            return json.dumps({
+                "error": "bad_custom_patterns",
+                "message": (
+                    "custom_patterns must be a string (textarea blob) "
+                    "or a list of strings"),
+            })
+
+        raw_single_sid = _raw_body.get("single_sid")
+        if raw_single_sid is None:
+            single_sid = None
+        elif isinstance(raw_single_sid, str):
+            single_sid = raw_single_sid.strip() or None
+        else:
+            response.status = 400
+            return json.dumps({
+                "error": "bad_single_sid",
+                "message": "single_sid must be a string",
+            })
+        raw_sids = _raw_body.get("sids") or []
+        if raw_sids and not isinstance(raw_sids, (list, tuple)):
+            response.status = 400
+            return json.dumps({
+                "error": "bad_sids",
+                "message": "sids must be a list of SID strings",
+            })
+        sids_list = [
+            str(s).strip() for s in raw_sids
+            if isinstance(s, (str, bytes)) and str(s).strip()]
+
+        # Atomic refuse-concurrent + seed-status.  The engine's
+        # acquire_launch_slot wraps the (check running, mark
+        # running=True) transition in a lock so two near-simultaneous
+        # POSTs can't both pass the 409 guard and both spawn _bg
+        # threads — which would clobber the single-writer invariant
+        # AND reset the global STOP flag mid-sweep via _bg's
+        # unconditional sapmap_stop.reset_stop().
+        try:
+            import sapmap_logon_sweep as _sw
+            scope_label = (
+                ("sids:%d" % len(sids_list)) if sids_list
+                else (("single:" + single_sid) if single_sid
+                      else "landscape"))
+            if not _sw.acquire_launch_slot(scope=scope_label):
+                response.status = 409
+                return json.dumps({
+                    "error": "scan_logon_banners_already_running",
+                    "message": (
+                        "A logon-banner sweep is already in progress.  "
+                        "Press STOP in the progress panel (or POST "
+                        "/api/scan/stop) and wait for it to finish, "
+                        "then launch again."),
+                })
+        except ImportError as exc:
+            response.status = 500
+            return json.dumps({
+                "error":   "scan_logon_banners_engine_unavailable",
+                "message": str(exc),
+            })
+
+        def _run():
+            try:
+                from sap_logon_banner_scan import make_run_id as _mkid
+                from sapmap_logon_sweep import (
+                    sweep_landscape as _sweep,
+                    LogonSweepConfig as _Cfg,
+                    _finalise_status as _finalise)
+            except ImportError as exc:
+                print(f"[-] scan_logon_banners sweep "
+                       f"not available: {exc}")
+                try:
+                    _finalise(aborted=f"import_error: {exc}")
+                except Exception:
+                    pass
+                return
+            try:
+                import sapmap_stop
+            except ImportError:
+                sapmap_stop = None
+
+            cfg = _Cfg(
+                single_sid=(single_sid or ""),
+                sids=list(sids_list),
+                custom_patterns=list(custom_patterns),
+            )
+
+            # Per-node emit-and-persist callback: mirrors the per-node
+            # PR3 route's _run block so a swept node ends up with the
+            # same node.logon_banner_scan / logon_banner_findings and
+            # the same findings-bus events.
+            import hashlib as _hashlib
+
+            def _on_node_finding(sid, result, node):
+                # Mirror PR3's redacted bus-finding emit per hit.
+                for f in (result.get("findings") or []):
+                    sev = (f.get("severity") or "INFO").upper()
+                    cat = (f.get("category") or "").lower()
+                    if cat == "coverage":
+                        continue
+                    cap = f.get("attack_capability") or (
+                        "data.diag_login_screen_leak")
+                    _match = f.get("match") or ""
+                    _digest = (_hashlib.sha256(
+                        _match.encode("utf-8", "replace")
+                    ).hexdigest()[:12] if _match else "noval")
+                    _mlen = len(_match)
+                    try:
+                        emit_finding(
+                            sev, sid,
+                            f"Logon-banner leak: {f.get('pattern_name')} "
+                            f"({f.get('category')}) — "
+                            f"sha256:{_digest} ({_mlen} chars); "
+                            f"see side-panel / loot/logon_banners/ "
+                            f"for cleartext",
+                            ref=f"logon_banner.{f.get('pattern_name')}"
+                                f".{_digest}",
+                            meta={
+                                "pattern_name": f.get("pattern_name"),
+                                "category":     f.get("category"),
+                                "match_sha256_prefix": _digest,
+                                "match_length":        _mlen,
+                                "offset":              f.get("offset"),
+                                "run_id":              result.get("run_id"),
+                                "loot_text_path":
+                                    result.get("loot_text_path") or "",
+                                "sweep_scope":         True,
+                            },
+                            attack_capability=cap)
+                    except Exception:  # pragma: no cover
+                        pass
+
+                # Mutate node.logon_banner_scan / _findings so the
+                # per-node side-panel immediately shows the swept
+                # result — same subset the per-node route builds.
+                node.logon_banner_scan = {
+                    "run_id":          result.get("run_id"),
+                    "ts":              result.get("ts"),
+                    "instance_nr":     result.get("instance_nr"),
+                    "port":            result.get("port"),
+                    "elapsed_s":       result.get("elapsed_s"),
+                    "pair_count":      result.get("pair_count"),
+                    "raw_text_bytes":  result.get("raw_text_bytes"),
+                    "hits_by_severity":
+                        result.get("hits_by_severity") or {},
+                    "loot_text_path":  result.get("loot_text_path") or "",
+                    "loot_json_path":  result.get("loot_json_path") or "",
+                    "error_kind":      result.get("error_kind"),
+                    "error":           result.get("error"),
+                    "terminal_spoof":  False,
+                    "custom_pattern_count": len(custom_patterns),
+                    "sweep_scope":     True,
+                }
+                node.logon_banner_findings = [
+                    {k: v for k, v in f.items() if k != "context"}
+                    for f in (result.get("findings") or [])
+                    if (f.get("category") or "").lower() != "coverage"
+                ]
+
+            try:
+                _sweep(
+                    api.state, cfg,
+                    cancel_check=(sapmap_stop.is_stop_requested
+                                   if sapmap_stop is not None else None),
+                    on_node_finding=_on_node_finding,
+                )
+            except Exception as exc:
+                print(f"[-] scan_logon_banners sweep failed: {exc}")
+                try:
+                    _finalise(aborted=f"exception: {exc}")
+                except Exception:
+                    pass
+
+        _bg("_scan_logon_banners_sweep",
+            "Scan Logon Banners (landscape sweep)", _run)
+
+        try:
+            final_scope = ("sids:%d" % len(sids_list)) if sids_list \
+                          else (("single:" + single_sid) if single_sid
+                                else "landscape")
+        except Exception:
+            final_scope = "landscape"
+        return json.dumps({
+            "status":          "started",
+            "scope":           final_scope,
+            "sids_count":      len(sids_list),
+            "single_sid":      single_sid or "",
+            "custom_patterns": len(custom_patterns),
+        })
+
+    @app.route("/api/actions/scan_logon_banners/status")
+    def actions_scan_logon_banners_status():
+        """Thin delegate — returns the engine's module-global
+        LogonSweepStatus singleton serialised as JSON.  Single-writer
+        invariant: only the one _bg thread spawned by the launch
+        route mutates it.
+        """
+        response.content_type = "application/json"
+        try:
+            from sapmap_logon_sweep import get_status
+            return json.dumps(get_status())
+        except Exception as e:
+            response.status = 500
+            return json.dumps({
+                "error":   "scan_logon_banners_status_unavailable",
+                "message": str(e),
+            })
+
+    @app.route("/api/actions/scan_logon_banners/runs")
+    def actions_scan_logon_banners_runs():
+        """Per-run history — ``state.logon_banner_runs`` sorted
+        newest-first.  Each entry is the ``_build_summary`` dict shape:
+        no cleartext matches, only severity counts + loot paths +
+        per-node OK/error status."""
+        response.content_type = "application/json"
+        runs = list(getattr(api.state, "logon_banner_runs", []) or [])
+        runs_sorted = sorted(
+            runs, key=lambda r: r.get("started_at", ""), reverse=True)
+        return json.dumps({"ok": True, "runs": runs_sorted})
+
+    @app.route(
+        "/api/actions/scan_logon_banners/reset_history", method="POST")
+    def actions_scan_logon_banners_reset_history():
+        """Wipe ``state.logon_banner_runs`` and reset the status
+        singleton.  Two-step confirm (operator must send
+        ``{"confirm": true, "i_accept": true}``) to force reading
+        the warning in the modal."""
+        response.content_type = "application/json"
+        _body = request.json
+        if not isinstance(_body, dict):
+            response.status = 400
+            return json.dumps({
+                "error": "bad_body",
+                "message": "body must be a JSON object",
+            })
+        if not (_body.get("confirm") is True
+                and _body.get("i_accept") is True):
+            response.status = 400
+            return json.dumps({
+                "error": "double_confirm_required",
+                "message": (
+                    "pass {\"confirm\": true, \"i_accept\": true} to "
+                    "clear the logon-banner sweep history"),
+            })
+        # Refuse while a sweep is in flight.  Resetting _status mid-
+        # sweep would clobber the engine's single-writer target_done
+        # bookkeeping + leave orphan loot without a history entry.
+        try:
+            from sapmap_logon_sweep import get_status as _sweep_status
+            if _sweep_status().get("running"):
+                response.status = 409
+                return json.dumps({
+                    "error": "scan_logon_banners_running",
+                    "message": (
+                        "A sweep is in progress — press STOP in the "
+                        "progress panel and let it finish before "
+                        "wiping the history."),
+                })
+        except Exception:
+            pass
+        api.state.logon_banner_runs = []
+        try:
+            import sapmap_logon_sweep as _sw
+            _sw._status = _sw.LogonSweepStatus()
+        except Exception:
+            pass
+        try:
+            emit_finding(
+                "HIGH", "LANDSCAPE",
+                "Logon-banner sweep history wiped by operator",
+                ref="logon_banner.history_wipe",
+                attack_capability="recon.logon_banner_scan")
+        except Exception:
+            pass
+        return json.dumps({"ok": True, "runs_remaining": 0})
 
     # ------------------------------------------------------------------
     # Password spraying (issue #69) — per-node + landscape pool routes.
