@@ -1236,7 +1236,7 @@ body {
       <div class="ctx-item write-op" data-action="analyse_capabilities">&#128201; Analyse User Capabilities</div>
       <div class="ctx-item" data-action="rfc_system_info">&#128225; RFC System Info</div>
       <div class="ctx-item" data-action="check_gw">&#128270; Check GW Vulnerability</div>
-      <div class="ctx-item" data-action="check_ms">&#128270; Check MS Betrusted (CVE-2020-6207)</div>
+      <div class="ctx-item" data-action="check_ms">&#128270; Check MS Betrusted &mdash; 10KBlaze (CVE-2020-6207)</div>
       <div class="ctx-item" data-action="check_cve_58240">&#128270; Check CVE-2026-58240 (MS ASCS_GW rogue reg.)</div>
       <div class="ctx-item" data-action="check_cve_31324">&#128270; Check CVE-2025-31324 (Java VisualComposer)</div>
       <div class="ctx-item" data-action="check_cve_6287">&#128270; Check CVE-2020-6287 (RECON)</div>
