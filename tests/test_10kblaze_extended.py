@@ -24,10 +24,12 @@ from sap_ms_betrusted import (
     _HEADER_LEN, _ADM_EYE, _ADM_HDR_LEN, _ADM_REC_SIZE,
     FLAG_REQUEST, FLAG_REPLY, FLAG_ONE_WAY, FLAG_ADMIN,
     IFLAG_SEND_NAME,
-    MSG_DIA,
-    MS_OPCODE_CHANGE_IP, MS_OPCODE_SET_LOGON,
+    MSG_DIA, MSG_ALL,
+    MS_OPCODE_CHANGE_IP, MS_OPCODE_SET_LOGON, MS_OPCODE_SET_PROPERTY,
+    MS_LOGON_DIAG, MS_LOGON_RFC, MS_LOGON_HTTP,
+    MS_PROPERTY_RELEASE_INFO,
     ADM_SELFIDENT, ADM_NILIST, ADM_GET_NILIST_PORT,
-    pkt_change_ip, pkt_set_logon,
+    pkt_change_ip, pkt_set_logon, pkt_set_property_release, pkt_login_2,
     build_nilist_port_reply, build_gwmon_nilist_reply,
     _old_nilist_body, _nilist_ip_body,
     ms_build_header, ms_parse_header,
@@ -53,13 +55,32 @@ class TestPktChangeIp:
         pkt = pkt_change_ip("server", b"\x00" * 8, "10.0.0.1")
         assert pkt[66] == FLAG_REQUEST
 
-    def test_opcode_is_change_ip(self):
+    def test_opcode_is_change_ip_pysap_canon(self):
+        """pysap SAPMS.py:243 — MS_CHANGE_IP = 0x06.  SAPMAP earlier used 0x0E
+        which pysap maps to MS_ACT_STATISTIC; the fix swaps CHANGE_IP ↔
+        SET_LOGON so the kernel actually dispatches to the CHANGE_IP handler."""
         pkt = pkt_change_ip("server", b"\x00" * 8, "10.0.0.1")
-        assert pkt[_HEADER_LEN] == MS_OPCODE_CHANGE_IP
+        assert MS_OPCODE_CHANGE_IP == 0x06
+        assert pkt[_HEADER_LEN] == 0x06
 
-    def test_opcode_version_is_2(self):
+    def test_opcode_section_byte_order_pysap_canon(self):
+        """pysap wire order (/pysap/SAPMS.py:1096-1099) is:
+        opcode | opcode_error | opcode_version | opcode_charset.
+        Earlier SAPMAP used `(opcode, 2, 0, 0)` with a wrong inline comment
+        and put the `2` in opcode_error — opcode_version became 0 and
+        pysap's change_ip_addressv6 branch (gated on version==2) never fired."""
         pkt = pkt_change_ip("server", b"\x00" * 8, "10.0.0.1")
-        assert pkt[_HEADER_LEN + 1] == 2
+        assert pkt[_HEADER_LEN + 0] == MS_OPCODE_CHANGE_IP  # opcode
+        assert pkt[_HEADER_LEN + 1] == 0                     # opcode_error
+        assert pkt[_HEADER_LEN + 2] == 2                     # opcode_version
+        assert pkt[_HEADER_LEN + 3] == 0                     # opcode_charset
+
+    def test_msgtype_is_all_handlers(self):
+        """MSG_ALL (DIA|UPD|BTC|SPO|UP2|ICM, 0xBB) so the registered server
+        reports a full dispatcher's handler set in SMMS's msgtypes column
+        rather than DIA-only."""
+        pkt = pkt_change_ip("server", b"\x00" * 8, "10.0.0.1")
+        assert pkt[54] == MSG_ALL == 0xBB
 
     def test_ipv4_embedded(self):
         ip = "192.168.2.210"
@@ -93,49 +114,237 @@ class TestPktChangeIp:
 # ---------------------------------------------------------------------------
 
 class TestPktSetLogon:
+    """Pins the pysap SAPMSLogon canonical wire layout
+    (/pysap/SAPMS.py:727-748) for opcode 0x2B (MS_SET_LOGON).
+
+    Body layout (offsets relative to _HEADER_LEN + 4-byte opcode section):
+      [0:2]   type (!H, pysap ms_logon_type_values: 2=DIAG, 4=RFC, 6=HTTP)
+      [2:4]   port (!H)
+      [4:8]   address (IPv4, 4B)
+      [8:10]  logonname_length (!H)
+      [...]   logonname (variable)
+      [...]   prot_length (!H), prot
+      [...]   host_length (!H), host
+      [...]   misc_length (!H), misc
+      [...]   address6_length (!H = 16)
+      [...]   address6 (IPv6 16B)
+      [...]   end (!H = 0xFFFF)
+    """
 
     def test_starts_with_ms_header(self):
         pkt = pkt_set_logon("server", b"\x00" * 8, "10.0.0.1", 3200)
         assert pkt[:12] == b"**MESSAGE**\x00"
 
-    def test_opcode_is_set_logon(self):
+    def test_opcode_is_set_logon_pysap_canon(self):
+        """pysap SAPMS.py:280 — MS_SET_LOGON = 0x2B.  SAPMAP earlier used
+        0x06 (which pysap maps to MS_CHANGE_IP) and so the kernel never
+        dispatched the packet to its SET_LOGON handler — no DIAG/RFC
+        listener got registered."""
         pkt = pkt_set_logon("server", b"\x00" * 8, "10.0.0.1", 3200)
-        assert pkt[_HEADER_LEN] == MS_OPCODE_SET_LOGON
+        assert MS_OPCODE_SET_LOGON == 0x2B
+        assert pkt[_HEADER_LEN] == 0x2B
+
+    def test_opcode_section_byte_order_pysap_canon(self):
+        """Opcode section is `opcode | opcode_error | opcode_version |
+        opcode_charset` (/pysap/SAPMS.py:1096-1099); SET_LOGON uses
+        opcode_version=1."""
+        pkt = pkt_set_logon("server", b"\x00" * 8, "10.0.0.1", 3200)
+        assert pkt[_HEADER_LEN + 0] == MS_OPCODE_SET_LOGON  # opcode
+        assert pkt[_HEADER_LEN + 1] == 0                     # opcode_error
+        assert pkt[_HEADER_LEN + 2] == 1                     # opcode_version
+        assert pkt[_HEADER_LEN + 3] == 0                     # opcode_charset
+
+    def test_default_logon_type_is_diag(self):
+        pkt = pkt_set_logon("server", b"\x00" * 8, "10.0.0.1", 3200)
+        logon_type = struct.unpack("!H", pkt[_HEADER_LEN + 4: _HEADER_LEN + 6])[0]
+        assert logon_type == MS_LOGON_DIAG == 2
 
     def test_diag_logon_type(self):
-        pkt = pkt_set_logon("server", b"\x00" * 8, "10.0.0.1", 3200, logon_type=2)
+        pkt = pkt_set_logon("server", b"\x00" * 8, "10.0.0.1", 3200,
+                             logon_type=MS_LOGON_DIAG)
         logon_type = struct.unpack("!H", pkt[_HEADER_LEN + 4: _HEADER_LEN + 6])[0]
         assert logon_type == 2
 
-    def test_rfc_logon_type(self):
-        pkt = pkt_set_logon("server", b"\x00" * 8, "10.0.0.1", 3300, logon_type=6)
+    def test_rfc_logon_type_is_four_not_six(self):
+        """pysap /pysap/SAPMS.py:427 — MS_LOGON_RFC = 4.  SAPMAP previously
+        passed 6 for RFC, which pysap maps to MS_LOGON_HTTP; the kernel then
+        registered the port as an HTTP listener and the Gateway's RFC trust
+        lookup found nothing."""
+        pkt = pkt_set_logon("server", b"\x00" * 8, "10.0.0.1", 3300,
+                             logon_type=MS_LOGON_RFC)
         logon_type = struct.unpack("!H", pkt[_HEADER_LEN + 4: _HEADER_LEN + 6])[0]
-        assert logon_type == 6
+        assert MS_LOGON_RFC == 4
+        assert logon_type == 4
 
     def test_port_encoded(self):
         pkt = pkt_set_logon("server", b"\x00" * 8, "10.0.0.1", 3200)
         port = struct.unpack("!H", pkt[_HEADER_LEN + 6: _HEADER_LEN + 8])[0]
         assert port == 3200
 
-    def test_ip_embedded(self):
+    def test_ip_at_body_start(self):
+        """IPv4 field is at body[4:8] (after type:2 and port:2) per pysap
+        SAPMSLogon layout."""
         ip = "192.168.2.210"
         pkt = pkt_set_logon("server", b"\x00" * 8, ip, 3200)
-        assert socket.inet_aton(ip) in pkt
+        assert pkt[_HEADER_LEN + 8: _HEADER_LEN + 12] == socket.inet_aton(ip)
 
     def test_host_included_when_provided(self):
-        pkt = pkt_set_logon("server", b"\x00" * 8, "10.0.0.1", 3200, host="myhost.tld")
+        pkt = pkt_set_logon("server", b"\x00" * 8, "10.0.0.1", 3200,
+                             host="myhost.tld")
         assert b"myhost.tld" in pkt
 
     def test_no_host_when_empty(self):
         pkt = pkt_set_logon("server", b"\x00" * 8, "10.0.0.1", 3200, host="")
-        # host_length should be 0
-        host_len_offset = _HEADER_LEN + 4 + 2 + 2 + 4 + 2 + 2  # opcode + type + port + ip + logonname + prot
+        # Layout: hdr(110) + opcode-section(4) + type(2) + port(2) + ipv4(4)
+        #       + logonname_length(2) + prot_length(2) + host_length(2)
+        host_len_offset = _HEADER_LEN + 4 + 2 + 2 + 4 + 2 + 2
         host_len = struct.unpack("!H", pkt[host_len_offset:host_len_offset + 2])[0]
         assert host_len == 0
 
-    def test_address6_sentinel(self):
+    def test_address6_length_is_sixteen_not_sentinel(self):
+        """pysap /pysap/SAPMS.py:745-747 — address6_length=16 includes the
+        IPv6 tail; 0xFFFF OMITS it and is reserved for MS_DEL_LOGON.
+        Earlier SAPMAP wrote 0xFFFF here, so the kernel saw a truncated
+        packet and the registered server never had its v6 listener set."""
+        pkt = pkt_set_logon("server", b"\x00" * 8, "10.0.0.1", 3200, host="")
+        # address6_length is at the end of the fixed prefix + variable fields;
+        # with empty logonname/prot/host/misc it's at offset 4 (type+port) +
+        # 4 (ipv4) + 4*2 (four length fields each 2B, incl host at 0) = 16
+        # from the body start.
+        addr6_len_off = _HEADER_LEN + 4 + 2 + 2 + 4 + 2 + 2 + 2 + 2
+        addr6_len = struct.unpack("!H", pkt[addr6_len_off:addr6_len_off + 2])[0]
+        assert addr6_len == 16, (
+            f"address6_length must be 16 (full packet), got {addr6_len:#06x} — "
+            "0xFFFF is the DEL_LOGON sentinel and would truncate IPv6")
+
+    def test_ends_with_full_v6_tail_and_end_sentinel(self):
+        """Tail layout: ipv6(16B) + end(0xFFFF) — total 18B after the
+        address6_length word."""
+        ip = "10.11.12.13"
+        pkt = pkt_set_logon("server", b"\x00" * 8, ip, 3200, host="")
+        expected_v6 = b"\x00" * 10 + b"\xff\xff" + socket.inet_aton(ip)
+        assert pkt[-18:-2] == expected_v6
+        assert pkt[-2:] == b"\xff\xff"  # end sentinel
+
+    def test_msgtype_is_all_handlers(self):
         pkt = pkt_set_logon("server", b"\x00" * 8, "10.0.0.1", 3200)
-        assert pkt[-2:] == b"\xff\xff"
+        assert pkt[54] == MSG_ALL == 0xBB
+
+    def test_opcode_constants_not_colliding(self):
+        """Regression pin — the pre-fix bug was MS_OPCODE_SET_LOGON=0x06
+        which collides with pysap's MS_CHANGE_IP=0x06.  Must stay distinct
+        and canonical."""
+        assert MS_OPCODE_CHANGE_IP == 0x06
+        assert MS_OPCODE_SET_LOGON == 0x2B
+        assert MS_OPCODE_CHANGE_IP != MS_OPCODE_SET_LOGON
+
+    def test_ipv4_field_not_type_port_regression(self):
+        """2026-10-06 forensic: SMMS showed hostadr(IPv4)=0.6.12.228 for a
+        rogue AS instance registered via SAPMAP's RFC SET_LOGON (port 3300,
+        logon_type was 6).  Those bytes = struct.pack('!H', 6) +
+        struct.pack('!H', 3300) = b'\\x00\\x06\\x0C\\xE4', revealing the
+        opcode collision (0x06 was dispatched as MS_CHANGE_IP whose body
+        starts with IPv4).  Post-fix: opcode 0x2B goes to SET_LOGON whose
+        body starts with type/port — IPv4 is at offset 4, and the type
+        value is now 4 (MS_LOGON_RFC), not 6 (MS_LOGON_HTTP)."""
+        pkt = pkt_set_logon("server", b"\x00" * 8, "192.168.2.196", 3300,
+                             logon_type=MS_LOGON_RFC)
+        # body[0:4] is now type(2)+port(2), not an IPv4 slot
+        type_port_bytes = pkt[_HEADER_LEN + 4: _HEADER_LEN + 8]
+        assert type_port_bytes == struct.pack("!HH", 4, 3300)
+        # IPv4 at body[4:8]
+        assert pkt[_HEADER_LEN + 8: _HEADER_LEN + 12] == socket.inet_aton("192.168.2.196")
+
+
+# ---------------------------------------------------------------------------
+# pkt_set_property_release
+# ---------------------------------------------------------------------------
+
+class TestPktSetPropertyRelease:
+    """Pins MS_SET_PROPERTY (opcode 0x43) with the 'Release information'
+    property (id=0x07).  Without this packet SMMS leaves the registered
+    server's release/patchno/support-level/info columns empty — a dead
+    giveaway that the server never completed real registration."""
+
+    def test_starts_with_ms_header(self):
+        pkt = pkt_set_property_release("server", b"\x00" * 8)
+        assert pkt[:12] == b"**MESSAGE**\x00"
+
+    def test_opcode_is_set_property(self):
+        pkt = pkt_set_property_release("server", b"\x00" * 8)
+        assert MS_OPCODE_SET_PROPERTY == 0x43
+        assert pkt[_HEADER_LEN] == 0x43
+
+    def test_opcode_section_byte_order_pysap_canon(self):
+        pkt = pkt_set_property_release("server", b"\x00" * 8)
+        assert pkt[_HEADER_LEN + 0] == MS_OPCODE_SET_PROPERTY
+        assert pkt[_HEADER_LEN + 1] == 0  # opcode_error
+        assert pkt[_HEADER_LEN + 2] == 2  # opcode_version
+        assert pkt[_HEADER_LEN + 3] == 0  # opcode_charset
+
+    def test_property_id_is_release_info(self):
+        """Property body: client(40B null-pad) + id(!I=7) + release(10B) +
+        patchno(!I) + supplvl(!I) + platform(!I)."""
+        pkt = pkt_set_property_release("server", b"\x00" * 8)
+        # Property body starts at _HEADER_LEN + 4 (opcode section)
+        body_off = _HEADER_LEN + 4
+        # client is 40B, then id at offset 40
+        prop_id = struct.unpack("!I", pkt[body_off + 40:body_off + 44])[0]
+        assert prop_id == MS_PROPERTY_RELEASE_INFO == 0x07
+
+    def test_release_string_encoded(self):
+        pkt = pkt_set_property_release("server", b"\x00" * 8,
+                                        release="793", patchno=300,
+                                        platform=390)
+        body_off = _HEADER_LEN + 4
+        # Release is 10B null-padded, starts at body_off + 40 + 4
+        rel_bytes = pkt[body_off + 44:body_off + 54].rstrip(b"\x00")
+        assert rel_bytes == b"793"
+
+    def test_patchno_and_platform_encoded(self):
+        pkt = pkt_set_property_release("server", b"\x00" * 8,
+                                        release="793", patchno=300,
+                                        supplvl=5, platform=390)
+        body_off = _HEADER_LEN + 4
+        # patchno at body_off + 40 + 4 + 10 = 54
+        patchno = struct.unpack("!I", pkt[body_off + 54:body_off + 58])[0]
+        supplvl = struct.unpack("!I", pkt[body_off + 58:body_off + 62])[0]
+        platform = struct.unpack("!I", pkt[body_off + 62:body_off + 66])[0]
+        assert patchno == 300
+        assert supplvl == 5
+        assert platform == 390
+
+    def test_msgtype_is_all_handlers(self):
+        pkt = pkt_set_property_release("server", b"\x00" * 8)
+        assert pkt[54] == MSG_ALL == 0xBB
+
+    def test_total_size(self):
+        """hdr(110) + opcode(4) + client(40) + id(4) + release(10)
+        + patchno(4) + supplvl(4) + platform(4) = 180."""
+        pkt = pkt_set_property_release("server", b"\x00" * 8)
+        assert len(pkt) == _HEADER_LEN + 4 + 40 + 4 + 10 + 4 + 4 + 4
+
+
+# ---------------------------------------------------------------------------
+# pkt_login_2 msgtype default
+# ---------------------------------------------------------------------------
+
+class TestPktLogin2Msgtype:
+    """SMMS's `msgtypes` column is populated from the LOGIN_2 header's
+    msgtype byte.  Earlier SAPMAP sent MSG_DIA (0x01) — SMMS showed `DIA`
+    only on the registered rogue AS, flagging it as a stub.  Now MSG_ALL
+    (0xBB) matches a real app server's `DIA UPD BTC SPO UP2 ICM` bitmask.
+    """
+
+    def test_default_msgtype_is_all(self):
+        pkt = pkt_login_2("myhost_S4H_00")
+        assert pkt[54] == MSG_ALL == 0xBB
+
+    def test_explicit_dia_still_allowed(self):
+        """Caller sites that want anonymous probing (e.g. the pre-flight
+        LOGIN_2 that fetches the MS name) pass msgtype=MSG_DIA explicitly."""
+        pkt = pkt_login_2("sapmap_probe", msgtype=MSG_DIA)
+        assert pkt[54] == MSG_DIA == 0x01
 
 
 # ---------------------------------------------------------------------------
