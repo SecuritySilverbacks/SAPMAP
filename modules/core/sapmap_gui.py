@@ -6513,6 +6513,52 @@ def create_app(api: SAPMAPApi) -> Bottle:
             print(f"[*] OS type for {sid} set to: {new_os}")
         return json.dumps({"status": "ok"})
 
+    @app.route("/api/node/<sid>/set_clients", method="POST")
+    def node_set_clients(sid):
+        """Replace a node's enumerated client list.
+
+        The operator edits the list in the Edit Clients modal (add /
+        delete) and POSTs the full working copy here.  Each entry is a
+        {"nr": "100", "category": "P"} dict mirroring T000 CCCATEGORY.
+        A client flagged production ('P') keeps node.is_production in
+        sync so the map's PRD indicator and severity logic stay honest.
+        """
+        response.content_type = "application/json"
+        data = request.json or {}
+        node = api.state.get_node(sid)
+        if not node:
+            return json.dumps({"error": f"Node {sid} not found"})
+        raw = data.get("clients", [])
+        if not isinstance(raw, list):
+            return json.dumps({"error": "clients must be a list"})
+        clean = []
+        seen = set()
+        for entry in raw:
+            if isinstance(entry, dict):
+                nr = str(entry.get("nr", "")).strip()
+                category = str(entry.get("category", "")).strip()
+            else:
+                nr, category = str(entry).strip(), ""
+            if not nr.isdigit():
+                continue
+            nr = nr.zfill(3)
+            if nr in seen:
+                continue
+            seen.add(nr)
+            clean.append({"nr": nr, "category": category})
+        node.clients = clean
+        # Keep the production flag in sync: any 'P' client makes this a
+        # productive system.  Only clear it if the operator removed all
+        # production clients (don't stomp a flag set by other evidence
+        # when categories are simply unknown).
+        if any(c["category"].upper() == "P" for c in clean):
+            node.is_production = True
+        elif clean and all(c["category"] for c in clean):
+            node.is_production = False
+        print(f"[*] Clients for {sid} set to: "
+              + (", ".join(c["nr"] for c in clean) or "(none)"))
+        return json.dumps({"status": "ok"})
+
     @app.route("/api/node/<sid>/set_sid", method="POST")
     def node_set_sid(sid):
         """Rename a node's SID and rewire every referring field.
