@@ -907,6 +907,7 @@ body {
       <div class="dd-item" onclick="exportJSON()">&#128196; Export JSON</div>
       <div class="dd-item" onclick="exportReport()">&#128221; Export Engagement Report (HTML + Markdown)</div>
       <div class="dd-item" onclick="openDiffModal()">&#128202; Diff Two Runs (compare snapshots)</div>
+      <div class="dd-item" onclick="loadLandscapeXML()">&#128196; Import Landscape XML...</div>
       <!-- Browse Loot: hidden by default; unhidden by initMode() only when
            the server was started with --enable-loot-browser AND handed
            the frontend a per-run token via /api/mode. -->
@@ -2125,6 +2126,29 @@ body {
     <div class="form-actions">
       <button class="btn btn-primary" onclick="saveSapologyPath()">Save</button>
       <button class="btn" onclick="closeModal('sapology-path-modal')">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<!-- Import Landscape XML Modal -->
+<div class="modal-overlay" id="landscape-xml-modal">
+  <div class="modal" style="max-width:560px">
+    <h3>&#128196; Import Landscape XML</h3>
+    <div style="font-size:12px;color:#8b949e;margin-bottom:12px;line-height:1.5">
+      Import Message Servers and Application Servers from a SAP UI
+      Landscape XML file.  Choose the <code>.xml</code> file below and
+      start the import.
+    </div>
+    <div class="form-row">
+      <label>Landscape XML file</label>
+      <input type="file" id="landscape-xml-file" accept=".xml">
+    </div>
+    <div style="display:flex;flex-direction:column;gap:6px;margin-bottom:14px">
+      <label class="autopwn-cb"><input type="checkbox" id="landscape-xml-no-scan"> no scan for appservers, only file import</label>
+    </div>
+    <div class="form-actions">
+      <button class="btn btn-primary" onclick="doLandscapeImport()">Import</button>
+      <button class="btn" onclick="closeModal('landscape-xml-modal')">Cancel</button>
     </div>
   </div>
 </div>
@@ -3388,6 +3412,8 @@ body {
 
 <!-- Hidden file picker for Load State -->
 <input type="file" id="file-picker" accept=".sapmap,.json" style="display:none" onchange="handleFileLoad(this)">
+<!-- Hidden file picker for Landscape XML -->
+<input type="file" id="file-picker2" accept=".xml" style="display:none" onchange="handleLandscapeImport(this)">
 
 <script>
 /* =========================================================================
@@ -15778,7 +15804,7 @@ async function addSystem() {
   startPolling();
 }
 
-function showTcpipModal(sid) {
+function showTcpipModal(sid) {524
   document.getElementById('tcpip-source-info').textContent = `Source: ${sid}`;
   const sel = document.getElementById('tcpip-target');
   sel.innerHTML = '';
@@ -19405,6 +19431,69 @@ async function exportReport() {
     console.error('[exportReport]', e);
   }
 }
+
+// Import Landscape XML — open the modal dialog (file picker + options)
+// instead of jumping straight into the browser file chooser.
+function loadLandscapeXML ()
+{
+  // Reset the modal's controls so a prior selection / toggle doesn't
+  // linger between opens, then reveal the dialog.
+  const fileInput = document.getElementById('landscape-xml-file');
+  if (fileInput) fileInput.value = '';
+  const noScan = document.getElementById('landscape-xml-no-scan');
+  if (noScan) noScan.checked = false;
+  document.getElementById('landscape-xml-modal').classList.add('visible');
+}
+
+// Perform the import from the modal: reads the chosen XML file together
+// with the "no scan for appservers" checkbox and hands both to the
+// backend.  (Extracted from the old handleLandscapeImport handler.)
+async function doLandscapeImport ()
+{
+  const fileInput = document.getElementById('landscape-xml-file');
+  const file = fileInput && fileInput.files[0];
+  if (!file) { alert('Please choose a Landscape XML file first.'); return; }
+  const noScan = !!(document.getElementById('landscape-xml-no-scan') || {}).checked;
+  closeModal('landscape-xml-modal');
+
+  const reader = new FileReader();
+  reader.onload = async function(e) {
+    try {
+      const xml_data = e.target.result;
+
+      const opts = { 'method': 'POST', headers: { 'Content-Type': 'application/' } };
+      opts.body = xml_data;
+      // Pass the checkbox state alongside the payload so the import is
+      // processed together with the "only file import" preference.
+      const res = await fetch('/api/import_landscape_xml?no_scan=' + (noScan ? '1' : '0'), opts);
+
+      // fetch() resolves to a Response object; the backend's {"error": ...}
+      // lives in the JSON body, so parse it before checking.
+      const data = await res.json();
+      if (data.error) { alert('Load failed: ' + data.error); return; }
+      // Reset cursors + dismissal state so the restored findings snapshot
+      // reappears in the banner/drawer/bell on the next poll.
+      findingsCursor = 0;
+      _activeFindings = [];
+      _dismissedFindingIds = new Set();
+      _bannerHiddenIds = new Set();
+      renderFindings();
+    } catch (err) {
+      alert('Invalid file: ' + err.message);
+    }
+    startPolling();
+  };
+  reader.readAsText(file);
+}
+
+// Stub — retained as the onchange target of the hidden #file-picker2
+// input.  The Landscape XML import now runs through the modal dialog
+// (loadLandscapeXML -> doLandscapeImport); this handler is intentionally
+// left empty.
+function handleLandscapeImport (input)
+{
+}
+
 
 // --- View controls ---
 function zoomIn() { viewBoxUserControlled = true; viewBox.w *= 0.8; viewBox.h *= 0.8; applyViewBox(); }
