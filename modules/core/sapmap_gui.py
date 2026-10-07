@@ -2509,6 +2509,70 @@ def _resolve_probe_target(state, conn):
     return None
 
 
+def _import_appserver_instances(node, ms_host: str, ms_port) -> int:
+    """Fan out from a Message Server to its application servers and add
+    dispatcher (32NN) + gateway (33NN) InstanceInfo pairs to ``node``.
+
+    Uses the ``servers`` list returned by ``query_app_servers``.  Only
+    application servers running a dialog work process ("DIA" in
+    ``wp_types``) are plotted; everything else is ignored.  The record's
+    short ``host`` is qualified with the Message Server's domain suffix,
+    while its ``ip`` is used verbatim.  The instance number NN is parsed
+    from the logical name (``host_SID_NN``); each matching server yields
+    a single instance carrying both the dispatcher (3200+NN) and gateway
+    (3300+NN) ports in one ports map.
+
+    Returns the number of application servers imported.
+    """
+    from sap_ms_serverlist import query_app_servers
+
+    if not ms_port:
+        return 0
+    res = query_app_servers(ms_host, port=int(ms_port))
+    if not res.get("success"):
+        print(f"[*]   app-server scan skipped ({res.get('error', 'no reply')})")
+        return 0
+
+    # Domain suffix from the MS FQDN, e.g.
+    # "vhabcsdacs.democomp.net" -> "democomp.net".
+    domain = ms_host.split(".", 1)[1] if "." in ms_host else ""
+
+    imported = 0
+    for srv in res.get("servers", []):
+        # DIA filter — wp_types is a list here, but tolerate a
+        # comma-separated string too.
+        wp = srv.get("wp_types", [])
+        if isinstance(wp, str):
+            wp = [t.strip() for t in wp.split(",")]
+        if "DIA" not in wp:
+            continue
+
+        # Instance number NN from the logical name "host_SID_NN".
+        try:
+            nn = int(srv.get("name", "").rsplit("_", 1)[-1])
+        except (ValueError, IndexError):
+            continue
+
+        # Qualify the record's short host with the MS domain suffix.
+        rec_host = srv.get("host", "")
+        fqdn_host = (f"{rec_host}.{domain}"
+                     if domain and "." not in rec_host else rec_host)
+        ip = srv.get("ip", "")
+        inst_nr = f"{nn:02d}"
+
+        # One instance per server, carrying both the dispatcher (32NN)
+        # and gateway (33NN) ports in a single ports map.
+        node.instances.append(InstanceInfo(
+            instance_nr=inst_nr, ip=ip,
+            ports={3200 + nn: "dispatcher", 3300 + nn: "gateway"},
+            info={"host": fqdn_host}))
+        imported += 1
+        print(f"[+]   app server {srv.get('name', '')} -> {fqdn_host} "
+              f"({ip})  dispatcher :{3200 + nn}  gateway :{3300 + nn}")
+
+    return imported
+
+
 def create_app(api: SAPMAPApi) -> Bottle:
     app = Bottle()
 
@@ -19174,6 +19238,120 @@ def create_app(api: SAPMAPApi) -> Bottle:
             return json.dumps({"status": "ok"})
         except Exception as e:
             return json.dumps({"error": str(e)})
+
+    @app.route("/api/import_landscape_xml", method="POST")
+    def api_import_landscape_xml():
+        """Import SAP systems from a SAP UI Landscape XML.
+
+        Joins each <Service> to its <Messageserver> (Service.msid ==
+        Messageserver.uuid) and plots one node per system using the
+        service's SID + description and the message server's host + port.
+        """
+
+        no_scan_appservers = (request.query.get('no_scan')=='1')
+
+        response.content_type = "application/json"
+        import xml.etree.ElementTree as ET
+
+        # request.body is a file-like object; read the raw POST payload.
+        raw = request.body.read()
+        if isinstance(raw, bytes):
+            raw = raw.decode("utf-8", errors="replace")
+        if not raw.strip():
+            return json.dumps({"error": "Empty request body"})
+
+        try:
+            root = ET.fromstring(raw)
+        except ET.ParseError as e:
+            print (f"[-]  Invalid XML: {e}")
+            return json.dumps({"error": f"Invalid XML: {e}"})
+
+        # SAP UI Landscape XML links each <Service> to its message server
+        # by UUID: Service.msid == Messageserver.uuid.  Index the message
+        # servers by UUID first, then walk the services and join.
+        ms_by_uuid = {}
+        for ms in root.iter("Messageserver"):
+            uuid = (ms.get("uuid") or "").strip()
+            if not uuid:
+                continue
+            ms_by_uuid[uuid] = {
+                "name": ms.get("name", ""),
+                "host": ms.get("host", ""),
+                "port": ms.get("port", ""),
+            }
+
+        systems = []     # joined {name, description, host, port} objects
+        added = []       # SIDs newly plotted this import
+        skipped = []     # SIDs already present in state
+        for svc in root.iter("Service"):
+            ms = ms_by_uuid.get((svc.get("msid") or "").strip())
+            if not ms:
+                # No matching message server for this service — nothing to plot.
+                continue
+
+            # Joined object: SID from the service, description from the
+            # service, host + port from its message server.
+            system = {
+                "name": svc.get("systemid", ""),       # e.g. "SDA"
+                "description": svc.get("description", ""),
+                "host": ms.get("host", ""),
+                "port": ms.get("port", ""),
+            }
+            systems.append(system)
+
+            sid = system["name"].strip().upper()
+            if not sid:
+                continue
+
+            # Already in state? Skip — don't clobber a discovered node.
+            if api.state.get_node(sid):
+                skipped.append(sid)
+                continue
+
+            host = system["host"]
+            port = system["port"]
+
+            # Derive the instance number from the external MS port
+            # (sapms<SID> = 36NN); fall back to "00" when it doesn't fit.
+            inst_nr = "00"
+            try:
+                p = int(port)
+                if 3600 <= p <= 3699:
+                    inst_nr = f"{p - 3600:02d}"
+            except (TypeError, ValueError):
+                p = None
+
+            ports = {p: "sapms"} if p else {}
+            instance = InstanceInfo(instance_nr=inst_nr, ip=host, ports=ports)
+            node = SAPNode(
+                sid=sid,
+                hostname=host,
+                ip=host,
+                instances=[instance],
+                sapology_data={"description": system["description"]},
+            )
+            api.state.add_node(node)
+            added.append(sid)
+            print(f"[+] Imported system {sid} ({system['description']}) "
+                  f"-> {host}:{port} as sapms instance {inst_nr}")
+
+            # Fan out from the message server to its application servers,
+            # adding a dispatcher (32NN) + gateway (33NN) instance pair for
+            # each DIA server — unless the operator asked for file-import only.
+            if not no_scan_appservers:
+                n = _import_appserver_instances(node, host, p)
+                if n:
+                    print(f"[+] {sid}: imported {n} application server(s)")
+
+        print(f"[*] Landscape XML: {len(systems)} system(s) joined "
+              f"(added {len(added)}, skipped {len(skipped)})")
+
+        return json.dumps({
+            "status": "ok",
+            "systems": systems,
+            "added": added,
+            "skipped": skipped,
+        })
 
     # -- Business Impact Assessment --
     @app.route("/api/node/<sid>/impact/assess", method="POST")
