@@ -218,6 +218,74 @@ def test_bad_xml_raises_value_error():
         parse_landscape_xml_into_state(SAPMAPState(), "<not valid xml")
 
 
+def test_colliding_name_prefixes_disambiguate_with_suffix():
+    """Operator-reported bug (issue #105 follow-up, 2026-10-07):
+    multiple services whose names share the same 3-char prefix (e.g.
+    "S4/Hana" + "S4H/Hana " + "S4H via saprouter" all synthesize to
+    base SID "S4H") were dropped as duplicates even though they
+    pointed at DIFFERENT endpoints.  The (host, port) endpoint-dedup
+    above handles true dups; by the time we reach SID synthesis any
+    remaining collision is between distinct endpoints that happen to
+    share a name prefix — each deserves its own card.  Verify we
+    suffix _2, _3, … on collision."""
+    xml = """<?xml version='1.0' encoding='UTF-8'?>
+<Landscape version='1'>
+  <Services>
+    <Service name='S4/Hana' type='SAPGUI' uuid='s4-aws'
+             server='34.230.127.14:3200' mode='1'/>
+    <Service name='S4H/Hana' type='SAPGUI' uuid='s4-local'
+             server='192.168.2.209:3200' mode='1'/>
+    <Service name='S4H/Hana via saprouter' type='SAPGUI' uuid='s4-rtr'
+             routerid='r1' server='192.168.2.209:3201' mode='1'/>
+    <Service name='S4H/Hana  Developer edition 2025' type='SAPGUI'
+             uuid='s4-dev' server='192.168.2.150:3200' mode='1'/>
+  </Services>
+</Landscape>"""
+    state, summary = _import(xml)
+    # All 4 endpoints are distinct (different host OR different port) so
+    # none should be dedup-dropped; all 4 must appear with distinct SIDs.
+    assert len(summary["added"]) == 4, (
+        f"all 4 S4-prefixed endpoints should import; got {summary['added']}")
+    sids = set(summary["added"])
+    assert sids == {"XML_S4H", "XML_S4H_2", "XML_S4H_3", "XML_S4H_4"}, (
+        f"expected suffixed SIDs on collision; got {sids}")
+    # Each SID must point at a different endpoint.
+    endpoints = {(n.ip, next(iter(n.instances[0].ports or {}), None))
+                 for n in state.nodes.values()}
+    assert len(endpoints) == 4, (
+        f"each SID must map to a distinct endpoint; got {endpoints}")
+
+
+def test_colliding_name_prefixes_respect_existing_real_sid():
+    """If a REAL systemid='NPL' already exists in state (from a prior
+    scan), a sentinel-SID XML entry whose synthesized name derives to
+    XML_NPL must NOT inadvertently reuse "NPL" — the real-SID node
+    stays sacred, and the synthesized node gets its own XML_NPL slot.
+    (The disambiguation loop keys off `state.get_node(sid)` which
+    checks for ANY SID collision, including with real SIDs.)"""
+    state = SAPMAPState()
+    # Pre-populate a real NPL node with a different endpoint than the XML.
+    state.add_node(SAPNode(sid="NPL", hostname="pre-scanned.example",
+                           ip="10.99.99.99"))
+    xml = """<?xml version='1.0' encoding='UTF-8'?>
+<Landscape version='1'>
+  <Services>
+    <!-- Service name=NPL-foo would derive to XML_NPL via first-3-alnum -->
+    <Service name='NPL foo' type='SAPGUI' uuid='n1'
+             server='192.168.2.106:3200' mode='1'/>
+  </Services>
+</Landscape>"""
+    _, summary = _import(xml, state=state)
+    # The real-SID "NPL" node must remain untouched.
+    npl_real = state.get_node("NPL")
+    assert npl_real.ip == "10.99.99.99"
+    # The XML service must get its own synthesized SID (XML_NPL,
+    # since XML_NPL doesn't collide with the real "NPL").
+    assert "XML_NPL" in summary["added"]
+    xml_npl = state.get_node("XML_NPL")
+    assert xml_npl.ip == "192.168.2.106"
+
+
 def test_empty_messageserver_host_does_not_crash():
     """SAP Logon sometimes writes a stub <Messageserver host='' port='0'/>
     for a pending/unresolved entry.  The importer must not plot a
