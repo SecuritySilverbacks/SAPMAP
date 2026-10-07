@@ -2634,14 +2634,40 @@ def parse_landscape_xml_into_state(state, xml_text,
 
         placeholder = False
         if _is_sentinel_sid(svc_sid):
-            sid = _derive_sid_from_name(svc_name, host)
+            # Synthesized placeholder SID — disambiguate on collision with
+            # a numeric suffix.  The pre-fix code just dropped colliding
+            # entries into `skipped`, so a landscape with multiple
+            # services whose names share the same 3-char prefix (common:
+            # "S4/Hana", "S4H/Hana ", "S4H via saprouter",
+            # "S4H/Hana  Developer edition 2025" all → S4H) would only
+            # import the FIRST one.  Operator-visible symptom in issue
+            # #105 follow-up: a 70-service landscape imported as 50
+            # nodes because ~20 collided by name prefix even though
+            # they pointed at distinct endpoints.
+            #
+            # The (host, port_int) endpoint-dedup above already handles
+            # TRUE duplicates (same backend seen twice as e.g. "direct"
+            # + "via SAProuter" entries), so by the time we get here
+            # any remaining collision is between DIFFERENT endpoints
+            # that happen to share a name prefix — each deserves its
+            # own card on the map.
+            base = _derive_sid_from_name(svc_name, host)
+            sid = base
+            dedup_i = 2
+            while state.get_node(sid):
+                sid = f"{base}_{dedup_i}"
+                dedup_i += 1
             placeholder = True
         else:
+            # Real `systemid=` from the XML — keep the strict
+            # skip-if-present semantic.  A pre-existing node with
+            # this SID is almost certainly from a prior scan + richly
+            # enriched; we do not want to clobber it with the thin
+            # landscape-file guess.
             sid = svc_sid
-
-        if state.get_node(sid):
-            skipped.append(sid)
-            continue
+            if state.get_node(sid):
+                skipped.append(sid)
+                continue
 
         inst_nr = "00"
         if port_int is not None:
