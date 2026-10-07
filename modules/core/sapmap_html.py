@@ -498,10 +498,22 @@ body {
 .modal h3 { font-size: 14px; color: #f0883e; margin-bottom: 16px; }
 .modal .form-row { margin-bottom: 10px; }
 .modal .form-row label { display: block; font-size: 11px; color: #8b949e; margin-bottom: 3px; }
-.modal .form-row input, .modal .form-row select {
+/* Full-width text/number/password/url inputs and selects.  Exclude checkboxes
+   and radios — otherwise the width:100% + padding + appearance:none makes the
+   checkbox render as a tall text-input-shaped black box with no tick target
+   (operator can't toggle it).  Reported 2026-10-07 on the "Set 10KBLAZE
+   Attacker IP (NAT override)" modal's Force checkbox. */
+.modal .form-row input:not([type="checkbox"]):not([type="radio"]),
+.modal .form-row select {
   width: 100%; padding: 6px 10px; background: #0d1117; border: 1px solid #30363d;
   color: #e6edf3; border-radius: 4px; font-size: 12px;
   -webkit-appearance: none; appearance: none;
+}
+.modal .form-row input[type="checkbox"],
+.modal .form-row input[type="radio"] {
+  width: 14px; height: 14px; margin: 0;
+  vertical-align: middle; flex-shrink: 0;
+  accent-color: #58a6ff;
 }
 .modal .form-row select { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%238b949e' d='M2 4l4 4 4-4'/%3E%3C/svg%3E"); background-repeat: no-repeat; background-position: right 8px center; padding-right: 28px; }
 .modal .form-row select option { background: #0d1117; color: #e6edf3; }
@@ -8782,9 +8794,31 @@ async function ctxAction(action) {
       const msPort = n && n.ms_port ? n.ms_port : '39NN';
       const clients_bt = (n && n.clients || []).map(c => typeof c === 'object' ? c.nr || '?' : String(c));
       let defBt = clients_bt.find(c => c !== '000') || clients_bt[0] || '001';
+      // Honor the per-node NAT override set via "Set 10KBLAZE Attacker IP":
+      // without this read the prompt pre-fills with localIp (the browser's
+      // view of the SAPMAP server IP) and the backend never consults
+      // node.attacker_ip_override because an explicit attacker_ip was
+      // supplied.  Observed 2026-10-07 on NPL via VPN double-hop — the
+      // operator set 192.168.2.20 + Force but the Full Chain used
+      // 172.20.10.2 → auto-swap to 10.8.0.10 (local sockname), never the
+      // override, so F_SAP_INIT returned gw_id=0 despite a valid override.
+      let overrideIp = '';
+      let overrideForce = false;
+      try {
+        const ov = await api('GET', `node/${sid}/get_attacker_ip`);
+        if (ov && ov.ok) {
+          overrideIp = (ov.attacker_ip || '').trim();
+          overrideForce = !!ov.force;
+        }
+      } catch (_) {}
+      const promptDefault = overrideIp || localIp;
+      const promptSuffix = overrideIp
+        ? `\n\n(Per-node override: ${overrideIp}${overrideForce ? ' + Force' : ''}.  ` +
+          `Edit if you want to inject a different IP.)`
+        : '';
       const ip = prompt(
         `10KBLAZE Full Chain: betrusted → GW trust → create user\nMS port: ${msPort}\n\n` +
-        `Enter attacker IP to inject:`, localIp
+        `Enter attacker IP to inject:` + promptSuffix, promptDefault
       );
       if (ip === null) break;
       const clientBt = prompt(
@@ -8794,8 +8828,14 @@ async function ctxAction(action) {
         defBt
       );
       if (clientBt === null) break;
+      // Carry Force through to the backend only when the operator kept the
+      // override's suggested value — if they typed a different IP, assume
+      // they want the default auto-swap behaviour unless they re-save the
+      // override.
+      const sendForce = overrideForce && (ip.trim() === overrideIp);
       await api('POST', `node/${sid}/betrusted_chain`,
-                { attacker_ip: ip.trim(), nilist_wait: 30, client: clientBt.trim() });
+                { attacker_ip: ip.trim(), nilist_wait: 30,
+                  client: clientBt.trim(), force_attacker_ip: sendForce });
       break;
     }
     case 'create_user_gw': {

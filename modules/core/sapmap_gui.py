@@ -8810,6 +8810,12 @@ def create_app(api: SAPMAPApi) -> Bottle:
         attacker_ip  = data.get("attacker_ip", "").strip()
         nilist_wait  = float(data.get("nilist_wait", 30.0))
         client       = data.get("client")
+        # Explicit force from the POST body — needed when the frontend asks
+        # the operator for an attacker IP (prompt pre-fill may be the local
+        # IP which differs from the per-node NAT-override).  Without this
+        # kwarg betrusted() auto-swaps to sock.getsockname() and the
+        # operator's manually-chosen IP never reaches the GW's trust list.
+        force_attacker_ip = bool(data.get("force_attacker_ip", False))
 
         stop_event = threading.Event()
         key = f"{sid}:betrusted_chain"
@@ -8823,6 +8829,7 @@ def create_app(api: SAPMAPApi) -> Bottle:
                     nilist_wait=nilist_wait,
                     client=client,
                     stop_event=stop_event,
+                    force_attacker_ip=force_attacker_ip,
                 )
                 if created:
                     api.state.track_created_user(created)
