@@ -19256,6 +19256,7 @@ def create_app(api: SAPMAPApi) -> Bottle:
         try:
             root = ET.fromstring(raw)
         except ET.ParseError as e:
+            print (f"[-]  Invalid XML: {e}")
             return json.dumps({"error": f"Invalid XML: {e}"})
 
         # SAP UI Landscape XML links each <Service> to its message server
