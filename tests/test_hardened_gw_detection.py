@@ -60,10 +60,18 @@ def test_parse_response_flags_a4h_hardened_reject():
         "parse_response must NOT return a conv_id for a hardened "
         "reject — the GW's CPIC counter leaking into the response "
         "is not a real session identifier")
-    assert "hardened gateway" in info["error_msg"].lower()
+    # Error message now cites gw/sec_info (STARTED_PRG governed by secinfo,
+    # not reginfo) — 2026-10-07 terminology correction after secinfo/reginfo
+    # confusion was flagged.  Previous assertion required "hardened gateway"
+    # literal; new message says "gateway ACL".
+    assert "gateway acl" in info["error_msg"].lower()
+    assert "sec_info" in info["error_msg"].lower()
     assert "2808158" in info["error_msg"], (
         "error_msg must cite SAP Note 2808158 so operators can "
         "look up the hardening")
+    assert "dev_rd" in info["error_msg"].lower(), (
+        "error_msg must point operators at dev_rd for the authoritative "
+        "reject reason — our classifier is heuristic, dev_rd is ground truth")
 
 
 def test_hardened_reject_also_matches_p2_alias():
@@ -589,52 +597,121 @@ def test_appc_rc_0x06_classifies_as_source_ip_not_trusted():
     assert "internal_hosts" in info["error_msg"]
 
 
-def test_appc_rc_0x09_classifies_as_reginfo_kernel_deny():
-    """APPC_RC = 0x09 (CM_TPN_NOT_RECOGNIZED) is a definitive reginfo /
-    secinfo deny — the TP name is blocked at the kernel ACL evaluator."""
+def test_appc_rc_0x09_classifies_as_secinfo_kernel_deny():
+    """APPC_RC = 0x09 (CM_TPN_NOT_RECOGNIZED) is a definitive secinfo
+    deny — the TP name is blocked at the kernel ACL evaluator (SAP Note
+    2808158 touches gw/sec_info for STARTED_PRG, not reginfo)."""
     info = parse_response(_hardened_frame_with_appc(0x09), "F_SAP_INIT")
     assert info["appc_rc"] == 0x09
-    assert info.get("gw_reject_reason") == "reginfo_kernel_deny"
+    assert info.get("gw_reject_reason") == "secinfo_kernel_deny"
     assert info.get("hardened_reject") is True
     assert "sapxpg" in info["error_msg"]
     assert "2808158" in info["error_msg"]
+    assert "sec_info" in info["error_msg"]
 
 
-def test_appc_rc_0x0a_classifies_as_reginfo_kernel_deny():
+def test_appc_rc_0x0a_classifies_as_secinfo_kernel_deny():
     """APPC_RC = 0x0A (CM_TP_NOT_AVAILABLE_NO_RETRY) is the sibling
-    reginfo-deny return code — same classification as 0x09."""
+    secinfo-deny return code — same classification as 0x09."""
     info = parse_response(_hardened_frame_with_appc(0x0A), "F_SAP_INIT")
     assert info["appc_rc"] == 0x0A
-    assert info.get("gw_reject_reason") == "reginfo_kernel_deny"
+    assert info.get("gw_reject_reason") == "secinfo_kernel_deny"
     assert info.get("hardened_reject") is True
 
 
 def test_appc_rc_zero_preserves_default_hardened_verdict():
-    """NPL kernel 753 + S4H kernel 793 both return APPC_RC=0 with the
-    short reject envelope (verified live 2026-10-07 via SSH-tunnel
-    probe from 127.0.0.1).  The classifier MUST continue to call this
-    hardened_reject — the default-deny gw/sec_info posture doesn't
-    carry a distinguishing APPC trailer, and the betrusted chain's
-    kernel-gated patience + NAT_SOURCE_MISMATCH probe catch the
-    handful of false-positive scenarios."""
+    """APPC_RC=0 with gw_id=0 and NO canonical conv_id at offset 40
+    (default frame has only zeros there) remains hardened_reject —
+    this is the A4H kernel 916 original signature.  The default label
+    is secinfo_default_or_unknown because gw/sec_info governs
+    STARTED_PRG; reginfo is for RegisterByName."""
     info = parse_response(_hardened_frame_with_appc(0x00), "F_SAP_INIT")
     assert info["appc_rc"] == 0x00
-    assert info.get("gw_reject_reason") == "reginfo_default_or_unknown"
+    assert info.get("gw_reject_reason") == "secinfo_default_or_unknown"
     assert info.get("hardened_reject") is True, (
-        "APPC_RC=0 with gw_id=0 is the empirically-observed signature "
-        "of post-2808158 reginfo hardening on NPL/S4H — must preserve "
-        "the hardened_reject verdict to avoid regressing the fix")
+        "APPC_RC=0 with gw_id=0 and no canonical conv_id is the A4H "
+        "kernel 916 hardened signature — must preserve hardened_reject")
 
 
 def test_short_frame_without_appc_trailer_falls_back():
     """Frames shorter than 40 bytes (e.g., A4H kernel 916's 24-byte
-    reject envelope) can't carry an APPC trailer.  Classifier must
-    gracefully fall back to the default hardened_reject verdict."""
+    reject envelope) can't carry an APPC trailer AND can't carry a
+    canonical conv_id at offset 40.  Classifier must gracefully fall
+    back to the default hardened_reject verdict."""
     short_frame = bytes.fromhex(
         "06ca03000013000000000000000000000000000000000000"
     )
     assert len(short_frame) == 24
     info = parse_response(short_frame, "F_SAP_INIT")
     assert info["appc_rc"] is None
-    assert info.get("gw_reject_reason") == "reginfo_default_or_unknown"
+    assert info.get("gw_reject_reason") == "secinfo_default_or_unknown"
     assert info.get("hardened_reject") is True
+
+
+# ---------------------------------------------------------------------------
+# Canonical conv_id gate (2026-10-07 — critical false-positive fix)
+#
+# Verified live 2026-10-07 that NPL kernel 753 and S4H kernel 793 are
+# BOTH exploitable via STARTED_PRG=sapxpg (uid=npladm / uid=s4hadm
+# returned from unauth probes through SSH tunnels from 127.0.0.1).
+# The pre-fix classifier was FALSE-POSITIVING on their success responses
+# — it fired hardened_reject on gw_id=0 alone, before conv_id extraction
+# ran, and discarded the valid conv_id at offset 40.  SAPMAP reported
+# "Gateway NOT vulnerable" while sapxpg was actually being spawned on
+# the target (dev_rd confirmed TP execution for both targets).
+# ---------------------------------------------------------------------------
+
+def _simmode_success_frame(conv_id: str) -> bytes:
+    """Build the 80-byte F_SAP_INIT reply shape that gw/sim_mode=1 on a
+    vulnerable kernel returns: gw_id=0 at bytes[6:8], APPC_RC=0 at
+    bytes[32:36], and a legitimate 8-digit ASCII conv_id at the
+    SAPCPICSUFFIX location (offset 40).  Shape confirmed on NPL 753 +
+    S4H 793 via tunneled probe output 2026-10-07."""
+    assert len(conv_id) == 8 and conv_id.isdigit()
+    frame = bytearray(80)
+    frame[0] = 0x06   # SAPRFC version
+    frame[1] = 0xCA   # F_SAP_INIT reply opcode
+    # bytes[6:8] gw_id stays 00 00
+    # bytes[32:36] appc_rc = 0
+    # bytes[36:40] sap_rc = 0
+    frame[40:48] = conv_id.encode("ascii")  # canonical SAPCPICSUFFIX slot
+    return bytes(frame)
+
+
+def test_canonical_conv_id_at_offset_40_bypasses_hardened_reject():
+    """gw/sim_mode=1 vulnerable gateways (NPL 753 + S4H 793 verified)
+    return gw_id=0 WITH a valid 8-digit ASCII conv_id at offset 40.
+    The classifier MUST let these through — the TP has been spawned
+    and the exploit can continue to P3."""
+    frame = _simmode_success_frame("89271532")
+    info = parse_response(frame, "F_SAP_INIT")
+    assert info["gw_id"] == 0
+    assert info.get("hardened_reject") is not True, (
+        "gw_id=0 WITH a canonical conv_id at offset 40 is a sim_mode=1 "
+        "success — do NOT classify as hardened_reject or SAPMAP will "
+        "report real vulnerable gateways as 'NOT vulnerable' (NPL + "
+        "S4H false-positive observed live 2026-10-07, uid=<sid>adm "
+        "actually returned from unauth probe)")
+    assert info["conv_id"] == "89271532"
+    assert info["error"] is False
+
+
+def test_cpic_counter_at_deeper_offset_still_rejects():
+    """A4H kernel 916 original bug: a CPIC counter leaked DEEPER in the
+    reject envelope (offset 108 in the fixture) was mis-extracted as a
+    conv_id and used to retry forever.  The new canonical-offset-40
+    gate must still catch this case — the counter at offset 108 is NOT
+    at the SAPCPICSUFFIX slot, so hardened_reject still fires."""
+    header = bytes.fromhex("06ca03000013") + struct.pack("!H", 0x0000)
+    # 8 bytes header + 32 bytes zero (through offset 40) + more zeros
+    # + counter at offset 108, well past the SAPCPICSUFFIX location.
+    body = bytes([0x00]) * 100 + b"77096266" + bytes([0x00]) * 284
+    frame = header + body
+    assert len(frame) == 400
+    # Verify the counter is NOT at offset 40 (sanity check for the test)
+    assert frame[40:48] == b"\x00" * 8
+    info = parse_response(frame, "F_SAP_INIT")
+    assert info.get("hardened_reject") is True, (
+        "CPIC counter at offset 108 is NOT a canonical conv_id — the "
+        "A4H kernel 916 reject envelope must still trigger hardened_"
+        "reject even with the new offset-40 gate")
