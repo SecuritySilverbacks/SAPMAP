@@ -6401,6 +6401,28 @@ function showCtxMenu(e, sid) {
   const hasGwVuln = n && n.gw_vulnerable;
   const hasMsVuln = n && n.ms_vulnerable;
   const hasMsPort = n && n.ms_port > 0;
+  // Per-node Spray entry (#69) only makes sense when the landscape
+  // pool holds at least one candidate.  Walk nodes for credentials
+  // (with a password) or secstore entries, plus landscape-wide BTP
+  // subaccounts and SCC nodes.  Operator wordlists live server-side
+  // and aren't reflected in mapState, so a wordlist-only pool still
+  // reads as empty here — operators who have ONLY a wordlist and no
+  // other pool items should use the top-nav "Actions > Spray
+  // Harvested Credentials..." entry which doesn't gate on this.
+  // The map-background "Spray Harvested Credentials..." entry is a
+  // landscape action, not a per-node action, and keeps its own
+  // (no-gate) behavior for the wordlist-only case.
+  const hasSprayCandidates = (() => {
+    const nodes = mapState.nodes || {};
+    for (const key in nodes) {
+      const nn = nodes[key] || {};
+      if ((nn.credentials || []).some(c => c && c.password)) return true;
+      if ((nn.secstore_entries || []).length > 0) return true;
+    }
+    if (Object.keys(mapState.btp_subaccounts || {}).length > 0) return true;
+    if (Object.keys(mapState.scc_nodes || {}).length > 0) return true;
+    return false;
+  })();
   // kloris/SAPMAP#41 — set by check_ms_betrusted when the MS internal
   // port only speaks TLS/SystemPKI (system/secure_communication = ON).
   // Both betrusted (CVE-2020-6207) and the CVE-2026-58240 write path
@@ -7025,7 +7047,19 @@ function showCtxMenu(e, sid) {
     'client_roles':     !isAbapStack,
     'read_usrextid':    !isAbapStack,
     'default_creds':    !isAbapStack,
-    'password_spray':   !isAbapStack,              // #69 — only ABAP has a DIAG dispatcher to spray
+    // #69 — only ABAP has a DIAG dispatcher to spray.  Additionally
+    // hide when the landscape pool is empty: shipping an "attack"
+    // action that has nothing to try just clutters the menu.
+    // Operator feedback 2026-10-08: the per-node entry appeared on
+    // freshly-plotted nodes before any credentials had been
+    // harvested anywhere in the landscape.
+    'password_spray':   !isAbapStack || !hasSprayCandidates,
+    // #69 landscape-wide trigger separately shown in map ctx menu
+    // (data-action="map_password_spray") does NOT gate on
+    // hasSprayCandidates — it opens the config modal where operators
+    // can paste a wordlist, which seeds the pool.  Per-node entry
+    // skips that config step and jumps straight to a scoped spray,
+    // so an empty-pool per-node spray would be a no-op.
     'scan_logon_banners': !isAbapStack,              // #68 — DIAG login screen is an ABAP-stack surface
     'probe_telemetry':  !isAbapStack,
     'capture_evasion_baseline': !isAbapStack,
@@ -7052,6 +7086,14 @@ function showCtxMenu(e, sid) {
     // even greyed out.  Matches the behaviour we already do for other
     // wire-layer-blocked primitives.
     'betrusted':             msSecureComms,
+    // "Set 10KBLAZE Attacker IP (NAT override)" only configures a
+    // field consumed by the betrusted / 10KBLAZE chain.  On a node
+    // where Check MS Betrusted has not confirmed ms_vulnerable, the
+    // chain can't fire and this knob has nothing to feed — hide it.
+    // Operator feedback 2026-10-08: appeared on freshly-plotted
+    // nodes before Check MS Betrusted had been run anywhere.
+    // Re-appears automatically once ms_vulnerable flips True.
+    'set_attacker_ip':       !hasMsVuln,
     'download_secstore':     !isAbapStack,  // RSECTAB is an ABAP table
     'ransapware_encrypt':    !isAbapStack,
     'ransapware_decrypt':    !isAbapStack,
