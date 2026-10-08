@@ -941,9 +941,26 @@ def _bg(key: str, label: str, fn):
     Each freshly-launched task implicitly clears the global stop
     flag so a prior STOP press doesn't silently cancel new work.
     Cancellation only affects work already in flight.
+
+    EXCEPTION (slow/silent/no-stop follow-up): if a pwspray is
+    currently running AND the new task is NOT the pwspray itself,
+    DON'T reset the stop flag — otherwise a sibling task launched
+    mid-spray clobbers an in-flight STOP request and the operator's
+    STOP click is silently cancelled.  The spray engine's own
+    _reset_status seeds its new run; its own cancel_check path
+    doesn't rely on the global flag resetting at every unrelated
+    _bg().
     """
     import sapmap_stop
-    sapmap_stop.reset_stop()
+    _should_reset = True
+    try:
+        import sapmap_pwspray as _pws
+        if _pws.get_status().get("running") and key != "_password_spray":
+            _should_reset = False
+    except Exception:
+        pass
+    if _should_reset:
+        sapmap_stop.reset_stop()
     def _wrapper():
         _task_start(key, label)
         try:
@@ -2512,6 +2529,16 @@ class SAPMAPApi:
         self.scan_cancelled = True
         import sapmap_stop
         sapmap_stop.request_stop()
+        # Also mark a running pwspray as stop-requested so the GUI's
+        # 800ms status poll sees the STOPPING chip immediately, BEFORE
+        # the engine's cancel_check actually bubbles through a long
+        # try_login or RFC probe (slow/silent/no-stop follow-up).
+        try:
+            import sapmap_pwspray as _pws
+            if _pws.get_status().get("running"):
+                _pws.mark_stop_requested()
+        except Exception:
+            pass
         n_bet = _signal_all_betrusted_stops()
         n_active = len(_get_active_tasks())
         msg_parts = ["[!] STOP requested"]
