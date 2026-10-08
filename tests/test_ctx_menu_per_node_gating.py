@@ -79,6 +79,69 @@ def test_hasSprayCandidates_predicate_is_defined():
         "Pool predicate must inspect landscape-wide SCC nodes")
 
 
+def test_hasSprayCandidates_requires_both_username_and_password():
+    """Operator feedback 2026-10-08: the first version of this
+    predicate was too loose — any SCC or BTP presence flipped the
+    gate on, even when neither had stored creds.  Backend's
+    landscape_password_pool (modules/discovery/sapmap_pwspray.py
+    _add() helper) only counts a candidate when BOTH username AND
+    password are present; mirror that gate here."""
+    m = re.search(
+        r"const hasSprayCandidates = \(\(\) => \{(.*?)\}\)\(\);",
+        _html(), re.DOTALL)
+    assert m, "hasSprayCandidates IIFE body not found"
+    body = m.group(1)
+    # SCC walk must check credential.username AND credential.password
+    # (not just scc_nodes.length).  Pin: both terms appear in a
+    # .some() check against .credentials
+    assert "sn.credentials" in body or "scc.credentials" in body, (
+        "SCC walk must dive into sn.credentials[] — just checking "
+        "scc_nodes presence is the pre-tightening regression")
+    assert "c.username && c.password" in body or (
+        "c && c.username" in body and "c.password" in body), (
+        "SCC/node credential walk must require BOTH username and "
+        "password (matches backend _add() gate)")
+    # BTP walk must check destination.user AND destination.password
+    assert "sub.destinations" in body, (
+        "BTP walk must dive into sub.destinations[] — just checking "
+        "btp_subaccounts presence is the pre-tightening regression")
+    assert "d.user && d.password" in body or (
+        "d && d.user" in body and "d.password" in body), (
+        "BTP destination walk must require BOTH user and password "
+        "(matches backend _add() gate)")
+
+
+def test_hasSprayCandidates_skips_scc_kind_in_node_credentials():
+    """Backend pool-builder explicitly skips node.credentials entries
+    with kind='scc' (they belong in the SCC bucket, not the node
+    bucket).  Mirror that skip in the frontend predicate so we don't
+    double-count an SCC credential that was mis-attached to a node."""
+    m = re.search(
+        r"const hasSprayCandidates = \(\(\) => \{(.*?)\}\)\(\);",
+        _html(), re.DOTALL)
+    body = m.group(1)
+    assert '!== "scc"' in body or "!== 'scc'" in body, (
+        "node.credentials walk must skip kind='scc' entries "
+        "(backend pool-builder skips them too — they count in the "
+        "SCC bucket instead)")
+
+
+def test_hasSprayCandidates_secstore_requires_oauth2_client_category():
+    """Backend only counts secstore_entries with
+    category='oauth2_client' (OA2C client secrets with cleartext
+    password); other secstore entries aren't spray-usable creds.
+    Mirror that filter in the frontend predicate."""
+    m = re.search(
+        r"const hasSprayCandidates = \(\(\) => \{(.*?)\}\)\(\);",
+        _html(), re.DOTALL)
+    body = m.group(1)
+    assert '"oauth2_client"' in body or "'oauth2_client'" in body, (
+        "secstore walk must filter on category='oauth2_client' — "
+        "counting ALL secstore_entries would re-introduce the loose "
+        "gate (operator has a dumped SecStore with 300 entries but "
+        "none are OA2C creds → entry still shows)")
+
+
 def _hidden_dict_body(html: str) -> str:
     """Isolate the `const hidden = {...}` block inside showCtxMenu so
     assertions don't accidentally match a same-named key in the sibling
