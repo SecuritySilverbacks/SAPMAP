@@ -6403,25 +6403,66 @@ function showCtxMenu(e, sid) {
   const hasMsVuln = n && n.ms_vulnerable;
   const hasMsPort = n && n.ms_port > 0;
   // Per-node Spray entry (#69) only makes sense when the landscape
-  // pool holds at least one candidate.  Walk nodes for credentials
-  // (with a password) or secstore entries, plus landscape-wide BTP
-  // subaccounts and SCC nodes.  Operator wordlists live server-side
-  // and aren't reflected in mapState, so a wordlist-only pool still
-  // reads as empty here — operators who have ONLY a wordlist and no
-  // other pool items should use the top-nav "Actions > Spray
-  // Harvested Credentials..." entry which doesn't gate on this.
-  // The map-background "Spray Harvested Credentials..." entry is a
-  // landscape action, not a per-node action, and keeps its own
-  // (no-gate) behavior for the wordlist-only case.
+  // pool holds at least one candidate.  Mirrors the backend's
+  // landscape_password_pool gate (modules/discovery/sapmap_pwspray.py
+  // _add() helper): a candidate is only counted when it carries BOTH
+  // a username AND a password.  Walks the four reachable sources:
+  //
+  //   (1) node.credentials with username+password  (skip kind='scc'
+  //       — those go into the SCC bucket below instead)
+  //   (2) node.secstore_entries with category='oauth2_client' AND
+  //       username/client_id AND password (OA2C secrets)
+  //   (3) btp_subaccounts[].destinations with user+password
+  //   (4) scc_nodes[].credentials with username+password
+  //
+  // Deliberately NOT counted:
+  //   - DBCON edges  (opt-in via include_db_connect, default off;
+  //     sapsa/sapsr3 locks DB account on wrong-password spray)
+  //   - operator wordlist  (lives server-side on api.pwspray_wordlist;
+  //     a wordlist-only pool still reads as empty here — operators
+  //     with wordlist-only workflows should use the map-background
+  //     entry which has no gate)
+  //
+  // Operator feedback 2026-10-08 (post-PR-#117): the prior
+  // Object.keys(mapState.scc_nodes).length > 0 check was too loose —
+  // an SCC on the map without stored admin creds flipped the gate on
+  // and made the entry visible on a node with no actual pool items.
   const hasSprayCandidates = (() => {
     const nodes = mapState.nodes || {};
     for (const key in nodes) {
       const nn = nodes[key] || {};
-      if ((nn.credentials || []).some(c => c && c.password)) return true;
-      if ((nn.secstore_entries || []).length > 0) return true;
+      // (1) node.credentials
+      if ((nn.credentials || []).some(c =>
+          c && c.username && c.password
+          && (c.kind || "").toLowerCase() !== "scc")) {
+        return true;
+      }
+      // (2) OA2C oauth2_client secstore entries
+      if ((nn.secstore_entries || []).some(e =>
+          e && (e.category || "").toLowerCase() === "oauth2_client"
+          && (e.username || e.client_id)
+          && e.password)) {
+        return true;
+      }
     }
-    if (Object.keys(mapState.btp_subaccounts || {}).length > 0) return true;
-    if (Object.keys(mapState.scc_nodes || {}).length > 0) return true;
+    // (3) BTP destinations with cleartext basic-auth creds
+    const btpSubs = mapState.btp_subaccounts || {};
+    for (const uuid in btpSubs) {
+      const sub = btpSubs[uuid] || {};
+      if ((sub.destinations || []).some(d =>
+          d && d.user && d.password)) {
+        return true;
+      }
+    }
+    // (4) SCC admin / local-user credentials
+    const sccNodes = mapState.scc_nodes || {};
+    for (const host in sccNodes) {
+      const sn = sccNodes[host] || {};
+      if ((sn.credentials || []).some(c =>
+          c && c.username && c.password)) {
+        return true;
+      }
+    }
     return false;
   })();
   // kloris/SAPMAP#41 — set by check_ms_betrusted when the MS internal
