@@ -1443,6 +1443,7 @@ body {
     <div class="ctx-sub">
       <div class="ctx-item" data-action="set_type">&#9881; Set System Type</div>
       <div class="ctx-item" data-action="set_sid">&#9881; Set SID</div>
+      <div class="ctx-item" data-action="edit_clients">&#9881; Edit Clients</div>
       <div class="ctx-item" data-action="set_db_type">&#9881; Set DB Type</div>
       <div class="ctx-item" data-action="set_os_type">&#9881; Set OS Type</div>
       <div class="ctx-item" data-action="set_instance_nr">&#9881; Set Instance Number</div>
@@ -2370,6 +2371,43 @@ body {
     <div class="form-actions">
       <button class="btn btn-primary" onclick="saveSid()">Save</button>
       <button class="btn" onclick="closeModal('sid-modal')">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<!-- Edit Clients Modal -->
+<div class="modal-overlay" id="clients-modal">
+  <div class="modal">
+    <h3>&#9881; Edit Clients</h3>
+    <div id="clients-system-info" style="font-size:12px;color:#8b949e;margin-bottom:12px"></div>
+    <div class="form-row">
+      <label>Clients on this system</label>
+      <div id="clients-list" style="max-height:240px;overflow-y:auto;border:1px solid #30363d;border-radius:4px;padding:4px;margin-bottom:8px"></div>
+      <div style="display:flex;gap:6px;align-items:center">
+        <input type="text" id="clients-add-nr" maxlength="3" placeholder="100"
+               style="width:70px;text-align:center;font-family:monospace"
+               oninput="this.value=this.value.replace(/[^0-9]/g,'')"
+               onkeydown="if(event.key==='Enter'){event.preventDefault();addClientRow();}">
+        <select id="clients-add-category" style="flex:1">
+          <option value="">Unknown category</option>
+          <option value="P">P — Production</option>
+          <option value="T">T — Test</option>
+          <option value="C">C — Customizing</option>
+          <option value="D">D — Demo</option>
+          <option value="E">E — Training/Education</option>
+          <option value="S">S — SAP Reference</option>
+          <option value="V">V — Verified (user-create)</option>
+        </select>
+        <button class="btn" onclick="addClientRow()">&#10133; Add</button>
+      </div>
+      <span style="font-size:10px;color:#484f58;margin-top:6px;display:block">
+        Client numbers are three digits (zero-padded, e.g. 100).  Category mirrors SAP T000
+        CCCATEGORY.  A client flagged <strong>P</strong> marks the system as production.
+      </span>
+    </div>
+    <div class="form-actions">
+      <button class="btn btn-primary" onclick="saveClients()">Save</button>
+      <button class="btn" onclick="closeModal('clients-modal')">Cancel</button>
     </div>
   </div>
 </div>
@@ -9787,6 +9825,7 @@ async function ctxAction(action) {
     }
     case 'set_type': showTypeModal(sid); break;
     case 'set_sid': showSidModal(sid); break;
+    case 'edit_clients': showClientsModal(sid); break;
     case 'set_db_type': showDbTypeModal(sid); break;
     case 'set_os_type': showOsTypeModal(sid); break;
     case 'set_instance_nr': showInstanceNrModal(sid); break;
@@ -14717,6 +14756,84 @@ async function saveSid() {
   if (r && r.error) { alert('Set SID failed: ' + r.error); return; }
   selectedNodeSid = raw;
   closeModal('sid-modal');
+  startPolling();
+}
+
+// ---------------------------------------------------------------------
+//  Edit Clients modal — add/delete entries in node.clients.  Each
+//  entry is {nr: "100", category: "P"}.  The working copy lives in
+//  clientsModalData so edits are only committed to the backend on Save.
+// ---------------------------------------------------------------------
+let clientsModalData = [];
+const CLIENT_CATEGORY_LABELS = {
+  '': 'unknown', 'P': 'Production', 'T': 'Test', 'C': 'Customizing',
+  'D': 'Demo', 'E': 'Training', 'S': 'SAP Reference', 'V': 'Verified'
+};
+
+function showClientsModal(sid) {
+  const n = (mapState.nodes || {})[sid];
+  document.getElementById('clients-system-info').textContent =
+    sid + (n ? ' (' + ((n.clients || []).length) + ' client(s) known)' : '');
+  // Deep-copy existing clients, normalising to {nr, category} objects
+  // (older state files / scanner paths sometimes store bare strings).
+  clientsModalData = ((n && n.clients) || []).map(c =>
+    (typeof c === 'object')
+      ? { nr: String(c.nr || '').trim(), category: c.category || '' }
+      : { nr: String(c).trim(), category: '' });
+  renderClientsList();
+  document.getElementById('clients-add-nr').value = '';
+  document.getElementById('clients-add-category').selectedIndex = 0;
+  document.getElementById('clients-modal').classList.add('visible');
+  document.getElementById('clients-add-nr').focus();
+}
+
+function renderClientsList() {
+  const box = document.getElementById('clients-list');
+  if (!clientsModalData.length) {
+    box.innerHTML = '<div style="color:#484f58;font-size:11px;padding:6px">No clients yet — add one below.</div>';
+    return;
+  }
+  box.innerHTML = clientsModalData.map((c, i) => {
+    const cat = c.category || '';
+    const label = CLIENT_CATEGORY_LABELS[cat] || cat;
+    const tag = cat ? ` <span style="color:#8b949e">(${escHtml(cat)} — ${escHtml(label)})</span>` : '';
+    return `<div style="display:flex;align-items:center;gap:8px;padding:3px 4px">
+      <span style="font-family:monospace;min-width:34px">${escHtml(c.nr)}</span>
+      <span style="flex:1;font-size:11px">${tag}</span>
+      <button class="btn" style="padding:1px 8px;color:#f85149" onclick="deleteClientRow(${i})" title="Remove client">&#10006;</button>
+    </div>`;
+  }).join('');
+}
+
+function addClientRow() {
+  const nrEl = document.getElementById('clients-add-nr');
+  const nr = (nrEl.value || '').trim().padStart(3, '0');
+  if (!/^\d{3}$/.test(nr)) {
+    alert('Client number must be one to three digits, e.g. 100.');
+    return;
+  }
+  if (clientsModalData.some(c => c.nr === nr)) {
+    alert('Client ' + nr + ' is already in the list.');
+    return;
+  }
+  const category = document.getElementById('clients-add-category').value;
+  clientsModalData.push({ nr: nr, category: category });
+  nrEl.value = '';
+  document.getElementById('clients-add-category').selectedIndex = 0;
+  renderClientsList();
+  nrEl.focus();
+}
+
+function deleteClientRow(i) {
+  clientsModalData.splice(i, 1);
+  renderClientsList();
+}
+
+async function saveClients() {
+  const r = await api('POST', `node/${selectedNodeSid}/set_clients`,
+                      { clients: clientsModalData });
+  if (r && r.error) { alert('Set clients failed: ' + r.error); return; }
+  closeModal('clients-modal');
   startPolling();
 }
 
