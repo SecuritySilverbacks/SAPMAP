@@ -658,7 +658,16 @@ def _map_step(step: dict) -> tuple:
         #   dry_run:              bool (default True)
         #   accept_lockout_risk:  bool (default False — must be True
         #                               AND dry_run=False for live)
-        #   single_sid:           str  (default "" = whole landscape)
+        #   sids:                 list[str] OR comma-string  (issue
+        #                         #107: new multi-SID scope — e.g.
+        #                         ``sids: [S4H, NPL]`` or
+        #                         ``sids: "S4H,NPL"``.  Blank/missing =
+        #                         whole landscape.  Takes precedence
+        #                         over single_sid when both are set.)
+        #   single_sid:           str  (default "" = whole landscape;
+        #                         legacy wire-field kept for back-compat
+        #                         with pre-#107 playbooks — new YAML
+        #                         should prefer `sids`.)
         #   include_production:   bool (default False)
         #   accept_production_risk: bool (default False — required
         #                                 for include_production=True)
@@ -666,11 +675,24 @@ def _map_step(step: dict) -> tuple:
         #   purple_mode:          bool (default False — adds USR02
         #                               baseline + readback + writes
         #                               purple_report.{md,html} loot)
+        # Build the scope wire-fields.  Prefer `sids` if the step
+        # provides it; fall back to `single_sid` for pre-#107 YAML.
+        # Backend's _parse_spray_scope accepts either and normalises
+        # (strip + upper + dedup + membership check), so we don't do
+        # any of that work here — thin forwarder is deliberately
+        # tolerant.
+        _step_sids = step.get("sids")
+        _step_single = (step.get("single_sid") or "").strip()
+        _body_scope = {}
+        if _step_sids is not None:
+            _body_scope["sids"] = _step_sids
+        elif _step_single:
+            _body_scope["single_sid"] = _step_single
         return ("POST", "/api/actions/password_spray", {
             "dry_run": bool(step.get("dry_run", True)),
             "accept_lockout_risk": bool(
                 step.get("accept_lockout_risk", False)),
-            "single_sid": (step.get("single_sid") or "").strip(),
+            **_body_scope,
             "include_production": bool(
                 step.get("include_production", False)),
             "accept_production_risk": bool(

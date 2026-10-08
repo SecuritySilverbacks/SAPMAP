@@ -3149,10 +3149,10 @@ body {
         Whole landscape
       </label>
       <label style="font-size:12px">
-        <input type="radio" name="pws-scope" value="single">
-        Single SID
+        <input type="radio" name="pws-scope" value="list">
+        SID list
       </label>
-      <input type="text" id="pws-scope-sid" placeholder="SID" style="margin-left:6px;width:80px;background:#0d1117;color:#c9d1d9;border:1px solid #30363d;border-radius:3px;padding:2px 4px;font-size:12px">
+      <input type="text" id="pws-scope-sids" placeholder="SID or SID,SID,SID (blank = whole landscape)" title="Comma-separated SIDs. Whitespace and case are normalised. Blank = whole landscape. All SIDs must already be discovered — unknown SIDs are rejected. All listed SIDs share one lockout budget; split into separate runs for per-SID budgets." style="margin-left:6px;width:260px;background:#0d1117;color:#c9d1d9;border:1px solid #30363d;border-radius:3px;padding:2px 4px;font-size:12px">
     </div>
 
     <div style="margin-bottom:10px;display:flex;align-items:center;gap:10px">
@@ -18852,16 +18852,24 @@ let _pwsprayPollTimer = null;
 let _pwsprayLastRenderedRun = null;
 
 function showPwsprayModal(opts) {
-  // Reset modal state.  Optional `opts.single_sid` pre-seeds the
-  // single-system scope so the per-node ctx-menu entry (which knows
-  // the sid the operator right-clicked on) can open the modal pre-
-  // scoped — rather than firing a bare dry-run POST behind a
-  // confirm (operator feedback 2026-10-05).
+  // Reset modal state.  Optional seeds:
+  //   opts.single_sid (string, legacy)  — pre-seeds textbox with one SID
+  //   opts.sids       (array, since #107) — pre-seeds textbox with
+  //                                          comma-joined SIDs
+  // Either triggers the 'list' radio.  Per-node ctx-menu passes
+  // {single_sid: sid} so the operator who right-clicked lands on a
+  // modal pre-scoped to that node (operator feedback 2026-10-05).
   opts = opts || {};
-  const seedSid = (opts.single_sid || '').trim();
-  const scopeVal = seedSid ? 'single' : 'landscape';
+  let seedSids = [];
+  if (Array.isArray(opts.sids)) {
+    seedSids = opts.sids.map(s => (s || '').trim()).filter(Boolean);
+  } else if (opts.single_sid) {
+    const s = (opts.single_sid || '').trim();
+    if (s) seedSids = [s];
+  }
+  const scopeVal = seedSids.length ? 'list' : 'landscape';
   document.querySelector('input[name="pws-scope"][value="' + scopeVal + '"]').checked = true;
-  document.getElementById('pws-scope-sid').value = seedSid;
+  document.getElementById('pws-scope-sids').value = seedSids.join(',');
   document.getElementById('pws-cap').value = 1;
   document.getElementById('pws-cap-val').textContent = '1';
   document.getElementById('pws-dry-run').checked = true;
@@ -18880,13 +18888,30 @@ function showPwsprayModal(opts) {
 
 function _pwsprayCollectConfig() {
   const scope = document.querySelector('input[name="pws-scope"]:checked').value;
-  const singleSid = (document.getElementById('pws-scope-sid').value || '').trim();
-  if (scope === 'single' && !singleSid) {
-    alert('Pick a SID for single-scope spray.');
-    return null;
+  const raw = (document.getElementById('pws-scope-sids').value || '').trim();
+  // Parse comma-separated SID list (issue #107).  Backend validates
+  // against discovered nodes and 400s on unknown SIDs with a specific
+  // error — we don't duplicate the membership check here, just the
+  // basic shape (strip, upper, dedup, drop empties).  Operator who
+  // leaves the textbox blank on the 'list' radio gets a client-side
+  // alert matching the pre-#107 "Pick a SID for single-scope spray."
+  // guard rail.
+  let sids = [];
+  if (scope === 'list') {
+    const seen = {};
+    for (const tok of raw.split(',')) {
+      const s = (tok || '').trim().toUpperCase();
+      if (!s || seen[s]) continue;
+      seen[s] = true;
+      sids.push(s);
+    }
+    if (!sids.length) {
+      alert('Enter at least one SID, or switch scope to Whole landscape.');
+      return null;
+    }
   }
   return {
-    single_sid: scope === 'single' ? singleSid : '',
+    sids: sids,
     include_production: document.getElementById('pws-include-prod').checked,
     accept_production_risk:
       document.getElementById('pws-accept-prod-risk').checked,
@@ -18921,7 +18946,7 @@ async function pwsprayPreview() {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({
-      single_sid: cfg.single_sid,
+      sids: cfg.sids,
       include_production: cfg.include_production,
       cap_per_user: cfg.cap_per_user,
     }),
@@ -18929,7 +18954,11 @@ async function pwsprayPreview() {
   const d = await r.json();
   const dst = document.getElementById('pws-preview-result');
   if (!d || d.error) {
-    const err = (d && d.error) || 'unknown error';
+    // Prefer the human-friendly `message` from issue #107's helper
+    // (e.g. "Unknown SID(s): XYZ") over the bare error code — the
+    // operator shouldn't have to decode `unknown_sid` to know what
+    // happened.  Fall back to the error code if no message present.
+    const err = (d && (d.message || d.error)) || 'unknown error';
     dst.innerHTML = '<div style="color:#f85149;font-size:12px">Preview failed: '
       + _escapeHtml(String(err)) + '</div>';
     return;
@@ -18993,7 +19022,10 @@ async function pwsprayLaunch() {
     return;
   }
   if (!cfg.dry_run) {
-    const scope = cfg.single_sid ? 'single:' + cfg.single_sid : 'landscape';
+    let scope;
+    if (!cfg.sids || !cfg.sids.length) scope = 'landscape';
+    else if (cfg.sids.length === 1) scope = 'single:' + cfg.sids[0];
+    else scope = 'multi:' + cfg.sids.join(',');
     if (!confirm('LIVE PASSWORD SPRAY against ' + scope + '.\n\n'
                  + 'Cap per user: ' + cfg.cap_per_user + '\n'
                  + 'This hits USR02 bad-logon counter and MAY LOCK ACCOUNTS.\n\n'
@@ -19008,7 +19040,7 @@ async function pwsprayLaunch() {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({
-      single_sid: cfg.single_sid,
+      sids: cfg.sids,
       include_production: cfg.include_production,
       accept_production_risk: cfg.accept_production_risk,
       cap_per_user: cfg.cap_per_user,
@@ -19315,7 +19347,16 @@ function _renderDefenderView(run) {
 function _renderHitMatrix(run) {
   const hits = (run.hits || []);
   const scope = (run.config_snapshot && run.config_snapshot.scope_filter) || {};
-  const scopeLabel = scope.single_sid ? ('single:' + scope.single_sid) : 'landscape';
+  // Issue #107: scope_filter may carry single_sid (legacy / len==1) OR
+  // sids:[...] (multi-SID).  Render each in the same shape SprayRun.scope
+  // uses so hit-matrix header, history drawer, and engagement report
+  // stay consistent.
+  let scopeLabel = 'landscape';
+  if (scope.single_sid) {
+    scopeLabel = 'single:' + scope.single_sid;
+  } else if (Array.isArray(scope.sids) && scope.sids.length) {
+    scopeLabel = 'multi:' + scope.sids.join(',');
+  }
   const header =
     '<div style="font-size:12px;color:#8b949e;margin-bottom:8px">'
     + '<strong>Run:</strong> <code>' + _escapeHtml(run.run_id || '?') + '</code>'

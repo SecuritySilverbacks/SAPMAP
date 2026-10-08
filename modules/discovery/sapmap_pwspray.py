@@ -500,18 +500,24 @@ def build_target_matrix(state, scope_filter: Optional[dict] = None) -> dict:
                "ineligible": [(SAPNode, reason_str), ...]}``.
     """
     scope_filter = scope_filter or {}
-    sids: Optional[set] = None
+    # Keep as a LIST (not a set) so operator-specified SID order is
+    # preserved end-to-end for predictable progress-panel + report
+    # output.  Issue #107 planning surfaced the set()-conversion
+    # order-loss bug that was invisible as long as only single_sid was
+    # exercised.  Membership test is O(k) for k = len(sids); fine for
+    # typical N <= ~20 SIDs an operator would spray in one run.
+    sids: Optional[List[str]] = None
     if scope_filter.get("single_sid"):
-        sids = {scope_filter["single_sid"]}
+        sids = [scope_filter["single_sid"]]
     elif scope_filter.get("sids"):
-        sids = set(scope_filter["sids"])
+        sids = list(scope_filter["sids"])
 
     include_prod = bool(scope_filter.get("include_production", False))
 
     eligible: List[SprayTarget] = []
     ineligible: List[Tuple[object, str]] = []
     for sid, node in (state.nodes or {}).items():
-        if sids and sid not in sids:
+        if sids is not None and sid not in sids:
             continue
         # ABAP-only
         stype = (getattr(node, "system_type", "") or "").upper()
@@ -936,6 +942,12 @@ def spray_landscape(
     scope_label = "landscape"
     if scope_filter and scope_filter.get("single_sid"):
         scope_label = f"single:{scope_filter['single_sid']}"
+    elif scope_filter and scope_filter.get("sids"):
+        # Multi-SID run (issue #107).  Preserve operator-specified
+        # order in the label — the engine already preserves it in the
+        # target iteration via the list-not-set fix above.
+        _sids_render = list(scope_filter["sids"])
+        scope_label = "multi:" + ",".join(_sids_render)
     _reset_status(
         run_id=config.run_id,
         scope=scope_label,
