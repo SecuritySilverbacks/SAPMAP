@@ -1499,6 +1499,41 @@ def get_sdk_version(sdk_path=None):
     return major.value, minor.value, patch.value, version_str
 
 
+# Memoised result of the last is_sdk_loadable probe, keyed by sdk_path.
+# Keeps repeated probes cheap on BOTH success and failure — the SDK
+# loader at _SDKLibrary.get() already memoises success internally via
+# _instance, but a FAILED load throws RFCError every time and would
+# otherwise be re-attempted on every _get_rfc_backend() call.
+_SDK_LOADABLE_CACHE: dict = {}
+
+
+def is_sdk_loadable(sdk_path: str = "") -> bool:
+    """Probe whether the SAP NW RFC SDK can actually be loaded, WITHOUT
+    opening a connection to any SAP system.
+
+    The adapter module itself imports fine without the SDK present (its
+    ctypes.CDLL call is deferred until first use), so a bare
+    ``import sap_rfc_ctypes`` is NOT a sufficient test for "C SDK is
+    usable here".  Callers that need to decide between the C SDK and
+    the pure-Python saprfclib fallback (sapmap_rfc._get_rfc_backend()
+    is the one in-tree today) must call THIS function to actually
+    attempt the dlopen.
+
+    Returns True if _SDKLibrary.get() succeeds, False on any exception
+    (RFCError from the library-not-found path, OSError from a corrupt
+    .so, etc).  Memoised per sdk_path to keep repeat calls cheap.
+    """
+    key = sdk_path or ""
+    if key in _SDK_LOADABLE_CACHE:
+        return _SDK_LOADABLE_CACHE[key]
+    try:
+        _SDKLibrary.get(sdk_path or None)
+        _SDK_LOADABLE_CACHE[key] = True
+    except Exception:
+        _SDK_LOADABLE_CACHE[key] = False
+    return _SDK_LOADABLE_CACHE[key]
+
+
 # ============================================================================
 # Usage Examples (when run directly)
 # ============================================================================
