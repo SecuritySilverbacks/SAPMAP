@@ -1460,11 +1460,12 @@ body {
   <div class="ctx-item" data-action="map_add_system">&#10133; Add System Manually</div>
   <div class="ctx-sep"></div>
   <div class="ctx-item write-op" data-action="map_autopwn" style="color:#f85149;font-weight:bold">&#9889; AutoPwn</div>
-  <div class="ctx-item write-op" data-action="map_password_spray" style="color:#ffa657" title="Spray harvested credentials across every ABAP system on the landscape (issue #69).  WARNING: hits USR02 bad-logon counter — may lock accounts.">&#128299; Spray Harvested Credentials&hellip;</div>
+  <div class="ctx-item" data-action="map_scan_all_vulns" style="color:#f0883e;font-weight:bold">&#128270; Scan for All Vulnerabilities</div>
+  <div class="ctx-sep"></div>
+  <div class="ctx-item write-op" data-action="map_password_spray" title="Spray harvested credentials across every ABAP system on the landscape (issue #69).  WARNING: hits USR02 bad-logon counter — may lock accounts.">&#128299; Spray Harvested Credentials&hellip;</div>
   <div class="ctx-item write-op" data-action="map_propagate_all">&#128640; Auto-Propagate All</div>
   <div class="ctx-item write-op" data-action="map_cleanup_all">&#129529; Cleanup All Users</div>
-  <div class="ctx-item" data-action="map_scan_all_vulns" style="color:#f0883e">&#128270; Scan for All Vulnerabilities</div>
-  <div class="ctx-item" data-action="map_scan_all_logon_banners" style="color:#58a6ff" title="Issue #68 — scan every ABAP dispatcher's DIAG logon banner for secrets.  Pure read, no account touched.">&#128269; Scan All Logon Banners for Secrets&hellip;</div>
+  <div class="ctx-item" data-action="map_scan_all_logon_banners" title="Issue #68 — scan every ABAP dispatcher's DIAG logon banner for secrets.  Pure read, no account touched.">&#128269; Scan All Logon Banners for Secrets&hellip;</div>
   <div class="ctx-item" id="map-ctx-check-all-gw" data-action="map_check_all_gw">&#128272; Check All GW Vulnerabilities</div>
   <div class="ctx-item" id="map-ctx-check-all-betrusted" data-action="map_check_all_betrusted">&#128272; Check All 10KBlaze (MS Betrusted)</div>
   <div class="ctx-item" id="map-ctx-check-all-cve-31324" data-action="map_check_all_cve_31324">&#128272; Check All CVE-2025-31324 (Java VisualComposer)</div>
