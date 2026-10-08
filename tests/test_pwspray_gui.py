@@ -251,17 +251,26 @@ def test_results_modal_tab_bodies_are_text_selectable():
 
 
 def test_show_pwspray_modal_accepts_single_sid_seed():
-    """showPwsprayModal takes an optional {single_sid} that pre-
-    selects the 'single'-scope radio and fills #pws-scope-sid.  The
-    top-nav Actions entry calls showPwsprayModal() with no args
-    (seedSid=='' → landscape scope); the per-node ctx entry calls
-    it with {single_sid: sid}."""
+    """showPwsprayModal takes an optional {single_sid} (legacy, from
+    per-node ctx-menu) OR {sids:[...]} (post-#107 multi-SID).  Either
+    pre-selects the 'list'-scope radio and fills #pws-scope-sids with
+    comma-joined SIDs.  The top-nav Actions entry calls
+    showPwsprayModal() with no args → landscape scope.  The per-node
+    ctx entry still calls it with {single_sid: sid} unchanged — back-
+    compat shim is in showPwsprayModal itself (normalises single_sid
+    into a one-element seedSids array)."""
     src = _html_src()
     assert "function showPwsprayModal(opts)" in src
+    # Both seed shapes supported — back-compat (single_sid) + #107 (sids).
     assert "opts.single_sid" in src
-    # The scope radio is seeded via a computed value, not hard-coded
-    # to 'landscape' any more.
-    assert "const scopeVal = seedSid ? 'single' : 'landscape';" in src
+    assert "opts.sids" in src
+    # The scope radio is seeded via a computed value based on whether
+    # ANY seed SIDs resolved — 'list' when seedSids has entries,
+    # 'landscape' when empty.
+    assert "scopeVal = seedSids.length ? 'list' : 'landscape';" in src
+    # Pre-#107 the per-node ctx-menu passes {single_sid: sid}; that
+    # call site stays unchanged and is handled by the back-compat shim.
+    assert "showPwsprayModal({ single_sid: sid });" in src
 
 
 # ---------------------------------------------------------------------------

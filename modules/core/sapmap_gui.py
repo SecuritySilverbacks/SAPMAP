@@ -1029,6 +1029,107 @@ def parse_pwspray_wordlist(raw_text: str,
     return merged, summary
 
 
+def _parse_spray_scope(body: dict, known_sids):
+    """Parse the pwspray scope from a request body (issue #107).
+
+    Shared by POST /api/actions/password_spray and
+    POST /api/actions/password_spray/preview so the two routes cannot
+    drift on scope semantics.
+
+    Accepts (in precedence order):
+      - ``sids``: list[str] OR comma-separated string (new wire-field
+        from #107 — operator-chosen targets, multi-SID capable)
+      - ``single_sid``: str  (legacy; one-SID back-compat; still honoured
+        when `sids` is absent so pre-#107 clients and existing tests
+        keep working)
+
+    When BOTH are present, ``sids`` wins — operator who explicitly
+    passed the newer field shouldn't be silently overridden by a
+    leftover single_sid.
+
+    Normalisation: strip per-token, uppercase (SAP convention), dedup
+    case-insensitively while preserving operator-specified order, drop
+    empty tokens.  Empty-after-strip (``","`` / ``""`` / ``[]``) is NOT
+    an error — it means "landscape" (matches the operator intent of a
+    blank textbox).
+
+    Validation: every normalised SID must be a key in ``known_sids``
+    (the caller typically passes ``set(state.nodes or {})``).  Unknown
+    SIDs produce a 400-shaped error naming the specific unknown ones.
+
+    Returns ``(sids_list, scope_label, error_or_None)``:
+      - ``sids_list == []``   => landscape, ``scope_label == "landscape"``
+      - ``len == 1``          => ``scope_label == "single:<SID>"``
+      - ``len > 1``           => ``scope_label == "multi:<SID>,<SID>,..."``
+      - on error: ``(None, None, {"code": "bad_sids"|"unknown_sid",
+                                   "message": str, ["unknown": [...]]})``.
+
+    Downstream caller shape — convert the returned list into the
+    ``scope_filter`` dict the engine's ``build_target_matrix`` expects:
+      len == 0  => ``scope_filter == {}``                (landscape)
+      len == 1  => ``scope_filter == {"single_sid": SID}`` (SprayRun
+                   snapshot stays diff-clean against pre-#107 history)
+      len >  1  => ``scope_filter == {"sids": [SID, SID, ...]}``
+    """
+    raw_sids = body.get("sids", None)
+    raw_single = body.get("single_sid", None)
+
+    # Collect raw tokens, with type-shape validation.
+    tokens = []
+    if raw_sids is not None:
+        if isinstance(raw_sids, str):
+            tokens = raw_sids.split(",")
+        elif isinstance(raw_sids, list):
+            tokens = raw_sids
+        else:
+            return None, None, {
+                "code": "bad_sids",
+                "message": "sids must be a list or comma-separated string",
+            }
+    elif raw_single is not None:
+        if not isinstance(raw_single, str):
+            return None, None, {
+                "code": "bad_sids",
+                "message": "single_sid must be a string",
+            }
+        tokens = [raw_single]
+
+    # Normalise: strip + upper + dedup preserving order + drop empties.
+    normalised = []
+    seen = set()
+    for t in tokens:
+        if not isinstance(t, str):
+            return None, None, {
+                "code": "bad_sids",
+                "message": "SID entries must be strings",
+            }
+        s = t.strip().upper()
+        if not s:
+            continue
+        if s in seen:
+            continue
+        seen.add(s)
+        normalised.append(s)
+
+    if not normalised:
+        return [], "landscape", None
+
+    # Membership check — reject typos / stale SIDs loudly instead of
+    # the pre-#107 silent-no-op footgun.  Preserves operator-specified
+    # order in the `unknown` list for easier correlation.
+    unknown = [s for s in normalised if s not in known_sids]
+    if unknown:
+        return None, None, {
+            "code": "unknown_sid",
+            "message": f"Unknown SID(s): {', '.join(unknown)}",
+            "unknown": unknown,
+        }
+
+    if len(normalised) == 1:
+        return normalised, f"single:{normalised[0]}", None
+    return normalised, "multi:" + ",".join(normalised), None
+
+
 def _set_wd_port_protocol(node, wd_port: int, https: bool) -> None:
     """Flip a WD port's service label between ``wd_http`` and ``wd_https``.
 
@@ -18290,7 +18391,18 @@ def create_app(api: SAPMAPApi) -> Bottle:
         and the skipped-reasons list.  Never echoes passwords."""
         response.content_type = "application/json"
         body = request.json or {}
-        single_sid = (body.get("single_sid") or "").strip() or None
+
+        # Parse scope via the shared helper so this route and
+        # /api/actions/password_spray can't drift (issue #107).
+        known_sids = set((api.state.nodes or {}).keys())
+        sids_list, scope_label, scope_err = _parse_spray_scope(
+            body, known_sids)
+        if scope_err is not None:
+            response.status = 400
+            return json.dumps({"error": scope_err["code"],
+                                "message": scope_err["message"],
+                                **({"unknown": scope_err["unknown"]}
+                                   if "unknown" in scope_err else {})})
         include_production = bool(body.get("include_production", False))
 
         try:
@@ -18307,9 +18419,15 @@ def create_app(api: SAPMAPApi) -> Bottle:
 
         wordlist = list(api.pwspray_wordlist or [])
         pool = landscape_password_pool(api.state, manual_wordlist=wordlist)
+        # Build engine-side scope_filter: preserve the legacy
+        # 'single_sid' key for len==1 so SprayRun.config_snapshot stays
+        # diff-clean against pre-#107 history (new key 'sids' only when
+        # multi).  Empty list == landscape == no filter.
         scope_filter = {}
-        if single_sid:
-            scope_filter["single_sid"] = single_sid
+        if len(sids_list) == 1:
+            scope_filter["single_sid"] = sids_list[0]
+        elif len(sids_list) > 1:
+            scope_filter["sids"] = list(sids_list)
         if include_production:
             scope_filter["include_production"] = True
 
@@ -18361,8 +18479,7 @@ def create_app(api: SAPMAPApi) -> Bottle:
             "per_target": per_target,
             "skipped": skipped,
             "estimated_attempts_upper_bound": est_total,
-            "scope": "single:" + single_sid if single_sid
-                      else "landscape",
+            "scope": scope_label,
             "dry_run_preview": True,
         })
 
@@ -18409,7 +18526,18 @@ def create_app(api: SAPMAPApi) -> Bottle:
                 "message": str(e),
             })
 
-        single_sid = (body.get("single_sid") or "").strip() or None
+        # Shared helper — identical semantics to the /preview route
+        # (issue #107).  Rejects unknown SIDs with 400 before we spin
+        # up a background thread that would have returned no targets.
+        known_sids = set((api.state.nodes or {}).keys())
+        sids_list, scope_label, scope_err = _parse_spray_scope(
+            body, known_sids)
+        if scope_err is not None:
+            response.status = 400
+            return json.dumps({"error": scope_err["code"],
+                                "message": scope_err["message"],
+                                **({"unknown": scope_err["unknown"]}
+                                   if "unknown" in scope_err else {})})
         try:
             cap_per_user = max(1, min(2, int(body.get("cap_per_user", 1))))
         except (TypeError, ValueError):
@@ -18469,8 +18597,7 @@ def create_app(api: SAPMAPApi) -> Bottle:
         task_label = (
             f"Password spray "
             f"({'DRY-RUN' if dry_run else 'LIVE'}, "
-            f"cap={cap_per_user}, "
-            f"{'single:' + single_sid if single_sid else 'landscape'})")
+            f"cap={cap_per_user}, {scope_label})")
 
         # Seed the status singleton SYNCHRONOUSLY — before _bg hands
         # off to the daemon thread — so the first GET /status (fired
@@ -18479,7 +18606,7 @@ def create_app(api: SAPMAPApi) -> Bottle:
         try:
             import sapmap_pwspray as _pws
             _pws._reset_status(
-                scope=("single:" + single_sid) if single_sid else "landscape",
+                scope=scope_label,
                 dry_run=dry_run,
                 cap_per_user=cap_per_user,
             )
@@ -18506,9 +18633,15 @@ def create_app(api: SAPMAPApi) -> Bottle:
                 purple_mode=purple_mode,
                 manual_wordlist=[(u, p) for (u, p) in operator_wordlist],
             )
+            # Build engine-side scope_filter: preserve the legacy
+            # 'single_sid' key for len==1 so SprayRun.config_snapshot
+            # stays diff-clean against pre-#107 history (new key
+            # 'sids' only when multi).  Empty list == landscape.
             scope_filter = {}
-            if single_sid:
-                scope_filter["single_sid"] = single_sid
+            if len(sids_list) == 1:
+                scope_filter["single_sid"] = sids_list[0]
+            elif len(sids_list) > 1:
+                scope_filter["sids"] = list(sids_list)
             if include_production:
                 scope_filter["include_production"] = True
 
@@ -18576,8 +18709,7 @@ def create_app(api: SAPMAPApi) -> Bottle:
         effective_purple = bool(purple_mode) and not dry_run
         return json.dumps({
             "status": "started",
-            "scope": "single:" + single_sid if single_sid
-                      else "landscape",
+            "scope": scope_label,
             "dry_run": dry_run,
             "cap_per_user": cap_per_user,
             "accept_lockout_risk": accept_risk,
