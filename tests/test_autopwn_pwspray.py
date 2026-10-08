@@ -305,15 +305,21 @@ def test_reset_history_wipes_four_fields_in_source():
 def test_script_step_password_spray_action():
     """sapmap_script._map_step must recognise 'password_spray' and
     emit a POST to /api/actions/password_spray with the full set
-    of knobs the backend's strict-bool parser accepts."""
+    of knobs the backend's strict-bool parser accepts.
+
+    Scope wire-fields (post-#107): the step reads EITHER `sids`
+    (new, multi-SID) OR `single_sid` (legacy) from the YAML, and
+    forwards whichever is set as the matching HTTP body key.  Both
+    source references must stay present so new YAML can use `sids`
+    and pre-#107 YAML keeps working."""
     src = (REPO_ROOT / "modules" / "automation" /
            "sapmap_script.py").read_text(encoding="utf-8")
     assert 'if action == "password_spray":' in src
     assert '"/api/actions/password_spray"' in src
+    # Non-scope fields — stay as literal keys in the payload dict.
     for field in (
         '"dry_run":',
         '"accept_lockout_risk":',
-        '"single_sid":',
         '"include_production":',
         '"accept_production_risk":',
         '"cap_per_user":',
@@ -321,6 +327,16 @@ def test_script_step_password_spray_action():
     ):
         assert field in src, (
             f"script-step payload missing field: {field}")
+    # Scope wire-fields (#107): both are read from the YAML step so
+    # new multi-SID playbooks and legacy single-SID playbooks both work.
+    assert 'step.get("sids")' in src, (
+        "script-step must read `sids` from YAML (post-#107 multi-SID)")
+    assert 'step.get("single_sid")' in src, (
+        "script-step must still read `single_sid` from YAML (legacy "
+        "wire-field, back-compat with pre-#107 playbooks)")
+    # Both are forwarded as HTTP body keys when set.
+    assert '"sids"' in src
+    assert '"single_sid"' in src
 
 
 def test_script_action_label_registered():
@@ -347,7 +363,12 @@ def test_demo_pwspray_yaml_exists_and_is_dry_run_default():
 # ---------------------------------------------------------------------------
 
 def test_mcp_pwspray_sweep_tool_exposed():
-    """MCP server exposes pwspray_sweep with the full knob set."""
+    """MCP server exposes pwspray_sweep with the full knob set.
+
+    Post-#107 adds a `sids: str = ""` kwarg (comma-separated SIDs
+    for multi-SID runs — flat type for LLM agents) alongside the
+    legacy `single_sid` kwarg which stays for back-compat with
+    pre-#107 LLM-generated tool calls."""
     src = (REPO_ROOT / "modules" / "mcp" /
            "sapmap_mcp_server.py").read_text(encoding="utf-8")
     assert "def pwspray_sweep(dry_run: bool = True," in src
@@ -359,6 +380,10 @@ def test_mcp_pwspray_sweep_tool_exposed():
         assert kw in src
     # Default safe = dry_run True (model can't accidentally go live).
     assert "def pwspray_sweep(dry_run: bool = True" in src
+    # Issue #107 — new multi-SID kwarg
+    assert "sids: str = \"\"" in src, (
+        "pwspray_sweep MCP tool must expose `sids: str = \"\"` kwarg "
+        "for multi-SID runs (issue #107)")
 
 
 def test_mcp_pwspray_status_and_runs_tools_exposed():

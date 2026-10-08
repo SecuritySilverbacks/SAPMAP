@@ -780,6 +780,7 @@ def pwspray_sweep(dry_run: bool = True,
                    cap_per_user: int = 1,
                    purple_mode: bool = False,
                    single_sid: str = "",
+                   sids: str = "",
                    accept_lockout_risk: bool = False,
                    include_production: bool = False,
                    accept_production_risk: bool = False) -> str:
@@ -815,7 +816,16 @@ def pwspray_sweep(dry_run: bool = True,
         purple_mode: Capture USR02 baseline + readback + emit the
                       blue-team purple_report deliverable.
         single_sid: Empty = whole landscape; a SID = scope to one
-                     system.
+                     system.  LEGACY wire-field; prefer ``sids`` for
+                     new tool calls.  Kept for back-compat with pre-
+                     #107 LLM-generated calls.
+        sids: Comma-separated SIDs (issue #107) — e.g. "S4H,NPL,A4H".
+               Blank = whole landscape.  Case + whitespace normalised
+               server-side.  Unknown SIDs rejected with HTTP 400
+               ``unknown_sid``.  Takes precedence over ``single_sid``
+               when both are set.  Pass as a comma-string (not a
+               list) because the MCP tool protocol prefers flat
+               argument types for LLM agents.
         accept_lockout_risk: REQUIRED alongside dry_run=False.
         include_production: Include is_production=True nodes.
                              REQUIRES accept_production_risk=True.
@@ -823,11 +833,21 @@ def pwspray_sweep(dry_run: bool = True,
     """
     if (ro := _read_only_guard()):
         return ro
+    # Build the scope wire-fields.  Prefer `sids` if the caller
+    # provided it (newer, multi-SID capable); fall back to legacy
+    # `single_sid` otherwise.  Backend _parse_spray_scope normalises
+    # (strip + upper + dedup + membership check); we send the raw
+    # values through unmodified.
+    _body_scope = {}
+    if sids:
+        _body_scope["sids"] = sids
+    elif single_sid:
+        _body_scope["single_sid"] = single_sid
     resp = _api("POST", "/api/actions/password_spray", {
         "dry_run": dry_run,
         "cap_per_user": cap_per_user,
         "purple_mode": purple_mode,
-        "single_sid": single_sid,
+        **_body_scope,
         "accept_lockout_risk": accept_lockout_risk,
         "include_production": include_production,
         "accept_production_risk": accept_production_risk,

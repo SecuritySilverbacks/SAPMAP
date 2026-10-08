@@ -92,14 +92,25 @@ class TestDeriveAppserverName:
         name = _derive_appserver_name("MSG_SERVER", 0,
                                        attacker_ip="192.168.2.210",
                                        target_sid="S4H")
-        assert name.startswith("192.168.2.210_S4H_00_")
+        # Dash-form IP (post-2026-10-08 fix for S4H kernel 793 dot-split bug)
+        assert name.startswith("192-168-2-210_S4H_00_")
         assert "_S4H_00_" in name
 
-    def test_ip_dots_preserved(self):
+    def test_ip_uses_dashes_not_dots(self):
+        """Pin: hostname portion MUST NOT contain dots.  The MS kernel parses
+        any FQDN we send on the first dot it finds, splitting a dotted-IP host
+        like "10.0.1.2_S4H_00_abcd" into host="10", domain="0.1.2_S4H_00_abcd"
+        which then classifies as external on the GW side (SMMS DIAG/RFC
+        listener displayed host=192 live on S4H kernel 793, 2026-10-07)."""
         name = _derive_appserver_name("MSG_SERVER", 0,
                                        attacker_ip="10.0.1.2",
                                        target_sid="S4H")
-        assert name.startswith("10.0.1.2_")
+        assert name.startswith("10-0-1-2_"), (
+            f"Expected dash-form IP in hostname, got: {name!r}.  "
+            f"A dotted-IP hostname gets split by the MS kernel on the first "
+            f"dot and the GW classifies the source as external.")
+        assert "." not in name.split("_")[0], (
+            f"Hostname portion {name.split('_')[0]!r} must contain no dots")
 
     def test_instance_zero_padded(self):
         name = _derive_appserver_name("MSG_SERVER", 3,
@@ -128,8 +139,9 @@ class TestDeriveAppserverName:
     def test_no_sid_uses_ip_plus_instance(self):
         name = _derive_appserver_name("MSG_SERVER", 5,
                                        attacker_ip="10.0.0.1")
-        # MSG_SERVER has no SID segment → fallback to hostname_NN_hash
-        assert "10.0.0.1_05_" in name
+        # MSG_SERVER has no SID segment → fallback to hostname_NN_hash.
+        # Dash-form IP (post-2026-10-08 fix).
+        assert "10-0-0-1_05_" in name
 
 
 # ---------------------------------------------------------------------------

@@ -52,8 +52,14 @@ steps:
   #   dry_run: false
   #   accept_lockout_risk: true
   #   cap_per_user: 1               # [1, 2] — clamped server-side
-  #   single_sid: ""                # "" = whole landscape; set a SID
-  #                                 # to scope to one system
+  #   # Scope — pick one of:
+  #   #   (blank, i.e. omit both)   whole landscape (all ABAP nodes)
+  #   #   single_sid: NPL           legacy single-SID (pre-#107)
+  #   #   sids: [S4H, NPL]          multi-SID list (issue #107)
+  #   #   sids: "S4H,NPL"           same, comma-string form
+  #   # 'sids' takes precedence over 'single_sid' when both set.
+  #   # Unknown SIDs are rejected with HTTP 400 unknown_sid.
+  #   sids: []                      # [] / omit = whole landscape
   #   include_production: false     # true requires accept_production_risk
   #   accept_production_risk: false
   #   purple_mode: true             # writes blue-team deliverable

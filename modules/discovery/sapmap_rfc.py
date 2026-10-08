@@ -120,14 +120,24 @@ def set_pure_rfc(enabled: bool):
     _use_pure_rfc = enabled
 
 
+_logged_auto_fallback = False
+
+
 def _get_rfc_backend():
     """Return the RFCConnection class from the active backend.
 
     Selection order:
     1. --pure-rfc flag → try sap_rfc_pure
-    2. Default → try sap_rfc_ctypes
-    3. Auto-fallback → if ctypes fails (no SDK), try sap_rfc_pure
+    2. Default → try sap_rfc_ctypes IF the C SDK library is actually
+       loadable (not just the Python module importable — importing
+       sap_rfc_ctypes alone always succeeds; the SDK dlopen is lazy
+       and used to raise at connection time instead of here, which
+       swallowed the auto-fallback branch below).
+    3. Auto-fallback → if the C SDK can't be loaded, try sap_rfc_pure
+       (saprfclib) — operator-visible one-line log on the first flip.
     """
+    global _logged_auto_fallback
+
     if _use_pure_rfc:
         try:
             from sap_rfc_pure import RFCConnection
@@ -135,15 +145,30 @@ def _get_rfc_backend():
         except ImportError:
             logger.warning("saprfclib not available, falling back to C SDK")
 
+    # Default path: try the C SDK, but probe actual loadability.
+    # The old code tested only module importability, which always
+    # succeeded regardless of whether libsapnwrfc.{dylib,so,dll}
+    # could be dlopened — so the auto-fallback branch below never
+    # fired and operators without the SDK hit RFCError('SDK library
+    # not found') at every connection attempt instead of silently
+    # switching to the pure-Python backend.  Fixed 2026-10-08.
     try:
-        from sap_rfc_ctypes import RFCConnection
-        return RFCConnection
+        from sap_rfc_ctypes import RFCConnection, is_sdk_loadable
+        if is_sdk_loadable(_sdk_path):
+            return RFCConnection
+        # Fall through to the saprfclib branch.
     except Exception:
         pass
 
     try:
         from sap_rfc_pure import RFCConnection
-        logger.info("C SDK unavailable, using pure-Python RFC backend")
+        if not _logged_auto_fallback:
+            logger.info(
+                "SAP NW RFC SDK not loadable — auto-falling back to the "
+                "pure-Python RFC backend (saprfclib).  To silence this "
+                "message, pass --pure-rfc on the SAPMAP command line, or "
+                "install the SDK and set SAPNWRFC_HOME (or pass --sdk).")
+            _logged_auto_fallback = True
         return RFCConnection
     except ImportError:
         raise ImportError(
