@@ -2847,6 +2847,275 @@ def parse_landscape_xml_into_state(state, xml_text,
             "skipped": skipped, "dupes": dupes}
 
 
+def landscape_post_import_discover(state, sid: str,
+                                     enrich_fn=None,
+                                     client_enum_fn=None) -> dict:
+    """Issue #109: for a single newly-imported landscape-XML node,
+    run RFC_SYSTEM_INFO (promotes placeholder SIDs — issue #114's gap
+    for pure app-server entries that don't carry systemid) and
+    enumerate clients via DIAG (fills the empty ``clients`` field so
+    the operator can actually log on).
+
+    Called sequentially from the ``/api/import_landscape_xml`` route's
+    background post-import sweep.  Lifted to module scope (vs. living
+    inside the route closure) so it's directly unit-testable with
+    mocked scanner functions — the pure-function convention
+    ``parse_landscape_xml_into_state`` already follows.
+
+    Args:
+        state: SAPMAPState instance (needs .get_node + .rename_node_sid).
+        sid: The SID key under which the node was added by the parser.
+        enrich_fn: Override for ``sapmap_scanner.enrich_system_info``.
+            Tests inject a mock; production leaves this None.
+        client_enum_fn: Override for
+            ``sapmap_scanner.enumerate_system_clients``.  Tests inject
+            a mock; production leaves this None.
+
+    Returns:
+        A dict shape ``{"status": "ok"|"skip", "reason"?: str,
+                         "new_sid"?: str, "clients_added"?: int,
+                         "enrich_source"?: str}`` for callers that want
+        a structured outcome (the GUI's _bg wrapper just logs).
+
+    Error handling: ``enrich_system_info`` and
+    ``enumerate_system_clients`` both swallow exceptions and return
+    partial/empty results — a single failed node doesn't break the
+    sweep.
+    """
+    if enrich_fn is None:
+        enrich_fn = sapmap_scanner.enrich_system_info
+    if client_enum_fn is None:
+        client_enum_fn = sapmap_scanner.enumerate_system_clients
+
+    node = state.get_node(sid)
+    if not node:
+        return {"status": "skip", "reason": "node_not_found"}
+    # Instance selection — prefer an instance with a REAL dispatcher
+    # (3200-3299) or gateway (3300-3399) port in its ports map,
+    # falling back to any instance with a parseable instance_nr.
+    #
+    # Why this matters: `<Service msid=…/>` entries get a sapms
+    # placeholder instance (port_label='sapms', inst_nr derived from
+    # the 3600-range port) built by the parser BEFORE
+    # _import_appserver_instances appends the real app-server
+    # instances (each with its own `ip` + a {32NN: 'dispatcher',
+    # 33NN: 'gateway'} ports map).  Picking the first-parseable
+    # instance would land on the sapms placeholder, derive wrong
+    # gw_port/disp_port from the MS instance_nr, and probe them on
+    # node.ip (the MS host — which may not run a dialog instance).
+    # The real-port preference rescues this case.
+    def _inst_has_real_port(inst):
+        if not isinstance(getattr(inst, "ports", None), dict):
+            return False
+        for p in inst.ports.keys():
+            try:
+                p = int(p)
+            except (TypeError, ValueError):
+                continue
+            if 3200 <= p <= 3299 or 3300 <= p <= 3399:
+                return True
+        return False
+    picked = None
+    for inst in node.instances:
+        if inst.instance_nr is None:
+            continue
+        try:
+            int(inst.instance_nr)
+        except (TypeError, ValueError):
+            continue
+        if _inst_has_real_port(inst):
+            picked = inst
+            break
+    if picked is None:
+        # Fallback: no instance carries a dispatcher/gateway port
+        # (e.g. a bare sapms placeholder on an MS-only node that
+        # fan-out couldn't resolve).  Take the first instance that
+        # at least has a parseable instance_nr.
+        for inst in node.instances:
+            if inst.instance_nr is None:
+                continue
+            try:
+                int(inst.instance_nr)
+            except (TypeError, ValueError):
+                continue
+            picked = inst
+            break
+    if picked is None:
+        print(f"[-] {sid}: Post-import scan: no usable instance_nr; "
+              f"skipping")
+        return {"status": "skip", "reason": "no_instance_nr"}
+    # Host preference: the picked instance's own ip (set by
+    # _import_appserver_instances for real app servers), falling back
+    # to the node's top-level ip/hostname.  Critical for MS-fan-out
+    # landscapes where the app servers are on different hosts than
+    # the MS.
+    host = (getattr(picked, "ip", "") or node.ip or node.hostname
+            or "")
+    if not host:
+        print(f"[-] {sid}: Post-import scan: node has no host/ip")
+        return {"status": "skip", "reason": "no_host"}
+    inst_nr = picked.instance_nr
+    nr = int(inst_nr)
+    gw_port = 3300 + nr
+    disp_port = 3200 + nr
+
+    result = {"status": "ok"}
+
+    # Step 1 — RFC_SYSTEM_INFO (promotes placeholder SID; fills
+    # hostname / os_type / db_type / kernel / sap_release).
+    try:
+        info = enrich_fn(
+            host, gw_port, timeout=10,
+            instance_nrs=[inst_nr],
+            sid_hint=node.sid,
+            saprouter=node.saprouter)
+    except Exception as e:
+        print(f"[-] {sid}: Post-import RFC_SYSTEM_INFO error: "
+              f"{type(e).__name__}: {e}")
+        info = {}
+
+    # Apply enriched fields.  Mirrors the per-node rfc_system_info
+    # route but tuned for XML-imported nodes: placeholder SIDs may be
+    # freely promoted; real SIDs are kept.
+    new_source = info.get("sysinfo_source", "")
+    for fld in ("hostname", "os_type", "db_type", "kernel",
+                 "sap_release"):
+        v = info.get(fld, "")
+        if v:
+            setattr(node, fld, v)
+    if new_source and not node.sysinfo_source:
+        node.sysinfo_source = new_source
+        result["enrich_source"] = new_source
+
+    # SID promotion for placeholder XML nodes.  Placeholder test is
+    # `discovered_via_xml` alone — the parser sets that flag only when
+    # a placeholder SID was synthesized (parser line ~2821:
+    # `discovered_via_xml=placeholder`), so it is already the single
+    # source of truth.
+    #
+    # Historical mistake caught by adversarial review 2026-10-09: an
+    # earlier version AND-ed in `bool(sapology_data['xml_sentinel_sid'])`,
+    # which false-negatived the common no-systemid case
+    # (`<Service server='host:port'/>` with no systemid attribute at
+    # all).  The parser writes `xml_sentinel_sid = svc_sid if
+    # placeholder else ""`, and when svc_sid is "" (the common
+    # SAPGUILandscape.xml form) the gate skipped SID promotion —
+    # defeating issue #114's residual-gap fix for the most common
+    # import shape.  Base on `discovered_via_xml` alone.
+    is_placeholder = bool(getattr(node, "discovered_via_xml", False))
+    new_sid = (info.get("sid") or "").strip().upper()
+    if is_placeholder and new_sid and new_sid != node.sid:
+        old_sid = node.sid
+        err = state.rename_node_sid(old_sid, new_sid)
+        if err:
+            # SID collision — real SID already on the map, likely
+            # from a prior scan or earlier import.  Leave the
+            # placeholder in place; the operator can resolve via Set
+            # SID.
+            print(f"[-] {old_sid}: Post-import SID promotion to "
+                  f"{new_sid} failed: {err}")
+        else:
+            print(f"[+] {old_sid}: Post-import promoted placeholder "
+                  f"SID to real SID {new_sid}")
+            result["new_sid"] = new_sid
+            sid = new_sid  # for downstream log tagging
+
+    # Step 2 — client enumeration via DIAG.  The primary issue #109
+    # ask: without this, the clients field stays empty and the
+    # operator can't do anything with the system (login, default-cred
+    # check, pwspray — all need a client).
+    try:
+        client_list = client_enum_fn(
+            host, disp_port, saprouter=node.saprouter,
+            sid_hint=node.sid)
+    except Exception as e:
+        print(f"[-] {sid}: Post-import client enumeration error: "
+              f"{type(e).__name__}: {e}")
+        client_list = []
+    if client_list:
+        # Preserve existing clients where possible: a prior scan may
+        # have populated category hints we shouldn't drop.
+        seen = {c.get("nr"): c for c in (node.clients or [])
+                if isinstance(c, dict) and c.get("nr")}
+        fresh = []
+        for nr in client_list:
+            if nr in seen:
+                fresh.append(seen[nr])
+            else:
+                fresh.append({"nr": nr, "category": ""})
+        node.clients = fresh
+        result["clients_added"] = len(client_list)
+        print(f"[+] {node.sid}: Post-import populated "
+              f"{len(client_list)} client(s): "
+              f"{', '.join(client_list)}")
+
+    return result
+
+
+def run_landscape_post_import_sweep(state, added_sids,
+                                      task_update_fn=None,
+                                      discover_fn=None):
+    """Issue #109: iterate the ``added`` SIDs returned by
+    ``parse_landscape_xml_into_state`` and run per-node discovery on
+    each (RFC_SYSTEM_INFO + client enumeration via
+    ``landscape_post_import_discover``).
+
+    Lifted to module scope (vs. living inside the route closure) so
+    it's directly unit-testable without a Bottle test client — the
+    class of API-drift bug that source-string tests cannot catch
+    (adversarial-review finding 2026-10-09: an earlier version called
+    the non-existent ``sapmap_stop.should_stop()``; the daemon thread
+    died silently with AttributeError on the FIRST iteration and the
+    entire feature was a no-op in production).
+
+    Args:
+        state: SAPMAPState.
+        added_sids: iterable of SIDs to process in order.
+        task_update_fn: callable(key, label) for GUI progress labels.
+            Default: no-op (tests inject a recorder; production
+            injects the module-level ``_task_update``).
+        discover_fn: callable(state, sid) that does the actual
+            per-node work.  Default: ``landscape_post_import_discover``.
+            Tests inject a recorder.
+
+    Returns the list of SIDs for which discovery was invoked (useful
+    for assertions in tests + for the GUI's completion message).
+    """
+    import sapmap_stop
+    if task_update_fn is None:
+        task_update_fn = lambda key, label: None  # noqa: E731
+    if discover_fn is None:
+        discover_fn = landscape_post_import_discover
+    sids = list(added_sids)
+    total = len(sids)
+    processed = []
+    if total == 0:
+        return processed
+    print(f"[*] Landscape post-import scan starting for {total} "
+          f"system(s): {', '.join(sids)}")
+    for i, s in enumerate(sids, 1):
+        if sapmap_stop.is_stop_requested():
+            print(f"[!] Landscape post-import scan cancelled after "
+                  f"{i-1}/{total}")
+            break
+        task_update_fn("landscape:post_import_scan",
+                        f"({i}/{total}) {s}: RFC_SYSTEM_INFO + "
+                        f"client enum")
+        try:
+            discover_fn(state, s)
+        except Exception as e:
+            # Defensive: a per-node discover crash must NOT abort the
+            # sweep for the remaining nodes.  landscape_post_import_
+            # discover already swallows enrich/client_enum exceptions
+            # internally, so hitting this branch means something
+            # structural went wrong — log + continue.
+            print(f"[-] {s}: Post-import discover crashed: "
+                  f"{type(e).__name__}: {e}")
+        processed.append(s)
+    print(f"[+] Landscape post-import scan complete")
+    return processed
+
+
 def _import_appserver_instances(node, ms_host: str, ms_port) -> int:
     """Fan out from a Message Server to its application servers and add
     dispatcher (32NN) + gateway (33NN) InstanceInfo pairs to ``node``.
@@ -19663,7 +19932,17 @@ def create_app(api: SAPMAPApi) -> Bottle:
     def api_import_landscape_xml():
         """Import SAP systems from a SAP UI Landscape / SAPGUILandscape
         XML — thin wrapper around parse_landscape_xml_into_state (which
-        does all the real work and is directly unit-testable)."""
+        does all the real work and is directly unit-testable).
+
+        Issue #109: unless the operator ticked "no scan for app
+        servers, only file import" (default: unticked → scan on), each
+        newly-added system is enriched in a background sweep that
+        runs RFC_SYSTEM_INFO + client enumeration.  Without this the
+        clients field stays empty after import and the operator can't
+        do anything with the systems.  The same flag also already
+        gates the message-server app-server fan-out inside the parser,
+        giving operators a single "silent import" toggle for
+        OPSEC-sensitive engagements."""
         no_scan_appservers = (request.query.get('no_scan') == '1')
         response.content_type = "application/json"
         raw = request.body.read()
@@ -19680,6 +19959,24 @@ def create_app(api: SAPMAPApi) -> Bottle:
         except ValueError as e:
             print(f"[-] Invalid XML: {e}")
             return json.dumps({"error": f"Invalid XML: {e}"})
+
+        # Issue #109: kick off per-node RFC_SYSTEM_INFO + client enum
+        # for every system that landed via `added`.  One single _bg
+        # task iterates them sequentially (via module-level
+        # run_landscape_post_import_sweep) so progress is visible via
+        # _task_update and STOP cancels cleanly between nodes.  The
+        # sweep logic lives at module scope — not here as a closure —
+        # so it's directly unit-testable without Bottle plumbing.
+        added_sids = list(summary.get("added", []))
+        if not no_scan_appservers and added_sids:
+            _bg("landscape:post_import_scan",
+                f"Post-import discovery: {len(added_sids)} system(s)",
+                lambda: run_landscape_post_import_sweep(
+                    api.state, added_sids,
+                    task_update_fn=_task_update))
+            summary["post_import_scan_started"] = True
+        else:
+            summary["post_import_scan_started"] = False
         return json.dumps(summary)
 
     # -- Business Impact Assessment --
