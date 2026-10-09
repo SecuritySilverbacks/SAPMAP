@@ -866,6 +866,91 @@ def test_liveness_probe_uses_scan_port_by_default():
         "already handles saprouter-tunnelled probes natively")
 
 
+def test_parser_defaults_system_type_abap_for_xml_imports():
+    """SAP Logon landscape XML describes SAPGUI (ABAP dialog)
+    connections — SAPGUI is the ABAP client, not Java.  Parser must
+    default system_type='ABAP' on every newly-imported node so
+    operators can immediately run ABAP-only tooling (default-cred
+    check, pwspray, user creation) before RFC_SYSTEM_INFO enrichment
+    completes.  Operator ask 2026-10-09: client enumeration was gated
+    on system_type being set, so unknown-type XML imports couldn't
+    enumerate clients.
+    """
+    state = SAPMAPState()
+    xml = """<?xml version='1.0' encoding='UTF-8'?>
+<Landscape version='1'>
+  <Services>
+    <Service name='Lab A' type='SAPGUI' uuid='a1'
+             server='10.0.0.1:3200'/>
+    <Service name='NPL' type='SAPGUI' uuid='b1'
+             systemid='NPL' server='10.0.0.2:3200'/>
+  </Services>
+</Landscape>"""
+    summary = parse_landscape_xml_into_state(state, xml,
+                                              no_scan_appservers=True)
+    for sid in summary["added"]:
+        node = state.get_node(sid)
+        assert node.system_type == "ABAP", (
+            f"XML-imported node {sid} must default system_type=ABAP "
+            f"(SAP Logon = SAPGUI = ABAP dialog); got "
+            f"{node.system_type!r}")
+
+
+def test_discover_overrides_abap_default_to_java_when_detected():
+    """When enrich_system_info returns _is_java=True (SAPControl
+    detected a JAVA stack), the discover helper must override the
+    parser's ABAP default — same convention as the per-node
+    rfc_system_info route."""
+    state, node = _mk_state_with_node("JVNODE", inst_nr="00")
+    node.system_type = "ABAP"  # parser's default
+    enrich_fn, _ = _mk_enrich_mock({"_is_java": True})
+    client_fn, _ = _mk_client_enum_mock([])
+
+    result = landscape_post_import_discover(
+        state, "JVNODE", enrich_fn=enrich_fn,
+        client_enum_fn=client_fn)
+
+    assert result["system_type"] == "JAVA"
+    assert node.system_type == "JAVA", (
+        "enrichment must override parser's ABAP default when "
+        "SAPControl reports JAVA")
+
+
+def test_discover_overrides_to_dual_stack_when_abap_and_java_both_detected():
+    """When SAPControl reports BOTH stacks (dual-stack 7.0x systems),
+    override to ABAP+JAVA."""
+    state, node = _mk_state_with_node("DUAL", inst_nr="00")
+    node.system_type = "ABAP"
+    enrich_fn, _ = _mk_enrich_mock(
+        {"_is_abap": True, "_is_java": True})
+    client_fn, _ = _mk_client_enum_mock([])
+
+    landscape_post_import_discover(
+        state, "DUAL", enrich_fn=enrich_fn,
+        client_enum_fn=client_fn)
+
+    assert node.system_type == "ABAP+JAVA"
+
+
+def test_discover_leaves_abap_default_when_enrich_returns_neither_flag():
+    """When enrichment doesn't carry a stack-detection result (common
+    when SAPControl is firewalled), leave the parser's ABAP default
+    intact — don't accidentally blank it to '' on partial enrich."""
+    state, node = _mk_state_with_node("UNKFL", inst_nr="00")
+    node.system_type = "ABAP"
+    enrich_fn, _ = _mk_enrich_mock(
+        {"hostname": "srv01unk", "sysinfo_source": "legacy_leak"})
+    client_fn, _ = _mk_client_enum_mock([])
+
+    landscape_post_import_discover(
+        state, "UNKFL", enrich_fn=enrich_fn,
+        client_enum_fn=client_fn)
+
+    assert node.system_type == "ABAP", (
+        "system_type must stay ABAP when enrich returns neither "
+        "_is_abap nor _is_java — don't blank the parser's default")
+
+
 def test_liveness_probe_respects_timeout_parameter():
     """liveness_timeout must flow through to the liveness_fn call so
     operators / tests can tune the dead-host short-circuit speed."""

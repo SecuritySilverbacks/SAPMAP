@@ -2812,6 +2812,16 @@ def parse_landscape_xml_into_state(state, xml_text,
         node = SAPNode(
             sid=sid, hostname=host, ip=host,
             instances=[instance],
+            # SAP Logon landscape XML entries describe SAPGUI (ABAP
+            # dialog) connections — SAPGUI is the ABAP client, not
+            # the Java one.  Default system_type=ABAP so operators
+            # can immediately run ABAP-only tooling (default-cred
+            # check, pwspray, user creation) on freshly-imported
+            # systems without waiting for RFC_SYSTEM_INFO enrichment.
+            # Enrichment can later override to JAVA / ABAP+JAVA if
+            # SAPControl's stack detection disagrees (handled in
+            # landscape_post_import_discover).
+            system_type="ABAP",
             sapology_data={
                 "description": svc_name,
                 "xml_service_name": svc_name,
@@ -3037,6 +3047,22 @@ def landscape_post_import_discover(state, sid: str,
     if new_source and not node.sysinfo_source:
         node.sysinfo_source = new_source
         result["enrich_source"] = new_source
+
+    # system_type override from SAPControl stack detection.  Parser
+    # defaults every XML-imported node to ABAP (SAP Logon describes
+    # SAPGUI = ABAP dialog connections), but enrichment may discover
+    # a JAVA or dual-stack system.  Mirrors the per-node rfc_system_
+    # info route (~L7193-7201).
+    sc_abap = bool(info.get("_is_abap", False))
+    sc_java = bool(info.get("_is_java", False))
+    if sc_abap or sc_java:
+        if sc_abap and sc_java:
+            node.system_type = "ABAP+JAVA"
+        elif sc_java:
+            node.system_type = "JAVA"
+        else:
+            node.system_type = "ABAP"
+        result["system_type"] = node.system_type
 
     # SID promotion for placeholder XML nodes.  Placeholder test is
     # `discovered_via_xml` alone — the parser sets that flag only when
