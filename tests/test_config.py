@@ -489,8 +489,16 @@ def test_sybase_wrapper_locates_isql_across_ocs_versions():
     assert "-X" in script
     # No -b flag — silently drops rows on SAP-shipped isql (verified live).
     assert " -b " not in script
-    # SID surfaces as -S<SID>.
-    assert '-S"$SID"' in script or '-SNPL' in script
+    # SID surfaces as -S<SID> somewhere in the wrapper.  The server-arg
+    # may be hard-coded (`-S"$SID"` / `-SNPL`) or built into a variable
+    # (`SERVER_ARG="-S$SID"`) that the isql line splices — the SAP Note
+    # 2502094 direct-connect fix (PR #129) moved to the variable form
+    # so the primary path can set SERVER_ARG="-S$HOSTPORT" instead.
+    assert (
+        '-S"$SID"' in script
+        or '-SNPL' in script
+        or 'SERVER_ARG="-S$SID"' in script
+    )
     # SYBASE env must be set from the isql path so libtcl_r.cfg resolves.
     assert "export SYBASE" in script
 
