@@ -2712,7 +2712,7 @@ def parse_landscape_xml_into_state(state, xml_text,
     for svc in root.iter("Service"):
         svc_name = (svc.get("name") or "").strip()
         svc_sid = (svc.get("systemid") or "").strip().upper()
-        svc_desc = (svc.get("description") or "").strip()
+        #svc_desc = (svc.get("description") or "").strip()
         svc_msid = (svc.get("msid") or "").strip()
         svc_srv = (svc.get("server") or "").strip()
         svc_type = (svc.get("type") or "").strip().upper()
@@ -2813,7 +2813,7 @@ def parse_landscape_xml_into_state(state, xml_text,
             sid=sid, hostname=host, ip=host,
             instances=[instance],
             sapology_data={
-                "description": svc_desc,
+                "description": svc_name,
                 "xml_service_name": svc_name,
                 "xml_type": svc_type,
                 "xml_sentinel_sid": svc_sid if placeholder else "",
@@ -2824,7 +2824,7 @@ def parse_landscape_xml_into_state(state, xml_text,
         added.append(sid)
         systems.append({
             "sid": sid, "name": svc_name,
-            "description": svc_desc,
+            "description": svc_name,
             "host": host, "port": port_str,
             "placeholder": placeholder,
         })
