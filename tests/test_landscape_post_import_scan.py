@@ -35,6 +35,25 @@ from sapmap_gui import (
 
 
 # ---------------------------------------------------------------------------
+# Autouse fixture: default sapmap_scanner._scan_port to "alive" so the
+# ~90% of tests that exercise non-liveness behaviour don't need an
+# explicit liveness_fn argument.  Tests specifically about the liveness
+# probe pass their own liveness_fn and bypass this default.
+# ---------------------------------------------------------------------------
+
+@pytest.fixture(autouse=True)
+def _default_liveness_alive(monkeypatch):
+    """Make sapmap_scanner._scan_port always report 'alive' so tests
+    that don't care about liveness don't trip the dead-host short-
+    circuit added for issue #109 follow-up (operator-reported 68-
+    system landscape with mostly dead hosts, 2026-10-09)."""
+    import sapmap_scanner
+    monkeypatch.setattr(sapmap_scanner, "_scan_port",
+                         lambda host, port, timeout=2.0,
+                         saprouter="": True)
+
+
+# ---------------------------------------------------------------------------
 # Fixtures: scanner-function mocks that record calls
 # ---------------------------------------------------------------------------
 
@@ -699,3 +718,168 @@ def test_sweep_reports_progress_via_task_update_fn():
     assert '"landscape:post_import_scan"' in src, (
         "task_update key must stay 'landscape:post_import_scan' so "
         "the GUI active-tasks panel can match it")
+
+
+# ---------------------------------------------------------------------------
+# Liveness probe — operator follow-up on issue #109 (2026-10-09)
+# ---------------------------------------------------------------------------
+
+def test_liveness_probe_skips_dead_host_before_enrichment():
+    """Operator ran issue #109 on a 68-system landscape; most hosts
+    were historic/demo VMs long gone.  Each dead host wasted ~90s
+    cycling through RFC + ICM + DIAG + MS + client-enum chains before
+    failing.  The liveness probe cuts dead hosts to ~4s (2 ports x 2s
+    TCP connect).  Pins: when liveness_fn returns False for both the
+    dispatcher and gateway ports, the helper returns a skip without
+    calling enrich_fn or client_enum_fn.
+    """
+    state, _node = _mk_state_with_node("DEAD", inst_nr="00")
+    probed = []
+    def _dead(host, port, timeout=2.0, saprouter=""):
+        probed.append(port)
+        return False
+    enrich_fn, enrich_calls = _mk_enrich_mock()
+    client_fn, client_calls = _mk_client_enum_mock(["000"])
+
+    result = landscape_post_import_discover(
+        state, "DEAD",
+        enrich_fn=enrich_fn, client_enum_fn=client_fn,
+        liveness_fn=_dead)
+
+    assert result == {"status": "skip", "reason": "host_unreachable"}
+    # BOTH ports probed before giving up.
+    assert sorted(probed) == [3200, 3300], (
+        f"liveness probe must try both dispatcher and gateway before "
+        f"giving up; got {sorted(probed)}")
+    # Enrich + client-enum NEVER called — the whole point of the fix.
+    assert enrich_calls == []
+    assert client_calls == []
+
+
+def test_liveness_probe_proceeds_when_dispatcher_alive():
+    """When the dispatcher port answers (first probe), the helper
+    short-circuits the probe and runs the full enrichment — no second
+    port probe needed."""
+    state, _ = _mk_state_with_node("ALIVE", inst_nr="00")
+    probed = []
+    def _disp_alive(host, port, timeout=2.0, saprouter=""):
+        probed.append(port)
+        return port == 3200  # only dispatcher answers
+    enrich_fn, enrich_calls = _mk_enrich_mock(
+        {"hostname": "srv01alive", "sysinfo_source": "ok"})
+    client_fn, _ = _mk_client_enum_mock(["000", "100"])
+
+    result = landscape_post_import_discover(
+        state, "ALIVE",
+        enrich_fn=enrich_fn, client_enum_fn=client_fn,
+        liveness_fn=_disp_alive)
+
+    assert result["status"] == "ok"
+    assert result["clients_added"] == 2
+    # Only dispatcher probed — gateway probe short-circuited by the
+    # first-match-wins break.
+    assert probed == [3200]
+    assert enrich_calls, "enrich must run when liveness succeeds"
+
+
+def test_liveness_probe_proceeds_when_only_gateway_alive():
+    """Some hardened installs close the dispatcher (SNC-only) but
+    leave the gateway open.  Either-port-alive counts as alive — the
+    helper falls through to full enrichment so the operator gets a
+    diagnostic from the deeper probes."""
+    state, _ = _mk_state_with_node("GWONLY", inst_nr="00")
+    probed = []
+    def _gw_alive(host, port, timeout=2.0, saprouter=""):
+        probed.append(port)
+        return port == 3300  # only gateway answers
+    enrich_fn, enrich_calls = _mk_enrich_mock()
+    client_fn, _ = _mk_client_enum_mock([])
+
+    result = landscape_post_import_discover(
+        state, "GWONLY",
+        enrich_fn=enrich_fn, client_enum_fn=client_fn,
+        liveness_fn=_gw_alive)
+
+    assert result["status"] == "ok"
+    # Dispatcher probed first (closed), then gateway (open).
+    assert probed == [3200, 3300]
+    assert enrich_calls, "enrich must run when gateway port is alive"
+
+
+def test_liveness_probe_passes_saprouter_through():
+    """node.saprouter must be threaded into the liveness_fn call so
+    the probe tunnels through the SAP NI route — otherwise raw TCP
+    probes would always fail for saprouter-tunneled targets and
+    silently skip every one of them."""
+    state, node = _mk_state_with_node("ROUTED", inst_nr="00")
+    node.saprouter = "/H/router.lan/S/3299/H/"
+    probed = []
+    def _probe(host, port, timeout=2.0, saprouter=""):
+        probed.append({"host": host, "port": port,
+                        "saprouter": saprouter})
+        return True
+    enrich_fn, _ = _mk_enrich_mock()
+    client_fn, _ = _mk_client_enum_mock([])
+
+    landscape_post_import_discover(
+        state, "ROUTED",
+        enrich_fn=enrich_fn, client_enum_fn=client_fn,
+        liveness_fn=_probe)
+
+    assert probed, "liveness probe must run for saprouter-tunneled nodes"
+    assert probed[0]["saprouter"] == "/H/router.lan/S/3299/H/", (
+        "node.saprouter must be threaded to liveness_fn so the probe "
+        "tunnels through NI route (which _scan_port handles natively)")
+
+
+def test_liveness_probe_exception_falls_through_to_enrichment():
+    """A liveness probe that RAISES (DNS failure, route-string parse
+    error, exotic network stack) must not block the enrichment chain
+    — treat 'unknown' as 'proceed' so the operator still gets a
+    diagnostic from the deeper probes rather than a silent skip."""
+    state, _ = _mk_state_with_node("DNS_FAIL", inst_nr="00")
+    def _boom(host, port, timeout=2.0, saprouter=""):
+        raise OSError("DNS resolution failed")
+    enrich_fn, enrich_calls = _mk_enrich_mock({"sysinfo_source": "ok"})
+    client_fn, _ = _mk_client_enum_mock([])
+
+    result = landscape_post_import_discover(
+        state, "DNS_FAIL",
+        enrich_fn=enrich_fn, client_enum_fn=client_fn,
+        liveness_fn=_boom)
+
+    assert result["status"] == "ok", (
+        "liveness-probe exception must fall through to enrichment, "
+        "not skip the node")
+    assert enrich_calls, "enrich must still run after liveness probe raises"
+
+
+def test_liveness_probe_uses_scan_port_by_default():
+    """Default liveness_fn must be sapmap_scanner._scan_port so
+    operators get the probe for free — not a dedicated per-helper
+    socket implementation."""
+    import sapmap_scanner
+    import inspect
+    src = inspect.getsource(landscape_post_import_discover)
+    assert "sapmap_scanner._scan_port" in src, (
+        "default liveness_fn must be sapmap_scanner._scan_port — it "
+        "already handles saprouter-tunnelled probes natively")
+
+
+def test_liveness_probe_respects_timeout_parameter():
+    """liveness_timeout must flow through to the liveness_fn call so
+    operators / tests can tune the dead-host short-circuit speed."""
+    state, _ = _mk_state_with_node("TIMED", inst_nr="00")
+    seen_timeouts = []
+    def _probe(host, port, timeout=2.0, saprouter=""):
+        seen_timeouts.append(timeout)
+        return True
+    landscape_post_import_discover(
+        state, "TIMED",
+        enrich_fn=_mk_enrich_mock()[0],
+        client_enum_fn=_mk_client_enum_mock([])[0],
+        liveness_fn=_probe,
+        liveness_timeout=5.5)
+    assert 5.5 in seen_timeouts, (
+        f"liveness_timeout must thread through to liveness_fn; "
+        f"saw {seen_timeouts}")
