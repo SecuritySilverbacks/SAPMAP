@@ -975,6 +975,8 @@ body {
       <div class="dd-item" onclick="zoomIn()">&#128269; Zoom In</div>
       <div class="dd-item" onclick="zoomOut()">&#128269; Zoom Out</div>
       <div class="dd-item" onclick="fitMap()">&#128208; Fit to Window</div>
+      <div class="dd-item" onclick="layoutFitCanvas()">&#128205; Fit All Nodes (max size)</div>
+      <div class="dd-item" onclick="layoutFixedColumns()">&#128202; Fixed Boxes Per Row&hellip;</div>
       <div class="dd-item" onclick="resetLayout()">&#128260; Reset Layout (Grid)</div>
       <div class="dd-sep"></div>
       <div class="dd-item" onclick="layoutCircle()">&#9711; Layout: Circle</div>
@@ -19534,7 +19536,18 @@ function resetLayout() {
   Object.values(mapState.nodes || {}).forEach(n => { n._x = null; n._y = null; });
   Object.values(mapState.scc_nodes || {}).forEach(sn => { sn._x = null; sn._y = null; });
   Object.values(mapState.btp_subaccounts || {}).forEach(bn => { bn._x = null; bn._y = null; });
-  updateMap();
+  // Lay out into an actual GRID (what the menu label promises) rather
+  // than leaving it to updateMap()'s IP-zone stacking, which collapses
+  // to a single tall column when systems share a host — that produced
+  // a mid-screen strip of unreadably small boxes under "meet" scaling.
+  // layoutFitCanvas() re-fits the viewBox too, so boxes stay large.
+  if (Object.keys(mapState.nodes || {}).length
+      || Object.keys(mapState.scc_nodes || {}).length
+      || Object.keys(mapState.btp_subaccounts || {}).length) {
+    layoutFitCanvas();
+  } else {
+    updateMap();
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -19859,6 +19872,101 @@ function layoutByStack() {
   });
   fitMap();
   updateMap();
+}
+
+// Arrange every node in a grid whose bounding-box aspect ratio matches
+// the live SVG viewport, so that under SVG's "meet" scaling the fitted
+// boxes render as large as possible (minimal letterbox waste) while
+// still ALL fitting on screen at once.  Unlike resetLayout()'s fixed
+// grid, the column count here is chosen from the current window shape.
+function layoutFitCanvas() {
+  const sids = _loSortedNodeKeys();
+  const sccHosts = Object.keys(mapState.scc_nodes || {}).sort();
+  const btpUuids = Object.keys(mapState.btp_subaccounts || {}).sort();
+  const items = [
+    ...sids.map(id => (mapState.nodes || {})[id]),
+    ...sccHosts.map(h => (mapState.scc_nodes || {})[h]),
+    ...btpUuids.map(u => (mapState.btp_subaccounts || {})[u]),
+  ].filter(Boolean);
+  const N = items.length;
+  if (N === 0) return;
+  flashActivity('Rearranging: Fit Canvas');
+  const svg = document.getElementById('map-svg');
+  const vpW = (svg && svg.clientWidth)  || 1200;
+  const vpH = (svg && svg.clientHeight) || 800;
+  const vpAR = vpW / vpH;
+  const cellW = _LO_BOX_W + _LO_MARGIN;
+  const cellH = _LO_BOX_H + _LO_MARGIN;
+  // Pick the column count whose resulting grid aspect ratio is closest
+  // (in log space, so too-wide and too-tall are penalised symmetrically)
+  // to the viewport's.  A grid matching the viewport aspect wastes the
+  // least space under preserveAspectRatio="…meet", which is exactly when
+  // the scaled node boxes end up at maximum on-screen size.
+  let bestCols = 1, bestErr = Infinity;
+  for (let cols = 1; cols <= N; cols++) {
+    const rows = Math.ceil(N / cols);
+    const ar = (cols * cellW) / (rows * cellH);
+    const err = Math.abs(Math.log(ar / vpAR));
+    if (err < bestErr) { bestErr = err; bestCols = cols; }
+  }
+  const cols = bestCols;
+  items.forEach((obj, i) => {
+    obj._x = _LO_MARGIN + (i % cols) * cellW;
+    obj._y = _LO_MARGIN + Math.floor(i / cols) * cellH;
+  });
+  fitMap();
+  updateMap();
+}
+
+// Remembered "boxes per row" so re-running the layout doesn't keep
+// re-asking from scratch.
+let _fixedColsPref = 4;
+
+// Lay out every node in a grid with a FIXED number of boxes per
+// horizontal row, then zoom so exactly that many columns span the full
+// viewport width.  Unlike layoutFitCanvas(), this does NOT shrink boxes
+// to make everything fit — rows that overflow sit below the fold and
+// the user reaches them by panning (drag / mouse-wheel), i.e. scrolls.
+function layoutFixedColumns() {
+  const sids = _loSortedNodeKeys();
+  const sccHosts = Object.keys(mapState.scc_nodes || {}).sort();
+  const btpUuids = Object.keys(mapState.btp_subaccounts || {}).sort();
+  const items = [
+    ...sids.map(id => (mapState.nodes || {})[id]),
+    ...sccHosts.map(h => (mapState.scc_nodes || {})[h]),
+    ...btpUuids.map(u => (mapState.btp_subaccounts || {})[u]),
+  ].filter(Boolean);
+  const N = items.length;
+  if (N === 0) return;
+  const ans = prompt('Boxes per horizontal row:', String(_fixedColsPref));
+  if (ans === null) return;              // user cancelled
+  let cols = parseInt(ans, 10);
+  if (!Number.isFinite(cols) || cols < 1) cols = 1;
+  cols = Math.min(cols, N);
+  _fixedColsPref = cols;
+  flashActivity('Rearranging: ' + cols + ' per row');
+  const cellW = _LO_BOX_W + _LO_MARGIN;
+  const cellH = _LO_BOX_H + _LO_MARGIN;
+  items.forEach((obj, i) => {
+    obj._x = _LO_MARGIN + (i % cols) * cellW;
+    obj._y = _LO_MARGIN + Math.floor(i / cols) * cellH;
+  });
+  // Render once with auto-fit off so updateMap() refreshes its own
+  // node-count bookkeeping; then clamp the viewBox to exactly `cols`
+  // columns wide.  Setting viewBox.h to the viewport-proportional
+  // height makes width the binding dimension under "…meet" scaling, so
+  // there is zero letterbox and the boxes render at the chosen size.
+  viewBoxUserControlled = false;
+  viewBox.x = 0; viewBox.y = 0;
+  updateMap();
+  const svg = document.getElementById('map-svg');
+  const vpW = (svg && svg.clientWidth)  || 1200;
+  const vpH = (svg && svg.clientHeight) || 800;
+  viewBoxUserControlled = true;
+  viewBox.x = 0; viewBox.y = 0;
+  viewBox.w = _LO_MARGIN + cols * cellW;
+  viewBox.h = viewBox.w * (vpH / vpW);
+  applyViewBox();
 }
 function applyViewBox() {
   const vb = `${viewBox.x} ${viewBox.y} ${viewBox.w} ${viewBox.h}`;
