@@ -3257,6 +3257,19 @@ body {
       <div class="autopwn-stat"><div class="autopwn-stat-val" id="pws-st-hits" style="color:#f85149">0</div><div class="autopwn-stat-label">Hits</div></div>
       <div class="autopwn-stat"><div class="autopwn-stat-val" id="pws-st-locks" style="color:#ffa657">0</div><div class="autopwn-stat-label">Locks</div></div>
     </div>
+    <!-- Per-attempt visibility (slow/silent/no-stop UX fix) — populated from the
+         status singleton's current_* fields on every 800ms poll tick.  Panel
+         was previously silent between HIT lines for the 1-17s each attempt
+         took, reading as 'stuck' even when the engine was progressing. -->
+    <div id="pws-st-now" style="font-size:11px;color:#58a6ff;margin-top:4px;min-height:14px"></div>
+    <div id="pws-st-last" style="font-size:11px;color:#8b949e;min-height:14px"></div>
+    <!-- STOPPING chip — shown when stop was requested but the engine is
+         still finishing the current attempt.  Mirrors the server-side
+         sapmap_pwspray.mark_stop_requested() flag so the operator sees
+         the STOP click landed within one 800ms poll tick. -->
+    <div id="pws-st-stopping" style="display:none;font-size:11px;color:#f85149;font-weight:600;margin-top:4px;padding:3px 8px;background:#2a1515;border:1px solid #f85149;border-radius:3px;align-self:flex-start">
+      &#9632; STOPPING... (waiting for current attempt to return)
+    </div>
     <div style="display:flex;align-items:center;gap:8px">
       <div class="autopwn-bar-track" style="flex:1">
         <div class="autopwn-bar-fill" id="pws-bar" style="width:0%;background:linear-gradient(90deg,#ffa657,#f0883e)"></div>
@@ -19131,6 +19144,40 @@ async function _pwsprayPollStatus() {
       st.attempts_done + ' / ' + st.attempts_total;
     document.getElementById('pws-st-hits').textContent = st.hits;
     document.getElementById('pws-st-locks').textContent = st.locks;
+    // "Now trying" + "Last result" rows (slow/silent/no-stop fix).
+    // Rendered as a two-line block above the log pane so operators
+    // see what the engine is currently doing — previously the panel
+    // was silent for the 1-17s each attempt took and read as stuck.
+    const nowEl = document.getElementById('pws-st-now');
+    if (nowEl) {
+      if (st.current_target_sid) {
+        nowEl.textContent =
+          'Now trying: ' + st.current_target_sid + '/' +
+          st.current_client + ' user=' + st.current_user +
+          ' (' + st.current_candidate_index + '/' +
+          st.current_candidate_total + ')';
+      } else if (st.running) {
+        nowEl.textContent = 'Now trying: (preparing...)';
+      } else {
+        nowEl.textContent = '';
+      }
+    }
+    const lastEl = document.getElementById('pws-st-last');
+    if (lastEl) {
+      lastEl.textContent = st.last_result
+        ? 'Last result: ' + st.last_result
+          + (st.last_detail ? ' — ' + st.last_detail : '')
+        : '';
+    }
+    // STOPPING chip — set by sapmap_pwspray.mark_stop_requested()
+    // from the /api/scan/stop handler, before the engine's own
+    // cancel_check bubbles up.  Gives the operator immediate
+    // feedback that the STOP press landed.
+    const stopEl = document.getElementById('pws-st-stopping');
+    if (stopEl) {
+      stopEl.style.display =
+        (st.running && st.aborted === 'stop_requested') ? '' : 'none';
+    }
     const total = st.attempts_total || 1;
     const pct = Math.min(100, Math.round(100 * (st.attempts_done || 0) / total));
     document.getElementById('pws-bar').style.width = pct + '%';
@@ -19175,7 +19222,24 @@ async function _pwsprayPollStatus() {
 
 function stopPwspray() {
   // Reuses the global stop channel — same path AutoPwn's STOP uses.
-  fetch('/api/scan/stop', {method: 'POST'});
+  // Backend's /api/scan/stop also calls sapmap_pwspray.mark_stop_
+  // requested() so the next 800ms status poll shows the STOPPING
+  // chip even before the engine's cancel_check bubbles up.
+  // Operator-facing toast so the click feels like it did something
+  // (previously STOP was fire-and-forget; the engine could still
+  // be inside a 17s try_login, making the button look dead).
+  fetch('/api/scan/stop', {method: 'POST'}).then(r => {
+    if (r.ok) {
+      try { showToast('Stop requested — waiting for current attempt to return', 'info'); }
+      catch (_) {}
+    } else {
+      try { showToast('Stop failed: HTTP ' + r.status, 'error'); }
+      catch (_) {}
+    }
+  }).catch(e => {
+    try { showToast('Stop request error: ' + e, 'error'); }
+    catch (_) {}
+  });
 }
 
 function closePwsprayPanel() {
