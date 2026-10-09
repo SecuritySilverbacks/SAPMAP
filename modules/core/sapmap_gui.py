@@ -2849,7 +2849,9 @@ def parse_landscape_xml_into_state(state, xml_text,
 
 def landscape_post_import_discover(state, sid: str,
                                      enrich_fn=None,
-                                     client_enum_fn=None) -> dict:
+                                     client_enum_fn=None,
+                                     liveness_fn=None,
+                                     liveness_timeout: float = 2.0) -> dict:
     """Issue #109: for a single newly-imported landscape-XML node,
     run RFC_SYSTEM_INFO (promotes placeholder SIDs — issue #114's gap
     for pure app-server entries that don't carry systemid) and
@@ -2870,6 +2872,13 @@ def landscape_post_import_discover(state, sid: str,
         client_enum_fn: Override for
             ``sapmap_scanner.enumerate_system_clients``.  Tests inject
             a mock; production leaves this None.
+        liveness_fn: Override for ``sapmap_scanner._scan_port``.  Tests
+            inject a mock; production leaves this None.  Called with
+            ``(host, port, timeout=liveness_timeout, saprouter=...)``
+            and must return True if the port is open.
+        liveness_timeout: per-port timeout for the liveness probe,
+            seconds.  2.0s balances dead-host short-circuit speed
+            against false-dead on slow VPN links.
 
     Returns:
         A dict shape ``{"status": "ok"|"skip", "reason"?: str,
@@ -2958,6 +2967,48 @@ def landscape_post_import_discover(state, sid: str,
     nr = int(inst_nr)
     gw_port = 3300 + nr
     disp_port = 3200 + nr
+
+    # Liveness probe — short-circuit dead hosts before cycling through
+    # the full ~90s RFC_SYSTEM_INFO + ICM + DIAG + MS + client-enum
+    # chain.  Operator-reported 2026-10-09: on a 68-system landscape
+    # with mostly historic / demo entries whose VMs are long gone, the
+    # original sweep spent ~90s per dead host x 68 systems = ~90 min
+    # worst case.  A 2s TCP probe per port cuts a dead host to ~4s.
+    #
+    # Probes BOTH dispatcher (32NN) + gateway (33NN) because either
+    # being reachable is enough to justify the full enrichment (DIAG
+    # uses dispatcher, RFC uses gateway; some hardened installs expose
+    # only one).  Saprouter-tunneled hosts are probed through the
+    # tunnel transparently — `_scan_port` already handles the NI route
+    # dialect, so no bypass is needed.
+    if liveness_fn is None:
+        liveness_fn = sapmap_scanner._scan_port
+    saprouter_arg = getattr(node, "saprouter", "") or ""
+    alive = False
+    for probe_port in (disp_port, gw_port):
+        try:
+            if liveness_fn(host, probe_port,
+                            timeout=liveness_timeout,
+                            saprouter=saprouter_arg):
+                alive = True
+                break
+        except Exception as e:
+            # Defensive — a liveness probe that raises (DNS failure,
+            # route-string parse error, etc.) should NOT block the
+            # enrichment chain.  Treat it as "unknown" and fall
+            # through to the full enrichment so the operator still
+            # gets a diagnostic from the deeper probes.
+            print(f"[-] {sid}: Post-import liveness probe raised on "
+                  f"{host}:{probe_port}: {type(e).__name__}: {e} — "
+                  f"proceeding with full enrichment")
+            alive = True
+            break
+    if not alive:
+        print(f"[-] {sid}: Post-import scan: {host} not responding on "
+              f":{disp_port} or :{gw_port} within {liveness_timeout}s "
+              f"each — skipping enrichment (host likely down, "
+              f"firewalled, or unroutable from this network)")
+        return {"status": "skip", "reason": "host_unreachable"}
 
     result = {"status": "ok"}
 
