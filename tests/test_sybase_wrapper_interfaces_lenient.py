@@ -18,9 +18,14 @@ DSQUERY setenv either (and csh-only installs can't be sourced from
 our sh wrapper anyway), so neither path rescued the connection.
 
 Fix: wrapper now rewrites the interfaces file to a session-tmp copy
-via `sed 's/^#//'` and points isql at it with `-I <tmpfile>`.
+via `sed "s/^#/<TAB>/"` and points isql at it with `-I <tmpfile>`.
 Comment-prefixed endpoints get re-enabled for THIS invocation; the
-target's interfaces file is unchanged.
+target's interfaces file is unchanged.  '#' → TAB (not strip) because
+Sybase's directory parser treats any line flush at column 0 as a new
+server-name header — a stripped-but-unindented `master tcp ether host
+port` would become a bogus server header and re-trigger the exact
+ct_connect error we're fixing.  A leading TAB puts the endpoint line
+at the standard Sybase indent.
 """
 from __future__ import annotations
 
@@ -65,20 +70,46 @@ def test_wrapper_declares_iface_tmp_path():
         f"cleaned by OS); got {_w._SYBASE_IFACE_PATH!r}")
 
 
-def test_wrapper_writes_sed_stripped_interfaces_to_tmp():
-    """Wrapper must sed-strip leading '#' from the on-target
-    interfaces file and write the result to the tmp path — this is
-    the mechanism that rescues admin-disabled endpoints."""
+def test_wrapper_rewrites_hash_to_tab_in_interfaces_tmp():
+    """Wrapper must replace a leading '#' on interfaces lines with a
+    TAB (via a sed call that resolves $TAB from `printf '\\t'`) and
+    write the result to the tmp path — this is the mechanism that
+    rescues admin-disabled endpoints.  '#' → TAB (not strip!) because
+    master/query entries must be indented, or Sybase's directory
+    parser treats them as new server-name headers and ct_connect
+    fails exactly as before the fix."""
     body = _wrapper()
-    assert "sed 's/^#//' \"$IFACE_SRC\" > \"$IFACE_TMP\"" in body, (
-        "wrapper must sed-strip leading '#' from interfaces lines "
-        "into IFACE_TMP")
+    # TAB variable derived from `printf '\t'` — portable across every
+    # /bin/sh variant (dash, busybox, ash) that doesn't honour the
+    # bash-ism `sed 's/.../\t/'`.
+    assert "TAB=\"$(printf '\\t')\"" in body, (
+        "wrapper must resolve a literal TAB via printf '\\t' — a bare "
+        "sed with \\t in the pattern isn't portable to dash/busybox")
+    assert "sed \"s/^#/$TAB/\" \"$IFACE_SRC\" > \"$IFACE_TMP\"" in body, (
+        "wrapper must sed-replace leading '#' with the TAB variable "
+        "into IFACE_TMP — strip-only would leave master/query flush "
+        "at col 0 and Sybase would treat them as new server-name "
+        "headers")
     # Both the source + tmp paths must be variables (not hard-coded
     # in the sed command) so a future refactor can repoint them
     # without re-editing the regex.
     assert "IFACE_SRC=\"$SYBASE/interfaces\"" in body, (
         "wrapper must read interfaces from $SYBASE/interfaces "
         "(the SAP-ASE on-disk convention)")
+
+
+def test_wrapper_sed_does_not_strip_hash_without_tab():
+    """Regression pin: ship #126 shipped `sed 's/^#//'` which left
+    master/query lines flush at col 0 — Sybase treated them as new
+    server-name headers and ct_connect still errored.  This test
+    guards against anyone re-introducing the strip-only form."""
+    body = _wrapper()
+    # The exact strip-only form from PR #126 must NOT be in the wrapper.
+    assert "sed 's/^#//'" not in body, (
+        "strip-only form ('/^#//') leaves master/query flush left — "
+        "Sybase parses them as server names, re-triggering the "
+        "ct_connect failure.  Use '#' → TAB (via $TAB from printf) "
+        "instead.")
 
 
 def test_wrapper_passes_minus_I_to_isql_when_tmp_written():
@@ -129,7 +160,10 @@ def test_wrapper_lenient_parse_is_safe_when_sed_fails():
     # The sed invocation redirects stderr to /dev/null AND is wrapped
     # in `if sed ...; then IFACE_ARG=...` so a non-zero exit skips
     # the -I arg setup.
-    assert "sed 's/^#//' \"$IFACE_SRC\" > \"$IFACE_TMP\" 2>/dev/null" in body
+    assert (
+        "sed \"s/^#/$TAB/\" \"$IFACE_SRC\" > \"$IFACE_TMP\" 2>/dev/null"
+        in body
+    ), "sed stderr must be swallowed so permission errors don't abort"
     assert "if sed" in body, (
         "sed call must be in a conditional so a non-zero exit "
         "(permission denied, etc) doesn't abort the whole wrapper")
@@ -177,6 +211,113 @@ def test_wrapper_uses_fixed_sqlfile_path_not_dollar_one():
         "SQLFILE path must be the hard-coded constant, not $1 — "
         "SAPXPG argv-duplicate bug would otherwise fire the "
         "wrapper against itself")
+
+
+def test_wrapper_sed_recipe_against_operator_lab_sm1_sample():
+    """End-to-end check: extract the sed invocation from the wrapper
+    body, run it under /bin/sh against the exact interfaces file
+    content the operator pasted from live lab SM1 (2026-10-09), and
+    assert the output is a valid Sybase interfaces file — i.e.
+    endpoint lines (master, query) are TAB-indented so Sybase treats
+    them as endpoints under their parent server header.
+
+    This is the regression test that would have CAUGHT PR #126 if we
+    had written it then: a strip-only sed produces a file where
+    `master tcp ether srv01sm1 4901` is flush at col 0, which Sybase
+    parses as a new server-name header.
+    """
+    import os
+    import shutil
+    import subprocess
+    import tempfile
+
+    _w = _import_writers_safely()
+    body = _w._build_sybase_wrapper_script("SM1")
+
+    # Operator's live SM1 interfaces (pasted 2026-10-09)
+    source = (
+        "SM1\n"
+        "#master tcp ether srv01sm1 4901\n"
+        "#query  tcp ether srv01sm1 4901\n"
+        "\n"
+        "SM1_BS\n"
+        "#master tcp ether srv01sm1 4902\n"
+        "#query  tcp ether srv01sm1 4902\n"
+        "\n"
+        "SM1_JSAGENT\n"
+        "#master tcp ether srv01sm1 4903\n"
+        "#query  tcp ether srv01sm1 4903\n"
+    )
+
+    tmpdir = tempfile.mkdtemp(prefix="sapmap_syb_test_")
+    try:
+        src_path = os.path.join(tmpdir, "interfaces")
+        dst_path = os.path.join(tmpdir, "iface_tmp.cfg")
+        with open(src_path, "w") as fh:
+            fh.write(source)
+
+        # Pull the exact sed line out of the wrapper so a future
+        # refactor of the sed recipe stays covered.
+        m = re.search(
+            r'sed "s/\^#/\$TAB/" "\$IFACE_SRC" > "\$IFACE_TMP" 2>/dev/null',
+            body,
+        )
+        assert m, (
+            "could not find the wrapper's sed recipe — if the shape "
+            "changed, update this test together with the wrapper")
+
+        # Reproduce the wrapper's TAB resolution + sed call exactly.
+        shell_recipe = (
+            f'TAB="$(printf \'\\t\')"\n'
+            f'IFACE_SRC="{src_path}"\n'
+            f'IFACE_TMP="{dst_path}"\n'
+            f'sed "s/^#/$TAB/" "$IFACE_SRC" > "$IFACE_TMP"\n'
+        )
+        rc = subprocess.run(
+            ["/bin/sh", "-c", shell_recipe],
+            capture_output=True,
+            text=True,
+        )
+        assert rc.returncode == 0, (
+            f"wrapper's sed recipe failed under /bin/sh: "
+            f"stderr={rc.stderr!r}")
+
+        with open(dst_path) as fh:
+            rewritten = fh.read()
+
+        # Three server-name headers survive (flush at col 0) + their
+        # endpoint lines must each start with a TAB.
+        headers = [line for line in rewritten.splitlines()
+                   if line and not line[0].isspace()]
+        assert headers == ["SM1", "SM1_BS", "SM1_JSAGENT"], (
+            f"expected exactly 3 server-name headers flush at col 0 "
+            f"after rewrite; got {headers!r} — a stripped '#' with no "
+            f"replacement TAB would list `master tcp ether srv01sm1 "
+            f"4901` here, breaking the Sybase parse.")
+
+        # Endpoint lines must be TAB-indented so Sybase recognises them.
+        endpoint_lines = [
+            line for line in rewritten.splitlines()
+            if line.startswith("\t")
+        ]
+        assert len(endpoint_lines) == 6, (
+            f"expected 6 TAB-indented endpoint lines (3 server x "
+            f"master+query); got {len(endpoint_lines)}: "
+            f"{endpoint_lines!r}")
+        assert all(
+            l.lstrip("\t").startswith(("master", "query"))
+            for l in endpoint_lines), (
+            f"TAB-indented lines must be master/query entries; "
+            f"got {endpoint_lines!r}")
+        # Specifically the SM1 host:port must survive intact.
+        assert "\tmaster tcp ether srv01sm1 4901" in rewritten, (
+            "SM1 master endpoint must be preserved verbatim after "
+            "the # → TAB rewrite")
+        assert "\tquery  tcp ether srv01sm1 4901" in rewritten, (
+            "SM1 query endpoint must be preserved verbatim after "
+            "the # → TAB rewrite")
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
 
 
 def test_module_constants_do_not_collide():
