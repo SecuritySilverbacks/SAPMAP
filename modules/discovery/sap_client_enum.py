@@ -186,7 +186,13 @@ def build_dp_header(terminal="sapscanner"):
     struct.pack_into("!i", dp, 35, -1)   # unused1 = -1
     struct.pack_into("!h", dp, 39, -1)   # rq_id = -1
     dp[41:81] = b"\x20" * 40             # unused2 = spaces
-    term = terminal.encode("ascii")[:15].ljust(15, b"\x00")
+    # Terminal name — Latin-1 to match the DIAG init's negotiated
+    # code_page=1100 (see build_diag_init item1 below).  Previously
+    # .encode("ascii") raised UnicodeEncodeError on any non-ASCII
+    # char, which took down the landscape spray on the first non-
+    # ASCII input (issue #121).  Default "sapscanner" is pure ASCII
+    # so no behaviour change for the common case.
+    term = terminal.encode("latin-1", errors="replace")[:15].ljust(15, b"\x00")
     dp[81:96] = term                      # terminal name
     dp[106:126] = b"\x20" * 20           # unused4 = spaces
     struct.pack_into("!i", dp, 134, -1)  # unused7 = -1
@@ -249,7 +255,19 @@ def build_efield2_atom(block, row, col, text, maxnrchars, mlen,
       field2_maxnrchars (2B BE) = maxnrchars
       field2_text     (dlen bytes)
     """
-    text_bytes = text.encode('ascii') if isinstance(text, str) else text
+    # Encode DIAG text fields as Latin-1 (ISO-8859-1) to match the
+    # negotiated code_page=1100 in build_diag_init.  The pre-fix
+    # .encode('ascii') raised UnicodeEncodeError on any non-ASCII
+    # char in the password / username / client, which took down a
+    # whole landscape pwspray sweep after one bad candidate (issue
+    # #121: ``'ascii' codec can't encode characters in position X-Y:
+    # ordinal not in range(128)``).  Latin-1 covers the common
+    # European-locale cases (umlauts, accents, cedillas); chars
+    # outside Latin-1 (CJK, emoji, etc) are replaced with '?' and
+    # will simply fail to authenticate — a silent miss rather than
+    # a crash.  Pure ASCII input is unchanged (Latin-1 is a superset).
+    text_bytes = (text.encode("latin-1", errors="replace")
+                  if isinstance(text, str) else text)
 
     attr = ATTR_YES3D
     if invisible:
