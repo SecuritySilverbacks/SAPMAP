@@ -1445,6 +1445,7 @@ body {
     <div class="ctx-sub">
       <div class="ctx-item" data-action="set_type">&#9881; Set System Type</div>
       <div class="ctx-item" data-action="set_sid">&#9881; Set SID</div>
+      <div class="ctx-item" data-action="edit_clients">&#9881; Edit Clients</div>
       <div class="ctx-item" data-action="set_db_type">&#9881; Set DB Type</div>
       <div class="ctx-item" data-action="set_os_type">&#9881; Set OS Type</div>
       <div class="ctx-item" data-action="set_instance_nr">&#9881; Set Instance Number</div>
@@ -1459,13 +1460,15 @@ body {
 <!-- Map Background Context Menu -->
 <div class="ctx-menu" id="map-ctx-menu">
   <div class="ctx-item" data-action="map_add_system">&#10133; Add System Manually</div>
+  <div class="ctx-item" data-action="map_import_landscape_xml" title="Import systems from a SAP Logon landscape.xml file (SAPUILandscape.xml) — same action as File &rarr; Import Landscape XML.">&#128196; Import Landscape XML&hellip;</div>
   <div class="ctx-sep"></div>
   <div class="ctx-item write-op" data-action="map_autopwn" style="color:#f85149;font-weight:bold">&#9889; AutoPwn</div>
-  <div class="ctx-item write-op" data-action="map_password_spray" style="color:#ffa657" title="Spray harvested credentials across every ABAP system on the landscape (issue #69).  WARNING: hits USR02 bad-logon counter — may lock accounts.">&#128299; Spray Harvested Credentials&hellip;</div>
+  <div class="ctx-item" data-action="map_scan_all_vulns" style="color:#f0883e;font-weight:bold">&#128270; Scan for All Vulnerabilities</div>
+  <div class="ctx-sep"></div>
+  <div class="ctx-item write-op" data-action="map_password_spray" title="Spray harvested credentials across every ABAP system on the landscape (issue #69).  WARNING: hits USR02 bad-logon counter — may lock accounts.">&#128299; Spray Harvested Credentials&hellip;</div>
   <div class="ctx-item write-op" data-action="map_propagate_all">&#128640; Auto-Propagate All</div>
   <div class="ctx-item write-op" data-action="map_cleanup_all">&#129529; Cleanup All Users</div>
-  <div class="ctx-item" data-action="map_scan_all_vulns" style="color:#f0883e">&#128270; Scan for All Vulnerabilities</div>
-  <div class="ctx-item" data-action="map_scan_all_logon_banners" style="color:#58a6ff" title="Issue #68 — scan every ABAP dispatcher's DIAG logon banner for secrets.  Pure read, no account touched.">&#128269; Scan All Logon Banners for Secrets&hellip;</div>
+  <div class="ctx-item" data-action="map_scan_all_logon_banners" title="Issue #68 — scan every ABAP dispatcher's DIAG logon banner for secrets.  Pure read, no account touched.">&#128269; Scan All Logon Banners for Secrets&hellip;</div>
   <div class="ctx-item" id="map-ctx-check-all-gw" data-action="map_check_all_gw">&#128272; Check All GW Vulnerabilities</div>
   <div class="ctx-item" id="map-ctx-check-all-betrusted" data-action="map_check_all_betrusted">&#128272; Check All 10KBlaze (MS Betrusted)</div>
   <div class="ctx-item" id="map-ctx-check-all-cve-31324" data-action="map_check_all_cve_31324">&#128272; Check All CVE-2025-31324 (Java VisualComposer)</div>
@@ -2375,6 +2378,43 @@ body {
   </div>
 </div>
 
+<!-- Edit Clients Modal -->
+<div class="modal-overlay" id="clients-modal">
+  <div class="modal">
+    <h3>&#9881; Edit Clients</h3>
+    <div id="clients-system-info" style="font-size:12px;color:#8b949e;margin-bottom:12px"></div>
+    <div class="form-row">
+      <label>Clients on this system</label>
+      <div id="clients-list" style="max-height:240px;overflow-y:auto;border:1px solid #30363d;border-radius:4px;padding:4px;margin-bottom:8px"></div>
+      <div style="display:flex;gap:6px;align-items:center">
+        <input type="text" id="clients-add-nr" maxlength="3" placeholder="100"
+               style="width:70px;text-align:center;font-family:monospace"
+               oninput="this.value=this.value.replace(/[^0-9]/g,'')"
+               onkeydown="if(event.key==='Enter'){event.preventDefault();addClientRow();}">
+        <select id="clients-add-category" style="flex:1">
+          <option value="">Unknown category</option>
+          <option value="P">P — Production</option>
+          <option value="T">T — Test</option>
+          <option value="C">C — Customizing</option>
+          <option value="D">D — Demo</option>
+          <option value="E">E — Training/Education</option>
+          <option value="S">S — SAP Reference</option>
+          <option value="V">V — Verified (user-create)</option>
+        </select>
+        <button class="btn" onclick="addClientRow()">&#10133; Add</button>
+      </div>
+      <span style="font-size:10px;color:#484f58;margin-top:6px;display:block">
+        Client numbers are three digits (zero-padded, e.g. 100).  Category mirrors SAP T000
+        CCCATEGORY.  A client flagged <strong>P</strong> marks the system as production.
+      </span>
+    </div>
+    <div class="form-actions">
+      <button class="btn btn-primary" onclick="saveClients()">Save</button>
+      <button class="btn" onclick="closeModal('clients-modal')">Cancel</button>
+    </div>
+  </div>
+</div>
+
 <!-- Set Instance Number Modal -->
 <div class="modal-overlay" id="instance-nr-modal">
   <div class="modal" onkeydown="if(event.key==='Enter'){event.preventDefault();saveInstanceNr();}">
@@ -3112,10 +3152,10 @@ body {
         Whole landscape
       </label>
       <label style="font-size:12px">
-        <input type="radio" name="pws-scope" value="single">
-        Single SID
+        <input type="radio" name="pws-scope" value="list">
+        SID list
       </label>
-      <input type="text" id="pws-scope-sid" placeholder="SID" style="margin-left:6px;width:80px;background:#0d1117;color:#c9d1d9;border:1px solid #30363d;border-radius:3px;padding:2px 4px;font-size:12px">
+      <input type="text" id="pws-scope-sids" placeholder="SID or SID,SID,SID (blank = whole landscape)" title="Comma-separated SIDs. Whitespace and case are normalised. Blank = whole landscape. All SIDs must already be discovered — unknown SIDs are rejected. All listed SIDs share one lockout budget; split into separate runs for per-SID budgets." style="margin-left:6px;width:260px;background:#0d1117;color:#c9d1d9;border:1px solid #30363d;border-radius:3px;padding:2px 4px;font-size:12px">
     </div>
 
     <div style="margin-bottom:10px;display:flex;align-items:center;gap:10px">
@@ -3219,6 +3259,19 @@ body {
       <div class="autopwn-stat"><div class="autopwn-stat-val" id="pws-st-attempts">0</div><div class="autopwn-stat-label">Attempts</div></div>
       <div class="autopwn-stat"><div class="autopwn-stat-val" id="pws-st-hits" style="color:#f85149">0</div><div class="autopwn-stat-label">Hits</div></div>
       <div class="autopwn-stat"><div class="autopwn-stat-val" id="pws-st-locks" style="color:#ffa657">0</div><div class="autopwn-stat-label">Locks</div></div>
+    </div>
+    <!-- Per-attempt visibility (slow/silent/no-stop UX fix) — populated from the
+         status singleton's current_* fields on every 800ms poll tick.  Panel
+         was previously silent between HIT lines for the 1-17s each attempt
+         took, reading as 'stuck' even when the engine was progressing. -->
+    <div id="pws-st-now" style="font-size:11px;color:#58a6ff;margin-top:4px;min-height:14px"></div>
+    <div id="pws-st-last" style="font-size:11px;color:#8b949e;min-height:14px"></div>
+    <!-- STOPPING chip — shown when stop was requested but the engine is
+         still finishing the current attempt.  Mirrors the server-side
+         sapmap_pwspray.mark_stop_requested() flag so the operator sees
+         the STOP click landed within one 800ms poll tick. -->
+    <div id="pws-st-stopping" style="display:none;font-size:11px;color:#f85149;font-weight:600;margin-top:4px;padding:3px 8px;background:#2a1515;border:1px solid #f85149;border-radius:3px;align-self:flex-start">
+      &#9632; STOPPING... (waiting for current attempt to return)
     </div>
     <div style="display:flex;align-items:center;gap:8px">
       <div class="autopwn-bar-track" style="flex:1">
@@ -6403,6 +6456,69 @@ function showCtxMenu(e, sid) {
   const hasGwVuln = n && n.gw_vulnerable;
   const hasMsVuln = n && n.ms_vulnerable;
   const hasMsPort = n && n.ms_port > 0;
+  // Per-node Spray entry (#69) only makes sense when the landscape
+  // pool holds at least one candidate.  Mirrors the backend's
+  // landscape_password_pool gate (modules/discovery/sapmap_pwspray.py
+  // _add() helper): a candidate is only counted when it carries BOTH
+  // a username AND a password.  Walks the four reachable sources:
+  //
+  //   (1) node.credentials with username+password  (skip kind='scc'
+  //       — those go into the SCC bucket below instead)
+  //   (2) node.secstore_entries with category='oauth2_client' AND
+  //       username/client_id AND password (OA2C secrets)
+  //   (3) btp_subaccounts[].destinations with user+password
+  //   (4) scc_nodes[].credentials with username+password
+  //
+  // Deliberately NOT counted:
+  //   - DBCON edges  (opt-in via include_db_connect, default off;
+  //     sapsa/sapsr3 locks DB account on wrong-password spray)
+  //   - operator wordlist  (lives server-side on api.pwspray_wordlist;
+  //     a wordlist-only pool still reads as empty here — operators
+  //     with wordlist-only workflows should use the map-background
+  //     entry which has no gate)
+  //
+  // Operator feedback 2026-10-08 (post-PR-#117): the prior
+  // Object.keys(mapState.scc_nodes).length > 0 check was too loose —
+  // an SCC on the map without stored admin creds flipped the gate on
+  // and made the entry visible on a node with no actual pool items.
+  const hasSprayCandidates = (() => {
+    const nodes = mapState.nodes || {};
+    for (const key in nodes) {
+      const nn = nodes[key] || {};
+      // (1) node.credentials
+      if ((nn.credentials || []).some(c =>
+          c && c.username && c.password
+          && (c.kind || "").toLowerCase() !== "scc")) {
+        return true;
+      }
+      // (2) OA2C oauth2_client secstore entries
+      if ((nn.secstore_entries || []).some(e =>
+          e && (e.category || "").toLowerCase() === "oauth2_client"
+          && (e.username || e.client_id)
+          && e.password)) {
+        return true;
+      }
+    }
+    // (3) BTP destinations with cleartext basic-auth creds
+    const btpSubs = mapState.btp_subaccounts || {};
+    for (const uuid in btpSubs) {
+      const sub = btpSubs[uuid] || {};
+      if ((sub.destinations || []).some(d =>
+          d && d.user && d.password)) {
+        return true;
+      }
+    }
+    // (4) SCC admin / local-user credentials
+    const sccNodes = mapState.scc_nodes || {};
+    for (const host in sccNodes) {
+      const sn = sccNodes[host] || {};
+      if ((sn.credentials || []).some(c =>
+          c && c.username && c.password)) {
+        return true;
+      }
+    }
+    return false;
+  })();
   // kloris/SAPMAP#41 — set by check_ms_betrusted when the MS internal
   // port only speaks TLS/SystemPKI (system/secure_communication = ON).
   // Both betrusted (CVE-2020-6207) and the CVE-2026-58240 write path
@@ -7027,7 +7143,19 @@ function showCtxMenu(e, sid) {
     'client_roles':     !isAbapStack,
     'read_usrextid':    !isAbapStack,
     'default_creds':    !isAbapStack,
-    'password_spray':   !isAbapStack,              // #69 — only ABAP has a DIAG dispatcher to spray
+    // #69 — only ABAP has a DIAG dispatcher to spray.  Additionally
+    // hide when the landscape pool is empty: shipping an "attack"
+    // action that has nothing to try just clutters the menu.
+    // Operator feedback 2026-10-08: the per-node entry appeared on
+    // freshly-plotted nodes before any credentials had been
+    // harvested anywhere in the landscape.
+    'password_spray':   !isAbapStack || !hasSprayCandidates,
+    // #69 landscape-wide trigger separately shown in map ctx menu
+    // (data-action="map_password_spray") does NOT gate on
+    // hasSprayCandidates — it opens the config modal where operators
+    // can paste a wordlist, which seeds the pool.  Per-node entry
+    // skips that config step and jumps straight to a scoped spray,
+    // so an empty-pool per-node spray would be a no-op.
     'scan_logon_banners': !isAbapStack,              // #68 — DIAG login screen is an ABAP-stack surface
     'probe_telemetry':  !isAbapStack,
     'capture_evasion_baseline': !isAbapStack,
@@ -7054,6 +7182,14 @@ function showCtxMenu(e, sid) {
     // even greyed out.  Matches the behaviour we already do for other
     // wire-layer-blocked primitives.
     'betrusted':             msSecureComms,
+    // "Set 10KBLAZE Attacker IP (NAT override)" only configures a
+    // field consumed by the betrusted / 10KBLAZE chain.  On a node
+    // where Check MS Betrusted has not confirmed ms_vulnerable, the
+    // chain can't fire and this knob has nothing to feed — hide it.
+    // Operator feedback 2026-10-08: appeared on freshly-plotted
+    // nodes before Check MS Betrusted had been run anywhere.
+    // Re-appears automatically once ms_vulnerable flips True.
+    'set_attacker_ip':       !hasMsVuln,
     'download_secstore':     !isAbapStack,  // RSECTAB is an ABAP table
     'ransapware_encrypt':    !isAbapStack,
     'ransapware_decrypt':    !isAbapStack,
@@ -9705,6 +9841,7 @@ async function ctxAction(action) {
     }
     case 'set_type': showTypeModal(sid); break;
     case 'set_sid': showSidModal(sid); break;
+    case 'edit_clients': showClientsModal(sid); break;
     case 'set_db_type': showDbTypeModal(sid); break;
     case 'set_os_type': showOsTypeModal(sid); break;
     case 'set_instance_nr': showInstanceNrModal(sid); break;
@@ -10804,6 +10941,7 @@ function showDetails(sid, opts) {
     <h3>${escHtml(n.sid)} System Details</h3>
     ${renderPhaseProgress(getPhaseProgress(n, sid))}
     <div class="detail-section">
+      <div class="detail-row"><span class="detail-key">Description</span><span class="detail-val">${escHtml(n.sapology_data.description)}</span></div>
       <div class="detail-row"><span class="detail-key">SID</span><span class="detail-val">${escHtml(n.sid)}</span></div>
       <div class="detail-row"><span class="detail-key">Type</span><span class="detail-val">${escHtml(n.system_type)}</span></div>
       <div class="detail-row"><span class="detail-key">Hostname</span><span class="detail-val">${escHtml(n.hostname)}</span></div>
@@ -14634,6 +14772,84 @@ async function saveSid() {
   if (r && r.error) { alert('Set SID failed: ' + r.error); return; }
   selectedNodeSid = raw;
   closeModal('sid-modal');
+  startPolling();
+}
+
+// ---------------------------------------------------------------------
+//  Edit Clients modal — add/delete entries in node.clients.  Each
+//  entry is {nr: "100", category: "P"}.  The working copy lives in
+//  clientsModalData so edits are only committed to the backend on Save.
+// ---------------------------------------------------------------------
+let clientsModalData = [];
+const CLIENT_CATEGORY_LABELS = {
+  '': 'unknown', 'P': 'Production', 'T': 'Test', 'C': 'Customizing',
+  'D': 'Demo', 'E': 'Training', 'S': 'SAP Reference', 'V': 'Verified'
+};
+
+function showClientsModal(sid) {
+  const n = (mapState.nodes || {})[sid];
+  document.getElementById('clients-system-info').textContent =
+    sid + (n ? ' (' + ((n.clients || []).length) + ' client(s) known)' : '');
+  // Deep-copy existing clients, normalising to {nr, category} objects
+  // (older state files / scanner paths sometimes store bare strings).
+  clientsModalData = ((n && n.clients) || []).map(c =>
+    (typeof c === 'object')
+      ? { nr: String(c.nr || '').trim(), category: c.category || '' }
+      : { nr: String(c).trim(), category: '' });
+  renderClientsList();
+  document.getElementById('clients-add-nr').value = '';
+  document.getElementById('clients-add-category').selectedIndex = 0;
+  document.getElementById('clients-modal').classList.add('visible');
+  document.getElementById('clients-add-nr').focus();
+}
+
+function renderClientsList() {
+  const box = document.getElementById('clients-list');
+  if (!clientsModalData.length) {
+    box.innerHTML = '<div style="color:#484f58;font-size:11px;padding:6px">No clients yet — add one below.</div>';
+    return;
+  }
+  box.innerHTML = clientsModalData.map((c, i) => {
+    const cat = c.category || '';
+    const label = CLIENT_CATEGORY_LABELS[cat] || cat;
+    const tag = cat ? ` <span style="color:#8b949e">(${escHtml(cat)} — ${escHtml(label)})</span>` : '';
+    return `<div style="display:flex;align-items:center;gap:8px;padding:3px 4px">
+      <span style="font-family:monospace;min-width:34px">${escHtml(c.nr)}</span>
+      <span style="flex:1;font-size:11px">${tag}</span>
+      <button class="btn" style="padding:1px 8px;color:#f85149" onclick="deleteClientRow(${i})" title="Remove client">&#10006;</button>
+    </div>`;
+  }).join('');
+}
+
+function addClientRow() {
+  const nrEl = document.getElementById('clients-add-nr');
+  const nr = (nrEl.value || '').trim().padStart(3, '0');
+  if (!/^\d{3}$/.test(nr)) {
+    alert('Client number must be one to three digits, e.g. 100.');
+    return;
+  }
+  if (clientsModalData.some(c => c.nr === nr)) {
+    alert('Client ' + nr + ' is already in the list.');
+    return;
+  }
+  const category = document.getElementById('clients-add-category').value;
+  clientsModalData.push({ nr: nr, category: category });
+  nrEl.value = '';
+  document.getElementById('clients-add-category').selectedIndex = 0;
+  renderClientsList();
+  nrEl.focus();
+}
+
+function deleteClientRow(i) {
+  clientsModalData.splice(i, 1);
+  renderClientsList();
+}
+
+async function saveClients() {
+  const r = await api('POST', `node/${selectedNodeSid}/set_clients`,
+                      { clients: clientsModalData });
+  if (r && r.error) { alert('Set clients failed: ' + r.error); return; }
+  closeModal('clients-modal');
   startPolling();
 }
 
@@ -18652,16 +18868,24 @@ let _pwsprayPollTimer = null;
 let _pwsprayLastRenderedRun = null;
 
 function showPwsprayModal(opts) {
-  // Reset modal state.  Optional `opts.single_sid` pre-seeds the
-  // single-system scope so the per-node ctx-menu entry (which knows
-  // the sid the operator right-clicked on) can open the modal pre-
-  // scoped — rather than firing a bare dry-run POST behind a
-  // confirm (operator feedback 2026-10-05).
+  // Reset modal state.  Optional seeds:
+  //   opts.single_sid (string, legacy)  — pre-seeds textbox with one SID
+  //   opts.sids       (array, since #107) — pre-seeds textbox with
+  //                                          comma-joined SIDs
+  // Either triggers the 'list' radio.  Per-node ctx-menu passes
+  // {single_sid: sid} so the operator who right-clicked lands on a
+  // modal pre-scoped to that node (operator feedback 2026-10-05).
   opts = opts || {};
-  const seedSid = (opts.single_sid || '').trim();
-  const scopeVal = seedSid ? 'single' : 'landscape';
+  let seedSids = [];
+  if (Array.isArray(opts.sids)) {
+    seedSids = opts.sids.map(s => (s || '').trim()).filter(Boolean);
+  } else if (opts.single_sid) {
+    const s = (opts.single_sid || '').trim();
+    if (s) seedSids = [s];
+  }
+  const scopeVal = seedSids.length ? 'list' : 'landscape';
   document.querySelector('input[name="pws-scope"][value="' + scopeVal + '"]').checked = true;
-  document.getElementById('pws-scope-sid').value = seedSid;
+  document.getElementById('pws-scope-sids').value = seedSids.join(',');
   document.getElementById('pws-cap').value = 1;
   document.getElementById('pws-cap-val').textContent = '1';
   document.getElementById('pws-dry-run').checked = true;
@@ -18680,13 +18904,30 @@ function showPwsprayModal(opts) {
 
 function _pwsprayCollectConfig() {
   const scope = document.querySelector('input[name="pws-scope"]:checked').value;
-  const singleSid = (document.getElementById('pws-scope-sid').value || '').trim();
-  if (scope === 'single' && !singleSid) {
-    alert('Pick a SID for single-scope spray.');
-    return null;
+  const raw = (document.getElementById('pws-scope-sids').value || '').trim();
+  // Parse comma-separated SID list (issue #107).  Backend validates
+  // against discovered nodes and 400s on unknown SIDs with a specific
+  // error — we don't duplicate the membership check here, just the
+  // basic shape (strip, upper, dedup, drop empties).  Operator who
+  // leaves the textbox blank on the 'list' radio gets a client-side
+  // alert matching the pre-#107 "Pick a SID for single-scope spray."
+  // guard rail.
+  let sids = [];
+  if (scope === 'list') {
+    const seen = {};
+    for (const tok of raw.split(',')) {
+      const s = (tok || '').trim().toUpperCase();
+      if (!s || seen[s]) continue;
+      seen[s] = true;
+      sids.push(s);
+    }
+    if (!sids.length) {
+      alert('Enter at least one SID, or switch scope to Whole landscape.');
+      return null;
+    }
   }
   return {
-    single_sid: scope === 'single' ? singleSid : '',
+    sids: sids,
     include_production: document.getElementById('pws-include-prod').checked,
     accept_production_risk:
       document.getElementById('pws-accept-prod-risk').checked,
@@ -18721,7 +18962,7 @@ async function pwsprayPreview() {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({
-      single_sid: cfg.single_sid,
+      sids: cfg.sids,
       include_production: cfg.include_production,
       cap_per_user: cfg.cap_per_user,
     }),
@@ -18729,7 +18970,11 @@ async function pwsprayPreview() {
   const d = await r.json();
   const dst = document.getElementById('pws-preview-result');
   if (!d || d.error) {
-    const err = (d && d.error) || 'unknown error';
+    // Prefer the human-friendly `message` from issue #107's helper
+    // (e.g. "Unknown SID(s): XYZ") over the bare error code — the
+    // operator shouldn't have to decode `unknown_sid` to know what
+    // happened.  Fall back to the error code if no message present.
+    const err = (d && (d.message || d.error)) || 'unknown error';
     dst.innerHTML = '<div style="color:#f85149;font-size:12px">Preview failed: '
       + _escapeHtml(String(err)) + '</div>';
     return;
@@ -18793,7 +19038,10 @@ async function pwsprayLaunch() {
     return;
   }
   if (!cfg.dry_run) {
-    const scope = cfg.single_sid ? 'single:' + cfg.single_sid : 'landscape';
+    let scope;
+    if (!cfg.sids || !cfg.sids.length) scope = 'landscape';
+    else if (cfg.sids.length === 1) scope = 'single:' + cfg.sids[0];
+    else scope = 'multi:' + cfg.sids.join(',');
     if (!confirm('LIVE PASSWORD SPRAY against ' + scope + '.\n\n'
                  + 'Cap per user: ' + cfg.cap_per_user + '\n'
                  + 'This hits USR02 bad-logon counter and MAY LOCK ACCOUNTS.\n\n'
@@ -18808,7 +19056,7 @@ async function pwsprayLaunch() {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({
-      single_sid: cfg.single_sid,
+      sids: cfg.sids,
       include_production: cfg.include_production,
       accept_production_risk: cfg.accept_production_risk,
       cap_per_user: cfg.cap_per_user,
@@ -18899,6 +19147,40 @@ async function _pwsprayPollStatus() {
       st.attempts_done + ' / ' + st.attempts_total;
     document.getElementById('pws-st-hits').textContent = st.hits;
     document.getElementById('pws-st-locks').textContent = st.locks;
+    // "Now trying" + "Last result" rows (slow/silent/no-stop fix).
+    // Rendered as a two-line block above the log pane so operators
+    // see what the engine is currently doing — previously the panel
+    // was silent for the 1-17s each attempt took and read as stuck.
+    const nowEl = document.getElementById('pws-st-now');
+    if (nowEl) {
+      if (st.current_target_sid) {
+        nowEl.textContent =
+          'Now trying: ' + st.current_target_sid + '/' +
+          st.current_client + ' user=' + st.current_user +
+          ' (' + st.current_candidate_index + '/' +
+          st.current_candidate_total + ')';
+      } else if (st.running) {
+        nowEl.textContent = 'Now trying: (preparing...)';
+      } else {
+        nowEl.textContent = '';
+      }
+    }
+    const lastEl = document.getElementById('pws-st-last');
+    if (lastEl) {
+      lastEl.textContent = st.last_result
+        ? 'Last result: ' + st.last_result
+          + (st.last_detail ? ' — ' + st.last_detail : '')
+        : '';
+    }
+    // STOPPING chip — set by sapmap_pwspray.mark_stop_requested()
+    // from the /api/scan/stop handler, before the engine's own
+    // cancel_check bubbles up.  Gives the operator immediate
+    // feedback that the STOP press landed.
+    const stopEl = document.getElementById('pws-st-stopping');
+    if (stopEl) {
+      stopEl.style.display =
+        (st.running && st.aborted === 'stop_requested') ? '' : 'none';
+    }
     const total = st.attempts_total || 1;
     const pct = Math.min(100, Math.round(100 * (st.attempts_done || 0) / total));
     document.getElementById('pws-bar').style.width = pct + '%';
@@ -18943,7 +19225,24 @@ async function _pwsprayPollStatus() {
 
 function stopPwspray() {
   // Reuses the global stop channel — same path AutoPwn's STOP uses.
-  fetch('/api/scan/stop', {method: 'POST'});
+  // Backend's /api/scan/stop also calls sapmap_pwspray.mark_stop_
+  // requested() so the next 800ms status poll shows the STOPPING
+  // chip even before the engine's cancel_check bubbles up.
+  // Operator-facing toast so the click feels like it did something
+  // (previously STOP was fire-and-forget; the engine could still
+  // be inside a 17s try_login, making the button look dead).
+  fetch('/api/scan/stop', {method: 'POST'}).then(r => {
+    if (r.ok) {
+      try { showToast('Stop requested — waiting for current attempt to return', 'info'); }
+      catch (_) {}
+    } else {
+      try { showToast('Stop failed: HTTP ' + r.status, 'error'); }
+      catch (_) {}
+    }
+  }).catch(e => {
+    try { showToast('Stop request error: ' + e, 'error'); }
+    catch (_) {}
+  });
 }
 
 function closePwsprayPanel() {
@@ -19115,7 +19414,16 @@ function _renderDefenderView(run) {
 function _renderHitMatrix(run) {
   const hits = (run.hits || []);
   const scope = (run.config_snapshot && run.config_snapshot.scope_filter) || {};
-  const scopeLabel = scope.single_sid ? ('single:' + scope.single_sid) : 'landscape';
+  // Issue #107: scope_filter may carry single_sid (legacy / len==1) OR
+  // sids:[...] (multi-SID).  Render each in the same shape SprayRun.scope
+  // uses so hit-matrix header, history drawer, and engagement report
+  // stay consistent.
+  let scopeLabel = 'landscape';
+  if (scope.single_sid) {
+    scopeLabel = 'single:' + scope.single_sid;
+  } else if (Array.isArray(scope.sids) && scope.sids.length) {
+    scopeLabel = 'multi:' + scope.sids.join(',');
+  }
   const header =
     '<div style="font-size:12px;color:#8b949e;margin-bottom:8px">'
     + '<strong>Run:</strong> <code>' + _escapeHtml(run.run_id || '?') + '</code>'
@@ -20772,6 +21080,7 @@ document.getElementById('map-ctx-menu').addEventListener('click', function(e) {
   hideMapCtxMenu();
   switch (item.getAttribute('data-action')) {
     case 'map_add_system': showAddSystemModal(); break;
+    case 'map_import_landscape_xml': loadLandscapeXML(); break;
     case 'map_autopwn': showAutoPwnModal(); break;
     case 'map_password_spray': showPwsprayModal(); break;
     case 'map_propagate_all': propagateAll(); break;

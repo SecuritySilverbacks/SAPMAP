@@ -715,3 +715,88 @@ def test_cpic_counter_at_deeper_offset_still_rejects():
         "CPIC counter at offset 108 is NOT a canonical conv_id — the "
         "A4H kernel 916 reject envelope must still trigger hardened_"
         "reject even with the new offset-40 gate")
+
+
+# ---------------------------------------------------------------------------
+# Operator-facing output: distinguish "trust-propagation break" from
+# "secinfo content block" (2026-10-07 — operator diagnosed S4H kernel
+# 793 live: gw/sim_mode=0, ms_acl_info HOST=*, secinfo DOES permit
+# TP=* for USER-HOST=internal/local, yet sapxpg fails because our
+# source IP is not in GW internal_hosts.  Before this fix the error
+# message blamed secinfo content; the fix adds the USER-HOST
+# classification hint so operators know to check SMMS Server list +
+# verify MS->GW NILIST propagation).
+# ---------------------------------------------------------------------------
+
+def test_secinfo_kernel_deny_error_msg_hints_at_user_host_classification():
+    """APPC_RC=0x09/0x0A error_msg must warn operators that an identical
+    reject symptom can come from TWO different root causes:
+      1. secinfo content: no permit rule for TP=sapxpg (file is empty
+         or restrictive) — real secinfo-deny
+      2. USER-HOST classification: secinfo DOES permit for internal
+         hosts but our source IP is not in GW internal_hosts (MS->GW
+         NILIST didn't propagate us)
+    Point operators at the two authoritative diagnostics: inspect
+    secinfo on disk + SMMS Server list."""
+    info = parse_response(_hardened_frame_with_appc(0x09), "F_SAP_INIT")
+    msg = info["error_msg"]
+    # Original signal must still be present (back-compat with existing
+    # assertions in test_appc_rc_0x09_classifies_as_secinfo_kernel_deny)
+    assert "sapxpg" in msg
+    assert "2808158" in msg
+    assert "sec_info" in msg
+    # New operator-facing diagnostic hint must call out BOTH
+    # possibilities + name the two authoritative diagnostics.
+    assert "USER-HOST=internal" in msg or "USER-HOST=`internal`" in msg, (
+        "error_msg must hint at USER-HOST classification as an "
+        "alternative root cause — operator was burned 2026-10-07 "
+        "assuming secinfo was the problem when secinfo actually "
+        "permitted TP=* for USER-HOST=internal")
+    assert "internal_hosts" in msg, (
+        "error_msg must name 'internal_hosts' — the GW list the "
+        "operator needs to understand is missing their source IP")
+    assert "SMMS" in msg and "Server list" in msg, (
+        "error_msg must point operator at SMMS -> Server list as the "
+        "authoritative check for 'did my MS inject actually land'")
+
+
+def test_secinfo_kernel_deny_error_msg_also_fires_for_appc_rc_0x0a():
+    """Same hint block must appear for the sibling APPC_RC=0x0A
+    (CM_TP_NOT_AVAILABLE_NO_RETRY) — one error_msg generator serves
+    both so operators get consistent guidance regardless of which
+    kernel return code the GW happens to emit."""
+    info = parse_response(_hardened_frame_with_appc(0x0A), "F_SAP_INIT")
+    msg = info["error_msg"]
+    assert "USER-HOST=internal" in msg or "USER-HOST=`internal`" in msg
+    assert "internal_hosts" in msg
+    assert "SMMS" in msg
+
+
+def test_p3_conv_not_found_post_retry_prints_trust_propagation_hint():
+    """When _probe_gw_port_for_xpg sends a retry P3 and that retry
+    ALSO fails with 'Conversation NNNNNNNN not found', the operator
+    sees one of the most confusing SAPMAP outputs: P2 'succeeded' but
+    P3 can't find the session.  Before this fix (2026-10-07) the
+    operator was left to guess between (a) CPIC counter leak at offset
+    40 that the canonical conv_id gate mis-classified, OR (b) MS->GW
+    NILIST propagation break (our IP not in internal_hosts).  Pin
+    that the fix adds a diagnostic hint block naming both causes +
+    pointing at SMMS Server list + /usr/sap/<SID>/SYS/global/secinfo
+    as the two concrete checks that discriminate them."""
+    src = (REPO_ROOT / "modules" / "exploitation" / "sapmap_exploit.py"
+           ).read_text(encoding="utf-8")
+    # The hint block fires ONLY on the "Conversation...not found"
+    # pattern (gated so unrelated P3 errors don't trigger it).
+    assert '"not found" in err_msg.lower()' in src
+    assert '"conversation" in err_msg.lower()' in src
+    # Collapse adjacent string-literal continuations so the asserts
+    # match the operator-visible one-line message even when the
+    # Python source wraps it across lines.
+    collapsed = re.sub(r'"\s*\n\s*f?"', "", src)
+    # Both hypotheses named
+    assert "CPIC counter leak" in collapsed
+    assert "NILIST propagation did not land" in collapsed
+    # Both authoritative diagnostics pointed at
+    assert "SMMS -> Server list" in collapsed
+    assert "/usr/sap/<SID>/SYS/global/secinfo" in collapsed
+    assert "USER-HOST=internal permit rules" in collapsed

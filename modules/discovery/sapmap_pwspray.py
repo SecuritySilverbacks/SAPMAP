@@ -257,6 +257,20 @@ class SprayConfig:
     # RFC fallback for NO_DIALOG_USER (system/comm users).  Requires
     # NW RFC SDK available on the SAPMAP host.
     rfc_fallback_for_service_users: bool = True
+    # ---- Responsiveness / cancellation (issue #121 follow-up) ----
+    # Per-DIAG-attempt timeout (seconds) passed to try_login's socket.
+    # Default 3 keeps the median attempt ~1-2s on reachable hosts;
+    # worst case on an unreachable host is roughly 3 (connect) + 3
+    # (init-recv) + 5 (login-recv w/ internal +2 slack) ≈ 11s.  Was
+    # effectively 5+5+7 = 17s before this knob existed, which made
+    # STOP look unresponsive on landscapes with any dead host.
+    attempt_timeout_s: int = 3
+    # Bounded-timeout for probe callbacks that would otherwise block
+    # the spray loop on a slow RFC handshake (operator-reported
+    # 3-minute stall after the first HIT fired the authority probe
+    # against an unreachable co-tenant).
+    hit_probe_timeout_s: int = 10
+    usr02_probe_timeout_s: int = 10
     # Per-run id — populated by spray_landscape() if left empty.
     run_id: str = ""
 
@@ -500,18 +514,24 @@ def build_target_matrix(state, scope_filter: Optional[dict] = None) -> dict:
                "ineligible": [(SAPNode, reason_str), ...]}``.
     """
     scope_filter = scope_filter or {}
-    sids: Optional[set] = None
+    # Keep as a LIST (not a set) so operator-specified SID order is
+    # preserved end-to-end for predictable progress-panel + report
+    # output.  Issue #107 planning surfaced the set()-conversion
+    # order-loss bug that was invisible as long as only single_sid was
+    # exercised.  Membership test is O(k) for k = len(sids); fine for
+    # typical N <= ~20 SIDs an operator would spray in one run.
+    sids: Optional[List[str]] = None
     if scope_filter.get("single_sid"):
-        sids = {scope_filter["single_sid"]}
+        sids = [scope_filter["single_sid"]]
     elif scope_filter.get("sids"):
-        sids = set(scope_filter["sids"])
+        sids = list(scope_filter["sids"])
 
     include_prod = bool(scope_filter.get("include_production", False))
 
     eligible: List[SprayTarget] = []
     ineligible: List[Tuple[object, str]] = []
     for sid, node in (state.nodes or {}).items():
-        if sids and sid not in sids:
+        if sids is not None and sid not in sids:
             continue
         # ABAP-only
         stype = (getattr(node, "system_type", "") or "").upper()
@@ -620,11 +640,75 @@ def _sha256_prefix(s: str, n: int = 8) -> str:
     return hashlib.sha256((s or "").encode("utf-8")).hexdigest()[:n]
 
 
-def _jittered_sleep(rng: Tuple[float, float]) -> None:
+def _jittered_sleep(rng: Tuple[float, float],
+                    cancel_check: Optional[Callable[[], bool]] = None) -> None:
+    """Sleep for a uniform-random duration in ``rng`` (lo, hi) seconds.
+
+    When ``cancel_check`` is provided, the sleep is sliced into 100ms
+    chunks that poll the flag between each — a STOP press during a
+    sleep is honoured within ~100ms instead of blocking for the full
+    jitter window.  Pre-fix: the raw time.sleep could not be
+    interrupted, so STOP latency was floor-bound by the sleep range
+    even once the engine's between-iteration cancel_check caught up
+    (issue: STOP button no-op during inter-attempt / inter-node
+    sleeps on dead-host spray)."""
     lo, hi = rng
     if hi <= 0:
         return
-    time.sleep(random.uniform(max(0.0, lo), max(lo, hi)))
+    total = random.uniform(max(0.0, lo), max(lo, hi))
+    if cancel_check is None:
+        time.sleep(total)
+        return
+    slice_s = 0.1
+    remaining = total
+    while remaining > 0:
+        if cancel_check():
+            return
+        step = slice_s if remaining > slice_s else remaining
+        time.sleep(step)
+        remaining -= step
+
+
+def _run_with_watchdog(fn, *args, timeout_s: float, default, **kwargs):
+    """Run ``fn(*args, **kwargs)`` in a daemon thread with a bounded
+    wait.  Returns:
+
+      * ``fn``'s return value if it completes within ``timeout_s``.
+      * ``default`` if the thread is still running after ``timeout_s``
+        (hard-timeout — caller treats this as "probe gave up").
+      * Re-raises any exception ``fn`` raised, so callers that wrap
+        the probe in their own ``try/except`` keep seeing the real
+        error text (preserves pre-fix behaviour for test asserts
+        like ``"S_RFC denied" in note``).
+
+    Used to bound pwspray's probe callbacks (hit-authority probe +
+    USR02 baseline/readback) that would otherwise block the whole
+    spray loop on a slow RFC handshake.  Operator-reported 3-minute
+    stall after the first HIT fired an unbounded authority probe
+    against a co-tenant that never completed.
+
+    The thread is daemonised so it doesn't block Python shutdown
+    even if the underlying RFC call never returns — the probe's
+    socket is leaked (the SDK owns it), but the spray loop proceeds."""
+    import threading as _th
+    holder = {"value": default, "done": False, "exc": None}
+
+    def _runner():
+        try:
+            holder["value"] = fn(*args, **kwargs)
+            holder["done"] = True
+        except BaseException as e:   # noqa: BLE001 — re-raised below
+            holder["exc"] = e
+
+    t = _th.Thread(target=_runner, daemon=True)
+    t.start()
+    t.join(timeout=timeout_s)
+    if holder["exc"] is not None:
+        raise holder["exc"]
+    if holder["done"]:
+        return holder["value"]
+    # Timed out — caller distinguishes via comparing to `default`.
+    return default
 
 
 def _effective_skip_users(opt_in: Set[str]) -> Set[str]:
@@ -652,6 +736,8 @@ def check_sprayed_credentials(
     on_result: Optional[Callable[[dict], None]] = None,
     try_login_fn: Optional[Callable] = None,
     tested_triples: Optional[Set[str]] = None,
+    attempt_timeout_s: int = 5,
+    on_pre_attempt: Optional[Callable[[SprayCandidate, str, int, int], None]] = None,
 ) -> List[dict]:
     """Spray ``candidates`` against ``(host, port, each client)`` under
     the given lockout cap.  Generalisation of
@@ -719,10 +805,11 @@ def check_sprayed_credentials(
             except Exception:
                 logger.debug("on_result callback raised", exc_info=True)
 
+    cand_total = len(candidates)
     for client in clients:
         if cancel_check and cancel_check():
             break
-        for cand in candidates:
+        for ci, cand in enumerate(candidates):
             if cancel_check and cancel_check():
                 break
             uname_up = cand.username.upper()
@@ -788,10 +875,22 @@ def check_sprayed_credentials(
 
             # The one attempt.
             attempts[akey] = attempts.get(akey, 0) + 1
+            # Surface a per-attempt signal BEFORE the (potentially
+            # multi-second) DIAG socket call so the GUI's status
+            # panel + log tail reflect what the engine is currently
+            # doing — the pre-fix engine's silence between HIT lines
+            # read as "stuck" even when it was working.
+            if on_pre_attempt is not None:
+                try:
+                    on_pre_attempt(cand, client, ci, cand_total)
+                except Exception:
+                    logger.debug("on_pre_attempt callback raised",
+                                 exc_info=True)
             try:
                 result, detail = try_login_fn(
                     host, port, client, cand.username, cand.password,
-                    saprouter=saprouter, terminal=terminal)
+                    saprouter=saprouter, terminal=terminal,
+                    timeout=attempt_timeout_s)
             except TypeError:
                 # Older try_login signature w/o keyword args — retry
                 # positionally.  Keeps us robust against upstream
@@ -819,7 +918,13 @@ def check_sprayed_credentials(
             else:
                 row["kind"] = "miss"
             _emit(row)
-            _jittered_sleep(inter_attempt_sleep_range)
+            # Check cancel BEFORE the inter-attempt sleep so STOP
+            # pressed during the current attempt skips the sleep
+            # entirely instead of waiting out ~0.3-0.9s floor.
+            if cancel_check and cancel_check():
+                break
+            _jittered_sleep(inter_attempt_sleep_range,
+                            cancel_check=cancel_check)
     return results
 
 
@@ -936,6 +1041,12 @@ def spray_landscape(
     scope_label = "landscape"
     if scope_filter and scope_filter.get("single_sid"):
         scope_label = f"single:{scope_filter['single_sid']}"
+    elif scope_filter and scope_filter.get("sids"):
+        # Multi-SID run (issue #107).  Preserve operator-specified
+        # order in the label — the engine already preserves it in the
+        # target iteration via the list-not-set fix above.
+        _sids_render = list(scope_filter["sids"])
+        scope_label = "multi:" + ",".join(_sids_render)
     _reset_status(
         run_id=config.run_id,
         scope=scope_label,
@@ -1027,6 +1138,13 @@ def spray_landscape(
             usr02_probe_fn = _default_usr02_probe
         baseline_hits = 0
         for bi, target in enumerate(targets):
+            # Honour STOP during the baseline phase so a long RFC
+            # round-trip loop can be aborted — pre-fix the operator
+            # pressing STOP during baseline just waited for every
+            # (sid, client) USR02 read to complete first.
+            if cancel_check and cancel_check():
+                run.aborted = run.aborted or "user_stop"
+                break
             node = (state.nodes or {}).get(target.sid)
             if node is None:
                 continue
@@ -1036,12 +1154,28 @@ def spray_landscape(
                     f"{target.sid}: no verified credentials")
                 continue
             for client in target.clients:
+                if cancel_check and cancel_check():
+                    run.aborted = run.aborted or "user_stop"
+                    break
+                # Bounded-timeout wrapper: an unresponsive RFC
+                # handshake used to block the baseline phase
+                # indefinitely with no way out short of killing
+                # the SAPMAP process.
                 try:
-                    rows = usr02_probe_fn(
-                        node, creds, client, sorted(unique_pool_users))
+                    rows = _run_with_watchdog(
+                        usr02_probe_fn,
+                        node, creds, client, sorted(unique_pool_users),
+                        timeout_s=config.usr02_probe_timeout_s,
+                        default=None)
                 except Exception as e:
                     baseline_errors.append(
                         f"{target.sid}/{client}: {e}")
+                    continue
+                if rows is None:
+                    baseline_errors.append(
+                        f"{target.sid}/{client}: USR02 probe exceeded "
+                        f"usr02_probe_timeout_s="
+                        f"{config.usr02_probe_timeout_s}s")
                     continue
                 for u, info in (rows or {}).items():
                     key = f"{target.sid}|{client}|{u.upper()}"
@@ -1052,6 +1186,8 @@ def spray_landscape(
                         "ts": datetime.utcnow().isoformat(),
                     }
                     baseline_hits += 1
+            if run.aborted:
+                break
             _set_phase_progress(bi + 1, max(1, len(targets)))
         run.purple_baseline_available = baseline_hits > 0
         run.purple_baseline_error = "; ".join(baseline_errors)
@@ -1107,6 +1243,23 @@ def spray_landscape(
             # Preview mode — don't open sockets; just record what we
             # WOULD have attempted so the UI's preview knows.
             continue
+
+        def _pre_attempt(cand, client, idx, total):
+            """Fired BEFORE each try_login socket call.  Updates the
+            status singleton's current_* fields so the GUI panel can
+            render 'Now trying: <SID>/<CLIENT> user=<USER> (i/N)' —
+            and appends a per-attempt log line to the status's
+            log_tail so operators watching the console see progress
+            even on slow attempts."""
+            _status.current_target_sid = target.sid
+            _status.current_target_host = target.host
+            _status.current_client = client
+            _status.current_user = cand.username
+            _status.current_candidate_index = idx + 1
+            _status.current_candidate_total = total
+            _append_log(
+                f"[*] {target.sid}/{client} user={cand.username} "
+                f"({idx + 1}/{total}) src={cand.source_kind}")
 
         def _on_result(row: dict) -> None:
             nonlocal total_locks_observed
@@ -1183,6 +1336,22 @@ def spray_landscape(
                 _append_purple_signal(node, signal_row)
             run.attempts_done += 1
             _status.attempts_done = run.attempts_done
+            # Per-attempt result signal (slow/silent/no-stop
+            # follow-up).  Rendered by the GUI panel as 'Last
+            # result: <RESULT>' alongside the 'Now trying' row.
+            _status.last_result = row.get("result", "") or ""
+            _status.last_detail = (row.get("detail") or "")[:80]
+            # For MISS/LOCKED/ERROR, also emit an indented follow-up
+            # line next to the '[*] SID/CLIENT user=...' line from
+            # on_pre_attempt — so the log tail reads as pairs:
+            #   [*] NPL/001 user=DDIC (3/7) src=secstore
+            #       → MISS
+            # HIT lines are already emitted explicitly below.  Skip
+            # 'skipped' kinds since they never fired a socket.
+            _kind = row.get("kind")
+            if _kind in ("miss", "locked", "error"):
+                _res = row.get("result") or _kind.upper()
+                _append_log(f"    → {_res}")
             kind = row.get("kind")
             # Idempotency record (issue #69, PR5) — remember every
             # fired triple so a next-wave AutoPwn phase3b doesn't
@@ -1230,10 +1399,26 @@ def spray_landscape(
                 # can run without pyrfc.
                 _probe = (hit_authority_probe_fn
                           or _default_hit_authority_probe)
+                # Bounded-timeout wrapper: the default probe opens an
+                # RFC connection as the sprayed user and calls
+                # BAPI_USER_GET_DETAIL — on an unreachable co-tenant
+                # or slow RFC handshake, this would block the whole
+                # spray loop (operator-reported 3-min stall after the
+                # first HIT fired against a cross-landscape target).
                 try:
-                    _auth = _probe(
+                    _auth = _run_with_watchdog(
+                        _probe,
                         node, row.get("client"),
-                        row.get("user"), row.get("password"))
+                        row.get("user"), row.get("password"),
+                        timeout_s=config.hit_probe_timeout_s,
+                        default={
+                            "authority_level": "probe_failed",
+                            "profiles": [], "roles": [],
+                            "note": (
+                                f"probe exceeded "
+                                f"hit_probe_timeout_s="
+                                f"{config.hit_probe_timeout_s}s"),
+                        })
                 except Exception as _e:
                     _auth = {
                         "authority_level": "probe_failed",
@@ -1387,6 +1572,15 @@ def spray_landscape(
             early_exit_on_hit=config.early_exit_on_hit,
             on_result=_on_result,
             try_login_fn=try_login_fn,
+            # Shorter per-attempt timeout (default 3s) keeps median
+            # attempt wall-clock low and bounds the stop-latency on
+            # unreachable hosts.  Operator-reported 1/224 in 3min
+            # was partly from 17s-per-attempt worst case here.
+            attempt_timeout_s=config.attempt_timeout_s,
+            # Per-attempt visibility — fires BEFORE the DIAG socket
+            # call so the status panel + log tail show what the
+            # engine is currently trying.
+            on_pre_attempt=_pre_attempt,
             # Idempotency READ (issue #69, PR5): triples that were
             # fired on this node in a prior wave are skipped so a
             # multi-wave AutoPwn doesn't eat the per-user cap again.
@@ -1413,9 +1607,12 @@ def spray_landscape(
             state.pwspray_locked_users or {}).keys()}
         _bump_targets_done()
         _set_phase_progress(_status.targets_done, len(targets))
-        # Inter-node pause.
+        # Inter-node pause.  Sliced so STOP pressed during the pause
+        # is honoured within ~100ms instead of waiting out the full
+        # 1-2s jitter range.
         if ti < len(targets) - 1:
-            _jittered_sleep(DEFAULT_INTER_NODE_SLEEP)
+            _jittered_sleep(DEFAULT_INTER_NODE_SLEEP,
+                            cancel_check=cancel_check)
 
     # Purple-mode USR02 readback (issue #69, PR4).  Re-read LOCNT
     # per (sid, client, user) that had a baseline, compute delta,
@@ -1425,6 +1622,9 @@ def spray_landscape(
         _set_phase("readback")
         _set_phase_progress(0, max(1, len(targets)))
         for ri, target in enumerate(targets):
+            if cancel_check and cancel_check():
+                run.aborted = run.aborted or "user_stop"
+                break
             node = (state.nodes or {}).get(target.sid)
             if node is None:
                 continue
@@ -1432,14 +1632,26 @@ def spray_landscape(
             if creds is None:
                 continue
             for client in target.clients:
+                if cancel_check and cancel_check():
+                    run.aborted = run.aborted or "user_stop"
+                    break
+                # Same bounded-timeout wrapper as the baseline phase
+                # — purple readback can hang on the same slow RFC
+                # handshake and had the same no-way-out-but-kill
+                # issue pre-fix.
                 try:
-                    rows = usr02_probe_fn(
+                    rows = _run_with_watchdog(
+                        usr02_probe_fn,
                         node, creds, client,
-                        sorted(unique_pool_users))
+                        sorted(unique_pool_users),
+                        timeout_s=config.usr02_probe_timeout_s,
+                        default=None)
                 except Exception as e:
                     logger.debug(
                         "usr02 readback failed on %s/%s: %s",
                         target.sid, client, e)
+                    continue
+                if rows is None:
                     continue
                 for u, info in (rows or {}).items():
                     rb_key = f"{target.sid}|{client}|{u.upper()}"
@@ -1448,6 +1660,8 @@ def spray_landscape(
                         "uflag": str(info.get("uflag", "")),
                         "ts": datetime.utcnow().isoformat(),
                     }
+            if run.aborted:
+                break
             _set_phase_progress(ri + 1, max(1, len(targets)))
         # Backfill the signal rows accumulated during spray.
         for n in (state.nodes or {}).values():
@@ -2106,6 +2320,22 @@ class PwSprayStatus:
     aborted: str = ""
     started_at: str = ""
     finished_at: str = ""
+    # Per-attempt visibility (added for the slow/silent/no-stop
+    # follow-up on #121).  Operator-reported "nothing is happening"
+    # between HIT lines was partly the engine's silence between
+    # 1-17s attempts.  These fields are populated inside the engine's
+    # on_pre_attempt hook just BEFORE each try_login call, so the
+    # GUI panel (/api/actions/password_spray/status poll @800ms)
+    # can render a 'Now trying: <SID>/<CLIENT> user=<USER> (i/N)'
+    # row that updates every attempt.
+    current_target_sid: str = ""
+    current_target_host: str = ""
+    current_client: str = ""
+    current_user: str = ""
+    current_candidate_index: int = 0
+    current_candidate_total: int = 0
+    last_result: str = ""
+    last_detail: str = ""
     # Short log tail for the progress panel's console pane.  Capped
     # by _append_log so the serialized payload stays small.
     log_tail: List[str] = field(default_factory=list)
@@ -2150,6 +2380,20 @@ def _set_phase_progress(done: int, total: int) -> None:
 
 def _bump_targets_done() -> None:
     _status.targets_done += 1
+
+
+def mark_stop_requested() -> None:
+    """Mark the current pwspray run as stop-requested so the GUI poll
+    sees 'stopping…' in the next 800ms tick, before the engine's
+    cancel_check actually bubbles up.  Called by sapmap_gui's
+    stop_scan handler alongside sapmap_stop.request_stop().
+
+    Idempotent — safe to call multiple times.  Preserves an already-
+    set aborted reason (e.g. a prior cascade_abort) rather than
+    stomping it with the operator's late STOP."""
+    if _status.aborted:
+        return
+    _status.aborted = "stop_requested"
 
 
 def _append_log(line: str, *, cap: int = 200) -> None:

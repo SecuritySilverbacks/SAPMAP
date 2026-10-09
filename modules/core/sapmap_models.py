@@ -876,6 +876,17 @@ class SAPNode:
     # /RFC/TMSADM@<us>.DOMAIN_<x> secstore entry.
     discovered_via_tms: bool = False
     tms_parent_sid: str = ""
+    # True when this node was materialised from a SAPGUILandscape.xml /
+    # SAP UI Landscape XML import (issue #105) with a PLACEHOLDER SID —
+    # either a direct-connect `<Service server="host:port"/>` entry (no
+    # messageserver link, so SID unknown until a scan runs) or a
+    # messageserver-linked `<Service systemid="@01" .../>` entry where
+    # "@01" is SAP Logon's "SID not yet determined" sentinel.  Treated
+    # as a placeholder by the Standard Scan path: once the scanner
+    # fingerprints the real SID via RFC_SYSTEM_INFO, the node is
+    # promoted in-place (same code path as discovered_via_btp /
+    # discovered_via_rfc_g).  Renders dashed on the map until promoted.
+    discovered_via_xml: bool = False
     # True when this node is the transport-domain controller.  Set
     # when TMSMCONF.DOMAINCTL matches this SID.  Rendered as a
     # "CTRL" pill on the map (like the "SAP" badge on DBCON).
@@ -1154,6 +1165,7 @@ class SAPNode:
             "dbcon_parent_con_name": self.dbcon_parent_con_name,
             "sysinfo_source": self.sysinfo_source,
             "discovered_via_tms": self.discovered_via_tms,
+            "discovered_via_xml": self.discovered_via_xml,
             "tms_parent_sid": self.tms_parent_sid,
             "is_tms_controller": self.is_tms_controller,
             "tms_domain": self.tms_domain,
@@ -1306,6 +1318,7 @@ class SAPNode:
             dbcon_parent_con_name=d.get("dbcon_parent_con_name", ""),
             sysinfo_source=d.get("sysinfo_source", ""),
             discovered_via_tms=d.get("discovered_via_tms", False),
+            discovered_via_xml=d.get("discovered_via_xml", False),
             tms_parent_sid=d.get("tms_parent_sid", ""),
             is_tms_controller=d.get("is_tms_controller", False),
             tms_domain=d.get("tms_domain", ""),
