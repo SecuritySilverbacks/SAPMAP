@@ -825,3 +825,126 @@ def test_sybase_dispatcher_triggers_implicit_ssfs_when_password_missing(monkeypa
     )
     assert ssfs_calls == []
     assert seen["db_password"] == "operator-supplied"
+
+
+def test_sybase_dispatcher_falls_back_to_sapsr3_when_sapsa_password_undecryptable(
+        monkeypatch):
+    """Live operator report on SM1 lab 2026-10-09 (SAP Note 2228134 /
+    Msg 4002 auth error): the SSFS SSO master key extracted off the
+    target decrypts the sapsr3 (DB_CONNECT) password record but NOT
+    the sapsa (SSO) password record — different storage slots inside
+    the same SSFS DAT, with different encryption lineage.  Pre-fix
+    behaviour: writer ignored sapsr3_password even when present and
+    fell through to isql -Usapsa -P"" which the server rejects with
+    Msg 4002 Login failed.  Fix: when sapsa_password is empty but
+    sapsr3_password is populated, use SAPSR3 — the schema owner has
+    full INSERT/UPDATE on SAPSR3.USR02 / UST04 / USREFUS / USR04 /
+    USRBF2 which is all the user-creation SQL needs."""
+    import sap_db_sql_writers as w
+    fake_ssfs = {
+        "sapsa_user":      "sapsa",
+        "sapsa_password":  "",            # SSO slot decryption failed
+        "sapsr3_user":     "SAPSR3",
+        "sapsr3_password": "sr3-secret",  # DB_CONNECT slot decrypted
+        "source": "SSFS DB_CONNECT/* (SAP default)",
+    }
+
+    seen = {}
+    def fake_writer(host, gw_port, instance_str, hostname, sid, kernel,
+                    stmts, saprouter="", db_password="", db_user="sapsa",
+                    python3_path="/usr/bin/python3", client="001"):
+        seen["db_password"] = db_password
+        seen["db_user"]     = db_user
+        return True
+
+    monkeypatch.setattr(w, "_try_implicit_sybase_ssfs_creds",
+                         lambda *a, **k: fake_ssfs)
+    monkeypatch.setattr(w, "_sybase_write_and_exec", fake_writer)
+
+    w._execute_sql_via_gateway(
+        "10.0.0.1", 3300, "SM1", "h",
+        ["INSERT INTO SAPSR3.USR02 (MANDT,BNAME) VALUES ('001','X')"],
+        db_type="SYB", os_type="linux",
+    )
+    assert seen["db_password"] == "sr3-secret", (
+        "writer must receive the sapsr3 password when sapsa password "
+        "decryption failed — pre-fix it would get an empty string")
+    assert seen["db_user"] == "SAPSR3", (
+        "writer must receive the sapsr3 user (schema owner) when "
+        "falling back from sapsa — pre-fix db_user stayed 'sapsa' "
+        "and the isql invocation would -Usapsa with the sapsr3 "
+        "password which the server rejects")
+
+
+def test_sybase_dispatcher_sapsa_wins_over_sapsr3_when_both_decrypt(
+        monkeypatch):
+    """When BOTH sapsa_password and sapsr3_password decrypt
+    successfully, sapsa must win — it has broader privileges and is
+    the convention SAP's own tooling uses for admin DML.  Only when
+    sapsa_password is empty does the fallback fire."""
+    import sap_db_sql_writers as w
+    fake_ssfs = {
+        "sapsa_user":      "sapsa",
+        "sapsa_password":  "sapsa-secret",
+        "sapsr3_user":     "SAPSR3",
+        "sapsr3_password": "sr3-secret",
+        "source": "SSFS DB_CONNECT/* (SAP default)",
+    }
+    seen = {}
+    def fake_writer(host, gw_port, instance_str, hostname, sid, kernel,
+                    stmts, saprouter="", db_password="", db_user="sapsa",
+                    python3_path="/usr/bin/python3", client="001"):
+        seen["db_password"] = db_password
+        seen["db_user"]     = db_user
+        return True
+
+    monkeypatch.setattr(w, "_try_implicit_sybase_ssfs_creds",
+                         lambda *a, **k: fake_ssfs)
+    monkeypatch.setattr(w, "_sybase_write_and_exec", fake_writer)
+
+    w._execute_sql_via_gateway(
+        "10.0.0.1", 3300, "SM1", "h",
+        ["INSERT INTO SAPSR3.USR02 (MANDT,BNAME) VALUES ('001','X')"],
+        db_type="SYB", os_type="linux",
+    )
+    assert seen["db_password"] == "sapsa-secret", (
+        "sapsa must win when both decrypted — the SAPSR3 fallback is "
+        "a last-resort for installs where sapsa decryption fails")
+    assert seen["db_user"] == "sapsa"
+
+
+def test_sybase_dispatcher_logs_both_users_when_all_passwords_undecryptable(
+        monkeypatch, capsys):
+    """When SSFS surfaces user names for BOTH sapsa and sapsr3 but
+    neither password decrypts, the diagnostic must mention both so
+    the operator knows the full scope of what to try next (Extract
+    SecStore from RSECTAB, or supply the password manually)."""
+    import sap_db_sql_writers as w
+    fake_ssfs = {
+        "sapsa_user":      "sapsa",
+        "sapsa_password":  "",
+        "sapsr3_user":     "SAPSR3",
+        "sapsr3_password": "",
+        "source": "SSFS DB_CONNECT/*",
+    }
+    monkeypatch.setattr(w, "_try_implicit_sybase_ssfs_creds",
+                         lambda *a, **k: fake_ssfs)
+    monkeypatch.setattr(w, "_sybase_write_and_exec",
+                         lambda *a, **k: False)
+
+    w._execute_sql_via_gateway(
+        "10.0.0.1", 3300, "SM1", "h",
+        ["INSERT INTO SAPSR3.USR02 (MANDT,BNAME) VALUES ('001','X')"],
+        db_type="SYB", os_type="linux",
+    )
+    captured = capsys.readouterr().out
+    # Both user names must appear in the diagnostic so the operator
+    # knows the fallback was attempted end-to-end.
+    assert "'sapsa'" in captured and "'SAPSR3'" in captured, (
+        f"diagnostic must enumerate both surfaced users; got "
+        f"{captured!r}")
+    # SAP Note reference must be present so the operator can jump
+    # straight to the Note's resolution section.
+    assert "2228134" in captured, (
+        "diagnostic must cite SAP Note 2228134 so operator can look "
+        "up the Msg 4002 recovery steps")
