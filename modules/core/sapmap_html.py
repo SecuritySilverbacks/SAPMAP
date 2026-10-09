@@ -1458,6 +1458,7 @@ body {
 <!-- Map Background Context Menu -->
 <div class="ctx-menu" id="map-ctx-menu">
   <div class="ctx-item" data-action="map_add_system">&#10133; Add System Manually</div>
+  <div class="ctx-item" data-action="map_import_landscape_xml" title="Import systems from a SAP Logon landscape.xml file (SAPUILandscape.xml) — same action as File &rarr; Import Landscape XML.">&#128196; Import Landscape XML&hellip;</div>
   <div class="ctx-sep"></div>
   <div class="ctx-item write-op" data-action="map_autopwn" style="color:#f85149;font-weight:bold">&#9889; AutoPwn</div>
   <div class="ctx-item" data-action="map_scan_all_vulns" style="color:#f0883e;font-weight:bold">&#128270; Scan for All Vulnerabilities</div>
@@ -20971,6 +20972,7 @@ document.getElementById('map-ctx-menu').addEventListener('click', function(e) {
   hideMapCtxMenu();
   switch (item.getAttribute('data-action')) {
     case 'map_add_system': showAddSystemModal(); break;
+    case 'map_import_landscape_xml': loadLandscapeXML(); break;
     case 'map_autopwn': showAutoPwnModal(); break;
     case 'map_password_spray': showPwsprayModal(); break;
     case 'map_propagate_all': propagateAll(); break;

@@ -346,3 +346,56 @@ def test_backend_endpoint_exists(endpoint_path):
     assert route_decorator in gui_source, (
         f"Backend route for {endpoint_path} not found in "
         f"modules/core/sapmap_gui.py")
+
+
+# ===========================================================================
+# Import Landscape XML entry — operator ask 2026-10-09
+# ===========================================================================
+
+def test_map_ctx_has_import_landscape_xml_entry_right_below_add_system():
+    """Operator asked (2026-10-09): add "Import Landscape XML" to the
+    empty-map right-click menu, just below "Add System Manually".
+    The feature already exists under File → Import Landscape XML
+    (loadLandscapeXML()); this entry just gives it a second surface
+    so operators mid-map-interaction don't have to leave the canvas.
+
+    Pin the order so a future menu-reshuffle doesn't move the entry
+    away from Add System Manually — the two are the only "load more
+    systems onto the map" actions and belong together."""
+    html = _html()
+    # Both entries must be present via data-action attributes.
+    assert 'data-action="map_add_system"' in html, (
+        "map_add_system entry disappeared from the ctx menu")
+    assert 'data-action="map_import_landscape_xml"' in html, (
+        "map_import_landscape_xml entry missing — operator asked "
+        "to add this surface to the empty-map ctx menu")
+
+    # And they must appear in that order, right next to each other,
+    # with import directly below add-manually (no other entry between).
+    pat = re.compile(
+        r'data-action="map_add_system"[^<]*</div>\s*'
+        r'<div class="ctx-item"[^>]*data-action="map_import_landscape_xml"',
+        re.DOTALL)
+    assert pat.search(html), (
+        "map_import_landscape_xml must be the ctx-item IMMEDIATELY "
+        "after map_add_system — operator asked for 'just below Add "
+        "System Manually'")
+
+
+def test_map_ctx_import_landscape_xml_routes_to_existing_js_fn():
+    """The dispatch case for the new ctx entry must call the
+    SAME loadLandscapeXML() function the File menu uses, so the
+    operator sees the same modal + runs the same backend route
+    (/api/import_landscape_xml).  Routing to a new JS wrapper
+    would risk divergence in behaviour."""
+    html = _html()
+    assert "case 'map_import_landscape_xml': loadLandscapeXML();" in html, (
+        "ctx menu's dispatch case for map_import_landscape_xml "
+        "must call loadLandscapeXML() directly — reusing the "
+        "same path File → Import Landscape XML takes")
+    # Sanity: loadLandscapeXML() must still be defined somewhere
+    # (regression guard against renaming the File-menu function
+    # out from under the new ctx entry).
+    assert "function loadLandscapeXML" in html, (
+        "loadLandscapeXML() must stay defined — the new ctx entry "
+        "and the File-menu entry both call it")
