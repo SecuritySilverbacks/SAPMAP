@@ -1166,6 +1166,136 @@ def _set_wd_port_protocol(node, wd_port: int, https: bool) -> None:
             inst.ports[wd_port] = new_label
 
 
+def _icm_ports_from_instance_nr(instance_nr) -> tuple:
+    """Derive the ICM/WD HTTP + HTTPS ports from a 2-digit instance
+    number using the SAP convention (``8000 + NN`` HTTP,
+    ``44300 + NN`` HTTPS).  Returns ``(http_port, https_port)`` or
+    ``(0, 0)`` when the instance number isn't numeric.
+
+    Used by the #93 WEB_DISPATCHER reclassification flow to pre-fill /
+    derive a WD probe port when the node carries no HTTP-labelled port
+    (a Web Dispatcher misclassified as ABAP/SAPROUTER typically has
+    only dispatcher/gateway/router ports).  This is the inverse of the
+    scanner's ``_derive_instance_from_wd_port``.
+    """
+    s = str(instance_nr or "").strip()
+    if not s.isdigit():
+        return (0, 0)
+    nn = int(s)
+    if nn < 0 or nn > 99:
+        return (0, 0)
+    return (8000 + nn, 44300 + nn)
+
+
+def _resolve_wd_probe_port(node, body: dict) -> dict:
+    """Decide which host port to probe as the Web Dispatcher when a node
+    is (re)classified to WEB_DISPATCHER, mutating ``node.instances[*].
+    ports`` as needed so the downstream rediscovery can find a
+    ``wd_http`` / ``wd_https`` label (issue #93).
+
+    Resolution order (first match wins):
+      (a) ``existing_wd``     — an existing ``wd_http`` / ``wd_https``
+                                 port → use as-is, no mutation.
+      (b) ``relabel_icm``     — an existing ``icm_http`` / ``icm_https``
+                                 / ``wd_candidate`` port → relabel it to
+                                 ``wd_http`` / ``wd_https``.  The
+                                 operator has DECLARED this is a WD,
+                                 overriding the scanner's ambiguous
+                                 auto-fingerprint.
+      (c) ``added_supplied``  — operator-supplied ``wd_https_port`` /
+                                 ``wd_http_port`` in ``body`` → add the
+                                 port to the node (prefer HTTPS when
+                                 both given).
+      (d) ``none``            — nothing resolvable; caller should prompt
+                                 the operator for a port.
+
+    Returns ``{"wd_port": int, "wd_https": bool, "source": str,
+               "error": str}``.
+    """
+    result = {"wd_port": 0, "wd_https": False, "source": "none",
+              "error": ""}
+
+    # (a) existing wd_ label — authoritative, no mutation.
+    for inst in node.instances:
+        for p, svc in (inst.ports or {}).items():
+            low = (svc or "").lower()
+            if low in ("wd_http", "wd_https"):
+                result.update(wd_port=int(p),
+                              wd_https=(low == "wd_https"),
+                              source="existing_wd")
+                return result
+
+    # (b) relabel an existing icm_/candidate HTTP port — operator
+    # reclassification overrides the scanner's is_wd=False verdict.
+    for inst in node.instances:
+        for p, svc in (inst.ports or {}).items():
+            low = (svc or "").lower()
+            if low in ("icm_http", "icm_https", "wd_candidate"):
+                https = low.endswith("_https")
+                _set_wd_port_protocol(node, int(p), https)
+                print(f"[*] {node.sid}: port {p} {svc} -> "
+                      f"{'wd_https' if https else 'wd_http'} "
+                      f"(operator reclassification to WEB_DISPATCHER)")
+                result.update(wd_port=int(p), wd_https=https,
+                              source="relabel_icm")
+                return result
+
+    # (c) operator-supplied port — add it (prefer HTTPS when both).
+    def _as_port(v):
+        try:
+            iv = int(v)
+            return iv if 1 <= iv <= 65535 else 0
+        except (TypeError, ValueError):
+            return 0
+    http_p = _as_port((body or {}).get("wd_http_port"))
+    https_p = _as_port((body or {}).get("wd_https_port"))
+    if http_p or https_p:
+        # Pick the instance whose instance_nr derives to one of the
+        # supplied ports, else the first numeric-instance, else the
+        # first instance; create one if the node has none.
+        from sapmap_scanner import _derive_instance_from_wd_port
+        target_inst = None
+        want_nr = ""
+        for p in (https_p, http_p):
+            if p:
+                want_nr = _derive_instance_from_wd_port(p) or want_nr
+        if want_nr:
+            target_inst = next(
+                (i for i in node.instances
+                 if str(getattr(i, "instance_nr", "")) == want_nr), None)
+        if target_inst is None:
+            target_inst = next(
+                (i for i in node.instances
+                 if str(getattr(i, "instance_nr", "")).isdigit()), None)
+        if target_inst is None and node.instances:
+            target_inst = node.instances[0]
+        if target_inst is None:
+            nr = want_nr or _derive_instance_from_wd_port(
+                https_p or http_p) or "00"
+            target_inst = InstanceInfo(
+                instance_nr=nr, ip=(node.ip or node.hostname or ""),
+                ports={})
+            node.instances.append(target_inst)
+        if target_inst.ports is None:
+            target_inst.ports = {}
+        if http_p:
+            target_inst.ports[http_p] = "wd_http"
+        if https_p:
+            target_inst.ports[https_p] = "wd_https"
+        probe_port = https_p or http_p
+        print(f"[*] {node.sid}: added operator-supplied WD port "
+              f"{probe_port} ({'wd_https' if https_p else 'wd_http'}) "
+              f"on instance {getattr(target_inst, 'instance_nr', '?')}")
+        result.update(wd_port=probe_port,
+                      wd_https=bool(https_p),
+                      source="added_supplied")
+        return result
+
+    # (d) nothing resolvable.
+    result["error"] = "no_wd_port"
+    return result
+
+
 def _enrich_wd_backends_from_admin_table(wd_node, systems: list,
                                             state=None) -> list:
     """Upgrade the WD's wd_backends list with real SID + MSHOST + MSPORT
@@ -1521,6 +1651,98 @@ class ShellSession:
             except Exception:
                 pass
             self.client_sock = None
+
+
+def _run_wd_rediscovery(node, state, wd_port: int, wd_https: bool) -> None:
+    """Re-run the WD cache + backend-topology + admin-table + cross-node
+    matching for a Web Dispatcher node.  Shared by the ``wd_rediscover``
+    ctx-menu route and the WEB_DISPATCHER reclassification flow (#93) so
+    both trigger the exact same discovery.
+
+    Raises on failure — the caller wraps this in try/except so both
+    entry points get an identical guard + traceback.
+    """
+    from sapmap_scanner import (
+        detect_wd_cache, discover_wd_backends,
+        match_wd_backends_to_nodes,
+    )
+    sid = node.sid
+    host = node.ip or node.hostname
+    print(f"[*] {sid}: WD rediscover on {host}:{wd_port}"
+          f"{'/HTTPS' if wd_https else '/HTTP'}")
+    # Cache state
+    cache = detect_wd_cache(host, wd_port, https=wd_https,
+                            timeout=6, saprouter=node.saprouter or "")
+    node.wd_cache_enabled = bool(cache.get("enabled"))
+    node.wd_cache_evidence = cache.get("evidence", "")
+    if cache.get("enabled"):
+        print(f"[+] {sid}: cache ENABLED ({cache['evidence']})")
+    else:
+        print(f"[*] {sid}: cache disabled or no signal "
+              f"({cache.get('evidence', '')})")
+    # Backend topology — Server-header bucket
+    bk_result = discover_wd_backends(
+        host, wd_port, https=wd_https,
+        timeout=6, saprouter=node.saprouter or "", verbose=True)
+    node.wd_backends = [dict(b, linked_node_sid="")
+                        for b in bk_result["backends"]]
+    # Chain the admin-table extraction when working wd_admin
+    # credentials are stored on the node — the authoritative source
+    # (Server-header buckets collapse multiple real backends into one).
+    wd_cred = None
+    for c in (node.credentials or []):
+        if getattr(c, "kind", "") == "wd_admin":
+            wd_cred = c
+            break
+    if wd_cred:
+        print(f"[*] {sid}: stored wd_admin credentials found "
+              f"({wd_cred.username}) — chaining admin-table extraction")
+        try:
+            from sap_wdisp_admin import fetch_wd_systems
+            r = fetch_wd_systems(
+                host, wd_port, https=wd_https,
+                user=wd_cred.username, pwd=wd_cred.password,
+                timeout=8, saprouter=node.saprouter or "")
+            if r["ok"]:
+                print(f"[+] {sid}: admin-table parsed "
+                      f"{len(r['systems'])} wdisp/system_* entry/entries")
+                _enrich_wd_backends_from_admin_table(
+                    node, r["systems"], state=state)
+                try:
+                    sapmap_findings.emit_finding(
+                        "INFO", sid,
+                        f"WD /sap/wdisp/admin backend table read — "
+                        f"{len(r['systems'])} backend(s) discovered "
+                        f"(SID, MSHOST, MSPORT, SSL_ENCRYPT, SRCURL)",
+                        ref="wd.backend_table.read",
+                        attack_capability="data.wd_backend_table_read")
+                except Exception:
+                    pass
+            else:
+                print(f"[-] {sid}: admin-table extract failed "
+                      f"({r['error']}) — falling back to Server-header "
+                      f"bucket placeholders")
+        except Exception as e:
+            print(f"[-] {sid}: admin-table extract crashed: "
+                  f"{type(e).__name__}: {e}")
+    # Re-run cross-node matching (link-only mode).
+    placeholders = match_wd_backends_to_nodes(
+        list(state.nodes.values()), promote_unmatched=False)
+    for p in placeholders:
+        state.add_node(p)
+    if placeholders:
+        print(f"[+] {sid}: linked {len(placeholders)} backend(s) to "
+              f"existing on-map node(s)")
+    linked = [b for b in node.wd_backends if b.get("linked_node_sid")]
+    print(f"[+] {sid}: rediscover complete — "
+          f"{len(node.wd_backends)} backend(s), {len(linked)} linked "
+          f"to on-map nodes (of which {len(placeholders)} newly "
+          f"synthesised)")
+    for b in node.wd_backends:
+        tgt = (b.get("linked_node_sid") or '<not on map>')
+        srv = b.get("server_header") or '<suppressed>'
+        print(f"      → {tgt:8s} [{srv[:60]}] "
+              f"{len(b.get('url_prefixes', []))} prefix(es)")
 
 
 def _detect_local_ip(target_host: str, saprouter: str = "") -> str:
@@ -7169,11 +7391,51 @@ def create_app(api: SAPMAPApi) -> Bottle:
             # ICMAD severity logic + GUI menu gating see consistent
             # state.  Pick WEB_DISPATCHER -> is_web_dispatcher=True;
             # pick any other type -> clear the flag (operator might
-            # have mis-flagged it earlier).
+            # have mis-flagged it earlier).  Changing AWAY from
+            # WEB_DISPATCHER does no cleanup — wd_ port labels +
+            # wd_backends are left intact (issue #93 decision).
             node.is_web_dispatcher = (new_type.upper() == "WEB_DISPATCHER")
             print(f"[*] System type for {sid} set to: {new_type}"
                   + (" (is_web_dispatcher=True)"
                      if node.is_web_dispatcher else ""))
+            # Issue #93: reclassifying to WEB_DISPATCHER must TRIGGER the
+            # WD topology rediscovery (previously it silently did
+            # nothing).  Resolve a WD probe port first — a node
+            # misclassified as ABAP/SAPROUTER has no wd_ label, so we
+            # promote an existing icm_/candidate port or add an
+            # operator-supplied one.  If none resolvable, tell the GUI
+            # to prompt for a port rather than failing silently.
+            if node.is_web_dispatcher:
+                res = _resolve_wd_probe_port(node, data)
+                if res["source"] == "none":
+                    return json.dumps({
+                        "status": "ok",
+                        "need_wd_port": True,
+                        "message": (
+                            "No WD HTTP/HTTPS port found on this node. "
+                            "Provide the Web Dispatcher port to run the "
+                            "topology rediscovery.")})
+                wd_port = res["wd_port"]
+                wd_https = res["wd_https"]
+
+                def _run():
+                    try:
+                        _run_wd_rediscovery(node, api.state,
+                                            wd_port, wd_https)
+                    except Exception as e:
+                        import traceback
+                        print(f"[-] {sid}: WD rediscover (via set_type) "
+                              f"failed: {type(e).__name__}: {e}")
+                        traceback.print_exc()
+
+                _bg(f"{sid}:wd_rediscover",
+                    "WD Rediscover (cache + backends)", _run)
+                return json.dumps({
+                    "status": "started",
+                    "wd_rediscover": True,
+                    "wd_port": wd_port,
+                    "wd_https": wd_https,
+                    "source": res["source"]})
         return json.dumps({"status": "ok"})
 
     @app.route("/api/node/<sid>/set_db_type", method="POST")
@@ -7645,122 +7907,7 @@ def create_app(api: SAPMAPApi) -> Bottle:
 
         def _run():
             try:
-                from sapmap_scanner import (
-                    detect_wd_cache, discover_wd_backends,
-                    match_wd_backends_to_nodes,
-                )
-                host = node.ip or node.hostname
-                print(f"[*] {sid}: WD rediscover on {host}:{wd_port}"
-                      f"{'/HTTPS' if wd_https else '/HTTP'}")
-                # Cache state
-                cache = detect_wd_cache(host, wd_port, https=wd_https,
-                                          timeout=6,
-                                          saprouter=node.saprouter or "")
-                node.wd_cache_enabled = bool(cache.get("enabled"))
-                node.wd_cache_evidence = cache.get("evidence", "")
-                if cache.get("enabled"):
-                    print(f"[+] {sid}: cache ENABLED "
-                          f"({cache['evidence']})")
-                else:
-                    print(f"[*] {sid}: cache disabled or no signal "
-                          f"({cache.get('evidence', '')})")
-                # Backend topology — Server-header bucket
-                bk_result = discover_wd_backends(
-                    host, wd_port, https=wd_https,
-                    timeout=6, saprouter=node.saprouter or "",
-                    verbose=True)
-                node.wd_backends = [dict(b, linked_node_sid="")
-                                      for b in bk_result["backends"]]
-                # Chain the admin-table extraction when working
-                # wd_admin credentials are stored on the node.  This
-                # is the authoritative source — Server-header
-                # buckets collapse multiple real backends into one
-                # entry; the admin readout splits them apart with
-                # real SID + MSHOST + MSPORT.  Without this, every
-                # rediscover would revert the map to the bucketed
-                # view and re-create the synthetic B-prefix
-                # placeholders the operator just got rid of.
-                wd_cred = None
-                for c in (node.credentials or []):
-                    if getattr(c, "kind", "") == "wd_admin":
-                        wd_cred = c
-                        break
-                if wd_cred:
-                    print(f"[*] {sid}: stored wd_admin credentials "
-                          f"found ({wd_cred.username}) — chaining "
-                          f"admin-table extraction")
-                    try:
-                        from sap_wdisp_admin import fetch_wd_systems
-                        r = fetch_wd_systems(
-                            host, wd_port, https=wd_https,
-                            user=wd_cred.username,
-                            pwd=wd_cred.password,
-                            timeout=8,
-                            saprouter=node.saprouter or "",
-                        )
-                        if r["ok"]:
-                            print(f"[+] {sid}: admin-table parsed "
-                                  f"{len(r['systems'])} wdisp/system_*"
-                                  f" entry/entries")
-                            _enrich_wd_backends_from_admin_table(
-                                node, r["systems"], state=api.state)
-                            # ATT&CK: landscape-topology dump via
-                            # authenticated WD admin.  T1213 + T1526
-                            # in one HTTP GET.  Info-level — the
-                            # WD-admin default-creds finding above
-                            # carries the CRITICAL severity.
-                            try:
-                                sapmap_findings.emit_finding(
-                                    "INFO", sid,
-                                    f"WD /sap/wdisp/admin backend "
-                                    f"table read — {len(r['systems'])}"
-                                    f" backend(s) discovered "
-                                    f"(SID, MSHOST, MSPORT, "
-                                    f"SSL_ENCRYPT, SRCURL)",
-                                    ref="wd.backend_table.read",
-                                    attack_capability=(
-                                        "data.wd_backend_table_read"))
-                            except Exception:
-                                pass
-                        else:
-                            print(f"[-] {sid}: admin-table extract "
-                                  f"failed ({r['error']}) — falling "
-                                  f"back to Server-header bucket "
-                                  f"placeholders")
-                    except Exception as e:
-                        print(f"[-] {sid}: admin-table extract "
-                              f"crashed: {type(e).__name__}: {e}")
-                # Re-run cross-node matching (link-only mode).
-                # Synthetic B-prefix placeholders are NOT auto-created
-                # from Server-header buckets — those are too generic
-                # to deserve a node on the map.  Real-SID placeholders
-                # come from the admin-table extraction above (when
-                # wd_admin credentials are stored on the node); the
-                # WD's wd_backends list still carries the bucket data
-                # for the node-details panel display.
-                placeholders = match_wd_backends_to_nodes(
-                    list(api.state.nodes.values()),
-                    promote_unmatched=False)
-                for p in placeholders:
-                    api.state.add_node(p)
-                if placeholders:
-                    print(f"[+] {sid}: linked "
-                          f"{len(placeholders)} backend(s) to "
-                          f"existing on-map node(s)")
-                # Surface linked-node summary
-                linked = [b for b in node.wd_backends
-                            if b.get("linked_node_sid")]
-                print(f"[+] {sid}: rediscover complete — "
-                      f"{len(node.wd_backends)} backend(s), "
-                      f"{len(linked)} linked to on-map nodes "
-                      f"(of which {len(placeholders)} newly "
-                      f"synthesised)")
-                for b in node.wd_backends:
-                    tgt = (b.get("linked_node_sid")
-                            or '<not on map>')
-                    srv = b.get("server_header") or '<suppressed>'
-                    print(f"      → {tgt:8s} [{srv[:60]}] "
-                          f"{len(b.get('url_prefixes', []))} prefix(es)")
+                _run_wd_rediscovery(node, api.state, wd_port, wd_https)
             except Exception as e:
                 import traceback
                 print(f"[-] {sid}: WD rediscover failed: "
