@@ -3201,6 +3201,21 @@ body {
         when UCON blocks or S_TABU_DIS is missing).
       </div>
     </div>
+    <div style="margin-bottom:10px;padding:8px;background:#0d1117;border-left:3px solid #58a6ff;border-radius:3px">
+      <label style="font-size:12px;color:#c9d1d9">
+        <input type="checkbox" id="pws-rfc-service-users" checked>
+        &#128273; <strong>Verify service/system users via RFC</strong> (USTYP B/S/C)
+      </label>
+      <div style="font-size:11px;color:#8b949e;margin-top:4px;line-height:1.4">
+        DIAG (SAPGUI) can't confirm a password for a SYSTEM / COMMUNICATION / SERVICE
+        user &mdash; SAP refuses the interactive channel before checking it, so a correct
+        and a wrong password both return <em>&ldquo;log on with a dialog user&rdquo;</em>.
+        When DIAG returns that, the spray re-checks that one candidate over
+        <strong>RFC</strong>, which does validate it (issue #106).  Requires an RFC backend
+        (NW RFC SDK or saprfclib) on this host.  A failed RFC logon still bumps
+        <code>USR02.LOCNT</code>, so it counts against the same lockout cap / circuit breaker.
+      </div>
+    </div>
 
     <div style="margin-top:14px;margin-bottom:4px;font-size:12px;color:#c9d1d9;font-weight:600">
       Operator wordlist (optional)
@@ -18891,6 +18906,9 @@ function showPwsprayModal(opts) {
   document.getElementById('pws-include-prod').checked = false;
   document.getElementById('pws-accept-prod-risk').checked = false;
   document.getElementById('pws-purple-mode').checked = false;
+  // Default ON — the RFC service-user check is safe (same lockout
+  // accounting as DIAG) and strictly more complete (issue #106).
+  document.getElementById('pws-rfc-service-users').checked = true;
   document.getElementById('pws-wordlist').value = '';
   document.getElementById('pws-preview-result').innerHTML = '';
   document.getElementById('pwspray-config-modal').classList.add('visible');
@@ -18933,6 +18951,8 @@ function _pwsprayCollectConfig() {
     dry_run: document.getElementById('pws-dry-run').checked,
     accept_lockout_risk: document.getElementById('pws-accept-risk').checked,
     purple_mode: document.getElementById('pws-purple-mode').checked,
+    rfc_fallback_for_service_users:
+      document.getElementById('pws-rfc-service-users').checked,
     wordlist_text: document.getElementById('pws-wordlist').value || '',
   };
 }

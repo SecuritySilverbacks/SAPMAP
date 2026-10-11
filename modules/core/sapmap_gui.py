@@ -18242,6 +18242,8 @@ def create_app(api: SAPMAPApi) -> Bottle:
         body = request.json or {}
         dry_run = bool(body.get("dry_run", True))
         accept_risk = bool(body.get("accept_lockout_risk", False))
+        rfc_fallback_for_service_users = bool(
+            body.get("rfc_fallback_for_service_users", True))
         try:
             cap_per_user = int(body.get("cap_per_user", 1))
         except (TypeError, ValueError):
@@ -18268,6 +18270,8 @@ def create_app(api: SAPMAPApi) -> Bottle:
                 dry_run=dry_run,
                 accept_lockout_risk=accept_risk,
                 cap_per_user=cap_per_user,
+                rfc_fallback_for_service_users=(
+                    rfc_fallback_for_service_users),
                 manual_wordlist=[(u, p) for (u, p) in operator_wordlist],
             )
 
@@ -18892,6 +18896,11 @@ def create_app(api: SAPMAPApi) -> Bottle:
             accept_production_risk = _strict_bool(
                 "accept_production_risk", False)
             purple_mode = _strict_bool("purple_mode", False)
+            # RFC fallback for service users (issue #106).  Default
+            # True — safe (same lockout accounting as DIAG) and
+            # strictly more complete.
+            rfc_fallback_for_service_users = _strict_bool(
+                "rfc_fallback_for_service_users", True)
         except ValueError as e:
             response.status = 400
             return json.dumps({
@@ -19004,6 +19013,8 @@ def create_app(api: SAPMAPApi) -> Bottle:
                 accept_lockout_risk=accept_risk,
                 cap_per_user=cap_per_user,
                 purple_mode=purple_mode,
+                rfc_fallback_for_service_users=(
+                    rfc_fallback_for_service_users),
                 manual_wordlist=[(u, p) for (u, p) in operator_wordlist],
             )
             # Build engine-side scope_filter: preserve the legacy
