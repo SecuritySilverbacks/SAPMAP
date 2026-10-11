@@ -453,9 +453,17 @@ def test_modal_has_rfc_service_user_checkbox_default_on():
     assert 'id="pws-rfc-service-users" checked' in html, (
         "modal must carry the pws-rfc-service-users checkbox, default "
         "checked")
-    # Operator-facing explanation names the user types + the channel.
+    # Operator-facing explanation names the user types + the channel,
+    # and stays backend-agnostic (no specific SDK named — saprfclib
+    # works without the NW RFC SDK).
     assert "USTYP B/S/C" in html
-    assert "issue #106" in html
+    assert "Uses whichever RFC backend is" in html
+    # The service-user RFC blurb must not name a specific SDK.
+    blurb = html.split('pws-rfc-service-users')[1][:600]
+    assert "NW RFC SDK" not in blurb
+    assert "saprfclib" not in blurb
+    # ...and must not reference the issue tracker in operator-facing text.
+    assert "issue #106" not in blurb
 
 
 def test_collector_emits_rfc_toggle():

@@ -3211,8 +3211,8 @@ body {
         user &mdash; SAP refuses the interactive channel before checking it, so a correct
         and a wrong password both return <em>&ldquo;log on with a dialog user&rdquo;</em>.
         When DIAG returns that, the spray re-checks that one candidate over
-        <strong>RFC</strong>, which does validate it (issue #106).  Requires an RFC backend
-        (NW RFC SDK or saprfclib) on this host.  A failed RFC logon still bumps
+        <strong>RFC</strong>, which does validate it.  Uses whichever RFC backend is
+        available on this host.  A failed RFC logon still bumps
         <code>USR02.LOCNT</code>, so it counts against the same lockout cap / circuit breaker.
       </div>
     </div>
