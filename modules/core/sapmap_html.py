@@ -3293,6 +3293,15 @@ body {
       <span id="pws-pct" style="font-size:11px;color:#8b949e;min-width:36px;text-align:right">0%</span>
     </div>
     <div class="autopwn-log" id="pws-log"></div>
+    <!-- Live hit feed — populated in real time from /status.hit_rows
+         as each credential is confirmed, so the operator doesn't have
+         to wait for the run to finish to see hits. -->
+    <div id="pws-live-hits-wrap" style="margin-top:8px;display:none">
+      <div style="font-size:11px;color:#3fb950;font-weight:bold;margin-bottom:4px">
+        &#9989; Confirmed credentials (<span id="pws-live-hits-count">0</span>)
+      </div>
+      <div id="pws-live-hits" style="max-height:140px;overflow-y:auto;font-size:11px;font-family:monospace;line-height:1.5"></div>
+    </div>
     <div style="margin-top:8px;display:flex;gap:6px;flex-wrap:wrap">
       <button class="btn" onclick="showPwsprayResults()" style="font-size:11px">Show Hits</button>
       <button class="btn" onclick="showPwsprayHistory()" style="font-size:11px">History</button>
@@ -19106,6 +19115,14 @@ function _pwsprayShowProgressPanel(launchResult) {
     + (launchResult.purple_mode ? ' — purple' : '');
   // Reset the aborted-run colour from any previous run.
   label.style.color = launchResult.purple_mode ? '#a371f7' : '#ffa657';
+  // Clear the live hit feed from any previous run so stale hits don't
+  // flash before the first /status poll of the new run.
+  const liveWrap = document.getElementById('pws-live-hits-wrap');
+  if (liveWrap) {
+    liveWrap.style.display = 'none';
+    document.getElementById('pws-live-hits').innerHTML = '';
+    document.getElementById('pws-live-hits-count').textContent = '0';
+  }
   document.getElementById('pws-stop-btn').style.display = '';
   document.getElementById('pws-close-btn').style.display = 'none';
   // Purple-only phase boxes (issue #69, PR4).  Shown when the
@@ -19165,6 +19182,30 @@ async function _pwsprayPollStatus() {
       st.attempts_done + ' / ' + st.attempts_total;
     document.getElementById('pws-st-hits').textContent = st.hits;
     document.getElementById('pws-st-locks').textContent = st.locks;
+    // Live hit feed — render confirmed credentials in real time so the
+    // operator sees each hit the moment it lands (not only in the final
+    // results modal).  st.hit_rows carries {sid, client, user, result,
+    // channel} appended by the engine as each hit is recorded.
+    const liveWrap = document.getElementById('pws-live-hits-wrap');
+    const liveHits = document.getElementById('pws-live-hits');
+    if (liveWrap && liveHits) {
+      const rows = st.hit_rows || [];
+      if (rows.length) {
+        liveWrap.style.display = '';
+        document.getElementById('pws-live-hits-count').textContent = rows.length;
+        liveHits.innerHTML = rows.map(h => {
+          const via = h.channel === 'rfc'
+            ? ' <span style="color:#58a6ff">[RFC]</span>' : '';
+          return '<div><span style="color:#3fb950">&#10003;</span> '
+            + _escapeHtml((h.sid || '') + '/' + (h.client || ''))
+            + ' <strong>' + _escapeHtml(h.user || '') + '</strong> '
+            + '<span style="color:#f85149">' + _escapeHtml(h.result || '')
+            + '</span>' + via + '</div>';
+        }).join('');
+      } else {
+        liveWrap.style.display = 'none';
+      }
+    }
     // "Now trying" + "Last result" rows (slow/silent/no-stop fix).
     // Rendered as a two-line block above the log pane so operators
     // see what the engine is currently doing — previously the panel
