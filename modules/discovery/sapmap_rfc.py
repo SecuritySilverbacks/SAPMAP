@@ -303,6 +303,194 @@ def test_connection(node: SAPNode, creds: Credentials = None,
 
 
 # ---------------------------------------------------------------------------
+# RFC credential check (issue #106 — password-spray RFC fallback)
+# ---------------------------------------------------------------------------
+
+# Result-code vocabulary intentionally mirrors sap_default_creds so the
+# password-spray engine can treat a DIAG verdict and an RFC verdict
+# uniformly.  CONNECT_FAILED is RFC-specific: it means the gateway /
+# instance was unreachable, which is NOT a credential verdict — the
+# caller must not record it as a confirmed miss.
+RFC_CHECK_SUCCESS = "SUCCESS"
+# Password correct but expired (SAP msg 00-046) — the logon is
+# REJECTED, but the rejection PROVES the password is correct, so this
+# is a hit (mirrors sap_default_creds.PASSWORD_CHANGE being in
+# FINDING_RESULTS).  Critical for service users, whose passwords
+# DO expire and which only RFC can validate.
+RFC_CHECK_PASSWORD_CHANGE = "PASSWORD_CHANGE"
+RFC_CHECK_WRONG_PASSWORD = "WRONG_PASSWORD"
+RFC_CHECK_USER_LOCKED = "USER_LOCKED"
+RFC_CHECK_CONNECT_FAILED = "CONNECT_FAILED"
+RFC_CHECK_ERROR = "ERROR"
+
+
+def _classify_rfc_logon_exception(exc) -> tuple:
+    """Map an RFC open/logon exception to a (code, detail) in the
+    RFC_CHECK_* vocabulary.
+
+    Robust across BOTH RFC backends, which have SEPARATE exception
+    hierarchies: the C-SDK ctypes backend raises typed
+    ``LogonError`` / ``CommunicationError`` carrying ``msg_class`` /
+    ``msg_number`` (SAP message-00 numbers), while the pure saprfclib
+    backend wraps a logon failure in a generic ``RFCError`` whose
+    message text nests the reason, e.g.
+    ``"saprfclib connect failed: logon failed: Name or password is
+    incorrect (repeat logon)"``.
+
+    Because the pure backend nests ``logon failed`` inside a
+    ``connect failed`` wrapper, we MUST test the logon-specific
+    reasons (locked / wrong-password) BEFORE the communication
+    fallback — otherwise a wrong password would be misread as a
+    connect failure and silently dropped instead of counted.
+    """
+    msg = format_rfc_exception(exc)
+    low = (msg or "").lower()
+    num = (getattr(exc, "msg_number", "") or "").strip()
+    cls = (getattr(exc, "msg_class", "") or "").strip()
+    key = (getattr(exc, "key", "") or "").strip().upper()
+    exc_type = type(exc).__name__
+
+    # 1. SAP message-class-00 number — the most reliable signal, set by
+    #    the ctypes backend on typed logon errors.  Same numbers DIAG
+    #    uses (sap_default_creds._MSG_00_NUM): 042=locked, 046=expired
+    #    (correct password!), 152/320=wrong.
+    if cls in ("", "00") and num:
+        if num == "042":
+            return (RFC_CHECK_USER_LOCKED, msg)
+        if num == "046":
+            return (RFC_CHECK_PASSWORD_CHANGE, msg)
+        if num in ("152", "320"):
+            return (RFC_CHECK_WRONG_PASSWORD, msg)
+
+    # 2. User locked — text phrases (EN + DE), checked before connect.
+    if ("is locked" in low or "ist gesperrt" in low
+            or "password logon no longer possible" in low
+            or "no longer possible" in low and "password" in low):
+        return (RFC_CHECK_USER_LOCKED, msg)
+
+    # 3. Password correct but expired — the logon is rejected but the
+    #    rejection confirms the password.  Checked before the wrong-
+    #    password + connect fallbacks (EN + DE).  Service-user
+    #    passwords DO expire, and RFC is the only channel that can
+    #    validate them, so misreading this as a miss would discard the
+    #    exact credential issue #106 exists to find.
+    if ("enter a new password" in low
+            or "please choose a new password" in low
+            or "choose a new password" in low
+            or "password must be changed" in low
+            or "password has expired" in low
+            or "password has been reset" in low
+            or "kennwort ist abgelaufen" in low
+            or "passwort ist abgelaufen" in low
+            or "neues kennwort" in low
+            or "neues passwort" in low):
+        return (RFC_CHECK_PASSWORD_CHANGE, msg)
+
+    # 4. Wrong password — text phrases (EN + DE), checked before connect.
+    if ("name or password is incorrect" in low
+            or "name oder kennwort ist nicht korrekt" in low
+            or "password is incorrect" in low
+            or "repeat logon" in low):
+        return (RFC_CHECK_WRONG_PASSWORD, msg)
+
+    # 5. Typed logon failure without a recognised sub-reason — the
+    #    credentials were rejected at the logon layer, so treat as a
+    #    wrong-password miss rather than an inconclusive error.
+    if (exc_type == "LogonError"
+            or key == "RFC_LOGON_FAILURE"
+            or ("logon failed" in low
+                and "communication" not in low)):
+        return (RFC_CHECK_WRONG_PASSWORD, msg)
+
+    # 6. Communication / connect failure — gateway or instance
+    #    unreachable.  NOT a credential verdict.
+    if (exc_type == "CommunicationError"
+            or key == "RFC_COMMUNICATION_FAILURE"
+            or "communication" in low
+            or "partner not reached" in low
+            or "cannot reach" in low
+            or "connect" in low):
+        return (RFC_CHECK_CONNECT_FAILED, msg)
+
+    # 7. Backend unavailable (no RFC SDK / saprfclib) or anything else.
+    return (RFC_CHECK_ERROR, msg)
+
+
+def rfc_check_credentials(host: str, sysnr: str, client: str,
+                          user: str, password: str, *,
+                          saprouter: str = "", timeout=None) -> tuple:
+    """Validate a single credential via an RFC logon and return a
+    structured ``(code, detail)`` in the RFC_CHECK_* vocabulary.
+
+    This is the issue #106 password-spray fallback.  DIAG (SAPGUI)
+    cannot validate a SYSTEM / COMMUNICATION / SERVICE user (USTYP
+    B/S/C): SAP refuses the interactive channel BEFORE checking the
+    password, so a correct and a wrong password both return
+    ``NO_DIALOG_USER``.  An RFC logon DOES validate the password for
+    those user types.
+
+    Raw connection params (host / sysnr / client / user / password /
+    saprouter) rather than a SAPNode so the spray engine can call it
+    without building model objects in its hot loop, and so tests can
+    inject a fake with the same signature.  ``timeout`` is accepted
+    for watchdog-wrapper call compatibility; the hard wall-clock
+    bound is the caller's ``_run_with_watchdog(timeout_s=...)``.
+
+    Opening the connection performs the RFC logon (both backends call
+    the SDK's open in ``__enter__``), so a clean ``__enter__`` means
+    the credentials were accepted.  ``RFC_NO_AUTHORITY`` on the
+    follow-up RFCPING means a role-limited user logged on
+    successfully but can't call RFCPING — still a confirmed logon,
+    hence SUCCESS.
+
+    Never raises — every failure is mapped to a (code, detail).
+    """
+    try:
+        RFCConnection = _get_rfc_backend()
+    except Exception as e:
+        # No RFC backend available (neither C SDK nor saprfclib).
+        return (RFC_CHECK_ERROR, f"rfc backend unavailable: {e}")
+
+    params = {
+        "ashost": host,
+        "sysnr": sysnr,
+        "client": client,
+        "user": user,
+        "passwd": password,
+        "lang": "EN",
+    }
+    if saprouter:
+        params["saprouter"] = saprouter
+
+    try:
+        with RFCConnection(sdk_path=_sdk_path, **params) as conn:
+            # Logon already succeeded (open happens in __enter__).
+            # ping_verbose lets us treat RFC_NO_AUTHORITY on RFCPING
+            # as a confirmed logon by a role-limited user.
+            try:
+                ok, err_key, err_msg = conn.ping_verbose()
+            except AttributeError:
+                ok = conn.ping()
+                err_key, err_msg = "", ""
+            if ok:
+                return (RFC_CHECK_SUCCESS, "rfc logon ok")
+            low = (err_msg or "").lower()
+            if (err_key == "RFC_NO_AUTHORITY"
+                    or "no rfc authorization" in low
+                    or "no authorization" in low):
+                return (RFC_CHECK_SUCCESS,
+                        "rfc logon ok (RFCPING auth denied — "
+                        "role-limited user)")
+            # We DID log on (open succeeded); ping failed for some
+            # other reason.  The credential is still confirmed.
+            return (RFC_CHECK_SUCCESS,
+                    f"rfc logon ok (ping false: "
+                    f"{err_key or err_msg or 'unknown'})")
+    except Exception as e:
+        return _classify_rfc_logon_exception(e)
+
+
+# ---------------------------------------------------------------------------
 # User existence check
 # ---------------------------------------------------------------------------
 
