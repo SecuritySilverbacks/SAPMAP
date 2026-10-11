@@ -91,6 +91,9 @@ MAX_CAP_PER_USER = 2
 DEFAULT_SLEEP_RANGE: Tuple[float, float] = (0.3, 0.9)
 # Inter-node sleep range (seconds, uniform random).
 DEFAULT_INTER_NODE_SLEEP: Tuple[float, float] = (1.0, 2.0)
+# Cap on the live hit-row feed carried in the polled /status payload
+# (the full set is always in the final run object + loot JSONL).
+_MAX_LIVE_HIT_ROWS = 200
 
 # Purple-mode DIAG terminal name — a deliberately-identifiable string
 # so SOC SIEM correlation rules on the Terminal field can latch onto
@@ -1215,6 +1218,32 @@ def spray_landscape(
         manual_wordlist=config.manual_wordlist,
     )
     _append_log(f"pool: {len(pool)} candidate(s)")
+
+    # Resolve the RFC service-user fallback backend ONCE + log the
+    # outcome clearly, so the operator can SEE whether service/system
+    # users (USTYP B/S/C) will actually be validated this run.  Without
+    # this line a missing backend / disabled toggle silently left every
+    # NO_DIALOG_USER as a plain miss (operator-reported: a SYSTEM user
+    # that should have been confirmed over RFC never appeared in the
+    # hits, with no indication why).  Resolving here (not per-attempt)
+    # keeps the import off the hot path.
+    _rfc_fallback_fn = None
+    _rfc_fallback_active = False
+    if config.rfc_fallback_for_service_users:
+        try:
+            from sapmap_rfc import rfc_check_credentials as _rfc_fallback_fn
+            _rfc_fallback_active = True
+            _append_log("rfc service-user fallback: ENABLED "
+                        "(RFC backend ready)")
+        except Exception as e:
+            _rfc_fallback_fn = None
+            _append_log(
+                f"rfc service-user fallback: NO RFC backend available "
+                f"({type(e).__name__}: {e}) — service/system users "
+                f"(USTYP B/S/C) can't be password-validated this run")
+    else:
+        _append_log("rfc service-user fallback: disabled by operator")
+
     _set_phase("profile_probe")
     tm = build_target_matrix(state, scope_filter=scope_filter)
     targets: List[SprayTarget] = tm["eligible"]
@@ -1492,7 +1521,14 @@ def spray_landscape(
             _kind = row.get("kind")
             if _kind in ("miss", "locked", "error"):
                 _res = row.get("result") or _kind.upper()
-                _append_log(f"    → {_res}")
+                # Tag the channel so a service-user verdict reached over
+                # RFC is distinguishable from a plain DIAG miss — e.g.
+                # "→ RFC: WRONG_PASSWORD" tells the operator the RFC
+                # fallback DID fire and the password was wrong, vs
+                # "→ NO_DIALOG_USER" which means the fallback never ran.
+                _chan_tag = ("RFC: " if row.get("channel") == "rfc"
+                             else "")
+                _append_log(f"    → {_chan_tag}{_res}")
             kind = row.get("kind")
             # Idempotency record (issue #69, PR5) — remember every
             # fired triple so a next-wave AutoPwn phase3b doesn't
@@ -1526,6 +1562,13 @@ def spray_landscape(
                        "channel": _channel}
                 run.hits.append(hit)
                 _status.hits = len(run.hits)
+                # Real-time hit feed for the progress panel — append the
+                # row now (not at run end) so the operator sees each
+                # confirmed credential the moment it lands.  Capped so
+                # the polled /status payload stays small.
+                _status.hit_rows.append(hit)
+                if len(_status.hit_rows) > _MAX_LIVE_HIT_ROWS:
+                    _status.hit_rows = _status.hit_rows[-_MAX_LIVE_HIT_ROWS:]
                 _append_log(
                     f"HIT {target.sid}/{row.get('client')} user="
                     f"{row.get('user')} src={row.get('source_kind')} "
@@ -1740,8 +1783,12 @@ def spray_landscape(
             # NO_DIALOG_USER (USTYP B/S/C) candidates over RFC, which
             # DIAG can't confirm.  Gated by the operator-facing config
             # toggle; bounded by its own watchdog timeout.
-            rfc_fallback_for_service_users=(
-                config.rfc_fallback_for_service_users),
+            # Pass the pre-resolved backend (+ its active flag) so the
+            # engine doesn't re-import per target and so a missing
+            # backend correctly disables the fallback (active=False
+            # forces rfc_check_fn=None inside the engine).
+            rfc_fallback_for_service_users=_rfc_fallback_active,
+            rfc_check_fn=_rfc_fallback_fn,
             rfc_attempt_timeout_s=config.rfc_attempt_timeout_s,
         )
         # Node summary tooltip
@@ -2466,6 +2513,12 @@ class PwSprayStatus:
     attempts_total: int = 0
     attempts_done: int = 0
     hits: int = 0
+    # Live hit rows (SID / client / user / result / channel), appended
+    # as each hit lands so the progress panel can show confirmed creds
+    # in REAL TIME instead of only in the final results modal.  Capped
+    # (see _MAX_LIVE_HIT_ROWS) so the polled /status payload stays
+    # small on a landscape with many hits.
+    hit_rows: List[dict] = field(default_factory=list)
     locks: int = 0
     skipped_count: int = 0
     aborted: str = ""

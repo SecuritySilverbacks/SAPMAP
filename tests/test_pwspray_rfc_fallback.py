@@ -25,8 +25,34 @@ import modules  # noqa: F401 — registers package paths
 
 from sap_default_creds import (SUCCESS, USER_LOCKED, NO_DIALOG_USER,
                                WRONG_PASSWORD)
+from sapmap_models import (Credentials, InstanceInfo, SAPMAPState,
+                           SAPNode)
 import sapmap_pwspray as pw
 import sapmap_rfc
+
+
+def _mk_landscape_node(sid="NPL", client="001", ip="10.0.0.1",
+                       user="SAPMAP00", password="pw"):
+    """Minimal state with one ABAP target build_target_matrix accepts,
+    carrying one credential so the pool is non-empty."""
+    state = SAPMAPState()
+    node = SAPNode(sid=sid, ip=ip, hostname="h", system_type="ABAP")
+    node.clients = [{"nr": client}]
+    inst = InstanceInfo(instance_nr="00")
+    inst.ports = {3200: "dispatcher"}
+    node.instances = [inst]
+    node.credentials = [Credentials(username=user, password=password,
+                                     client=client, verified=False)]
+    state.nodes[sid] = node
+    return state, node
+
+
+@pytest.fixture(autouse=True)
+def _reset_status():
+    """Isolate the module-level PwSprayStatus singleton per test."""
+    pw._status = pw.PwSprayStatus()
+    yield
+    pw._status = pw.PwSprayStatus()
 
 
 # ---------------------------------------------------------------------------
@@ -497,3 +523,115 @@ def test_spray_attempt_record_carries_channel():
     fields = {f.name for f in dataclasses.fields(pw.SprayAttempt)}
     assert "channel" in fields, (
         "SprayAttempt must have a 'channel' field (diag/rfc)")
+
+
+# ===========================================================================
+# Observability — RFC-fallback backend resolution logging (operator could
+# not tell WHY a service user wasn't validated: the backend-load failure
+# was a silent logger.debug)
+# ===========================================================================
+
+def test_spray_landscape_logs_rfc_fallback_enabled():
+    """When the toggle is on and the RFC backend imports, spray_landscape
+    logs 'ENABLED' so the operator knows service users WILL be
+    validated."""
+    state, _ = _mk_landscape_node()
+    cfg = pw.SprayConfig(dry_run=True, cap_per_user=1,
+                         rfc_fallback_for_service_users=True)
+    pw.spray_landscape(state, cfg)
+    tail = pw.get_status()["log_tail"]
+    assert any("rfc service-user fallback: ENABLED" in l for l in tail), (
+        f"expected an ENABLED log line; got {tail}")
+
+
+def test_spray_landscape_logs_rfc_fallback_disabled_by_operator():
+    """Toggle off → explicit 'disabled by operator' log, so an absent
+    RFC check is clearly a choice, not a bug."""
+    state, _ = _mk_landscape_node()
+    cfg = pw.SprayConfig(dry_run=True, cap_per_user=1,
+                         rfc_fallback_for_service_users=False)
+    pw.spray_landscape(state, cfg)
+    tail = pw.get_status()["log_tail"]
+    assert any("disabled by operator" in l for l in tail)
+
+
+def test_spray_landscape_logs_no_rfc_backend(monkeypatch):
+    """When the RFC backend import fails, spray_landscape logs 'NO RFC
+    backend available' + names the user types that won't be validated —
+    the exact diagnostic the operator needed when a SYSTEM user silently
+    never appeared in the hits."""
+    # Resolve the module via sys.modules so we patch the SAME object
+    # spray_landscape's `from sapmap_rfc import ...` will resolve —
+    # other test files swap/delete sys.modules["sapmap_rfc"], so the
+    # top-level `import sapmap_rfc` reference can go stale.
+    import importlib
+    rfc_mod = importlib.import_module("sapmap_rfc")
+    monkeypatch.delattr(rfc_mod, "rfc_check_credentials")
+    state, _ = _mk_landscape_node()
+    cfg = pw.SprayConfig(dry_run=True, cap_per_user=1,
+                         rfc_fallback_for_service_users=True)
+    pw.spray_landscape(state, cfg)
+    tail = pw.get_status()["log_tail"]
+    assert any("NO RFC backend available" in l for l in tail), (
+        f"expected a NO-backend diagnostic; got {tail}")
+    assert any("USTYP B/S/C" in l for l in tail)
+
+
+# ===========================================================================
+# Real-time hit feed — hits appear during the run, not only at the end
+# ===========================================================================
+
+def test_status_has_hit_rows_field():
+    """PwSprayStatus must expose hit_rows in the polled /status payload
+    so the GUI can render confirmed creds live."""
+    assert "hit_rows" in pw.get_status(), (
+        "status payload must carry hit_rows for the live hit feed")
+
+
+def test_live_hit_rows_populated_during_run():
+    """A DIAG hit must append to _status.hit_rows AS IT LANDS (the
+    progress panel polls this), carrying sid/client/user/result/channel
+    — operator asked for hits to appear in real time, not only in the
+    final results modal."""
+    state, node = _mk_landscape_node(user="JORIS", password="pw1")
+    fake = _FakeTryLogin(hits=[("JORIS", "pw1", "001")])
+    cfg = pw.SprayConfig(dry_run=False, accept_lockout_risk=True,
+                         cap_per_user=1)
+    pw.spray_landscape(state, cfg, try_login_fn=fake,
+                       loot_dir_fn=lambda _: "")
+    hit_rows = pw.get_status()["hit_rows"]
+    assert len(hit_rows) == 1, (
+        f"the hit must be in the live feed; got {hit_rows}")
+    assert hit_rows[0]["user"] == "JORIS"
+    assert hit_rows[0]["sid"] == "NPL"
+    assert hit_rows[0]["client"] == "001"
+    assert hit_rows[0]["channel"] == "diag"
+
+
+def test_live_hit_rows_tag_rfc_channel(monkeypatch):
+    """An RFC-confirmed service-user hit must appear in the live feed
+    tagged channel='rfc'."""
+    # Use a username NOT in DEFAULT_SKIP_USERS (SAPJSF/TMSADM/… are
+    # skip-listed before the attempt) so the candidate actually reaches
+    # the DIAG attempt that returns NO_DIALOG_USER.
+    state, node = _mk_landscape_node(user="MYSVC", password="svc-pw")
+    # DIAG returns NO_DIALOG_USER for the service user; RFC confirms.
+    fake = _FakeTryLogin(nodialog_on=[("MYSVC", "001")])
+    # Patch the sys.modules object spray_landscape will import (other
+    # test files swap/delete sys.modules["sapmap_rfc"]).
+    import importlib
+    rfc_mod = importlib.import_module("sapmap_rfc")
+    monkeypatch.setattr(
+        rfc_mod, "rfc_check_credentials",
+        lambda *a, **k: ("SUCCESS", "rfc logon ok"))
+    cfg = pw.SprayConfig(dry_run=False, accept_lockout_risk=True,
+                         cap_per_user=1,
+                         rfc_fallback_for_service_users=True)
+    pw.spray_landscape(state, cfg, try_login_fn=fake,
+                       loot_dir_fn=lambda _: "")
+    hit_rows = pw.get_status()["hit_rows"]
+    assert len(hit_rows) == 1
+    assert hit_rows[0]["user"] == "MYSVC"
+    assert hit_rows[0]["channel"] == "rfc", (
+        "an RFC-confirmed hit must be tagged channel='rfc' in the live "
+        "feed so the operator sees which channel found it")
