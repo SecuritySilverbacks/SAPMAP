@@ -968,3 +968,76 @@ def test_liveness_probe_respects_timeout_parameter():
     assert 5.5 in seen_timeouts, (
         f"liveness_timeout must thread through to liveness_fn; "
         f"saw {seen_timeouts}")
+
+
+# ---------------------------------------------------------------------------
+# Issue #135: the sweep records the gateway port only after probing it
+# (33XX confirmed -> "gateway"; else SNC 48XX -> "gateway_snc"; else none),
+# instead of relying on a phantom 33XX from the import fan-out.
+# ---------------------------------------------------------------------------
+
+def _run_with_gw(state, sid, gw_result):
+    """Run the sweep with a gateway_resolve_fn that returns gw_result and
+    return the picked instance's ports dict afterwards."""
+    node = state.get_node(sid)
+    landscape_post_import_discover(
+        state, sid,
+        enrich_fn=_mk_enrich_mock()[0],
+        client_enum_fn=_mk_client_enum_mock([])[0],
+        gateway_resolve_fn=lambda host, nr, saprouter="": gw_result)
+    return node.instances[0].ports
+
+
+def test_sweep_records_plain_gateway_when_confirmed():
+    state, _ = _mk_state_with_node("GWA", inst_nr="00")  # dispatcher 3200
+    ports = _run_with_gw(state, "GWA", (3300, "gateway"))
+    assert ports.get(3300) == "gateway"
+
+
+def test_sweep_records_snc_gateway_when_only_48_open():
+    """SNC-only system: the sweep records gateway_snc (48XX), NOT a phantom
+    plain gateway (33XX)."""
+    state, _ = _mk_state_with_node("GWS", inst_nr="11")
+    ports = _run_with_gw(state, "GWS", (4811, "gateway_snc"))
+    assert ports.get(4811) == "gateway_snc"
+    assert 3311 not in ports, "no phantom plain 33XX gateway for SNC-only"
+
+
+def test_sweep_records_no_gateway_when_none_reachable():
+    """The exact #135 fix: an app server with no reachable gateway gets NO
+    gateway port — not the old unconditional 33XX."""
+    state, _ = _mk_state_with_node("GWN", inst_nr="07")
+    ports = _run_with_gw(state, "GWN", (0, ""))
+    assert all(not str(v).startswith("gateway") for v in ports.values()), (
+        f"no gateway port should be recorded; got {ports}")
+    assert 3307 not in ports
+
+
+def test_sweep_gateway_resolver_gets_host_and_instance_nr():
+    state, _ = _mk_state_with_node("GWR", host="10.9.9.9", inst_nr="42")
+    seen = {}
+    def _resolver(host, nr, saprouter=""):
+        seen.update(host=host, nr=nr, saprouter=saprouter)
+        return (0, "")
+    landscape_post_import_discover(
+        state, "GWR",
+        enrich_fn=_mk_enrich_mock()[0],
+        client_enum_fn=_mk_client_enum_mock([])[0],
+        gateway_resolve_fn=_resolver)
+    assert seen["host"] == "10.9.9.9"
+    assert int(seen["nr"]) == 42
+
+
+def test_sweep_gateway_probe_exception_does_not_break_enrichment():
+    """A raising gateway resolver must not abort the enrichment chain."""
+    state, _ = _mk_state_with_node("GWX", inst_nr="00")
+    enrich_fn, enrich_calls = _mk_enrich_mock({"sid": "GWX"})
+    def _boom(host, nr, saprouter=""):
+        raise OSError("boom")
+    res = landscape_post_import_discover(
+        state, "GWX",
+        enrich_fn=enrich_fn,
+        client_enum_fn=_mk_client_enum_mock([])[0],
+        gateway_resolve_fn=_boom)
+    assert res["status"] == "ok"
+    assert len(enrich_calls) == 1, "enrichment must still run after a gw probe error"
