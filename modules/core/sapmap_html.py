@@ -2286,7 +2286,7 @@ body {
     <div id="type-system-info" style="font-size:12px;color:#8b949e;margin-bottom:12px"></div>
     <div class="form-row">
       <label>System Type</label>
-      <select id="type-select">
+      <select id="type-select" onchange="_toggleWdPortFields()">
         <option value="" disabled selected hidden>Select type...</option>
         <option value="ABAP">ABAP</option>
         <option value="JAVA">Java</option>
@@ -2299,6 +2299,23 @@ body {
         <option value="MDM">MDM</option>
         <option value="HANA">HANA</option>
       </select>
+    </div>
+    <!-- WD port fields (issue #93) — revealed only for WEB_DISPATCHER.
+         Reclassifying to Web Dispatcher triggers a topology
+         rediscovery; it needs the WD's HTTP(S) port.  Pre-filled with a
+         best-effort guess so the operator usually just confirms.  Blank
+         is fine when the node already carries a wd_ port (the backend
+         reuses it). -->
+    <div id="type-wd-hint" style="display:none;font-size:11px;color:#8b949e;margin-bottom:8px">
+      Reclassifying to Web Dispatcher runs a topology rediscovery on the port(s) below.
+    </div>
+    <div class="form-row" id="type-wd-http-row" style="display:none">
+      <label>WD HTTP port</label>
+      <input id="type-wd-http" type="number" min="1" max="65535" placeholder="e.g. 8000">
+    </div>
+    <div class="form-row" id="type-wd-https-row" style="display:none">
+      <label>WD HTTPS port</label>
+      <input id="type-wd-https" type="number" min="1" max="65535" placeholder="e.g. 44300">
     </div>
     <div class="form-actions">
       <button class="btn btn-primary" onclick="saveSystemType()">Save</button>
@@ -14720,12 +14737,71 @@ function showTypeModal(sid) {
       }
     }
   }
+  _toggleWdPortFields();
   document.getElementById('type-modal').classList.add('visible');
+}
+// Issue #93 — reveal + pre-fill the WD HTTP/HTTPS port fields when the
+// operator picks WEB_DISPATCHER.  A node misclassified as ABAP/SAPROUTER
+// has no wd_ port, so reclassification needs a probe port to run the
+// topology rediscovery.  Pre-fill a best-effort guess so the operator
+// usually just confirms; leave blank when the node already has a wd_
+// port (the backend reuses it).
+function _toggleWdPortFields() {
+  const isWd = document.getElementById('type-select').value === 'WEB_DISPATCHER';
+  const hint = document.getElementById('type-wd-hint');
+  const httpRow = document.getElementById('type-wd-http-row');
+  const httpsRow = document.getElementById('type-wd-https-row');
+  hint.style.display = isWd ? '' : 'none';
+  httpRow.style.display = isWd ? '' : 'none';
+  httpsRow.style.display = isWd ? '' : 'none';
+  if (!isWd) return;
+  const httpEl = document.getElementById('type-wd-http');
+  const httpsEl = document.getElementById('type-wd-https');
+  // Only pre-fill empty fields (don't clobber the operator's edits).
+  if (httpEl.value || httpsEl.value) return;
+  const n = (mapState.nodes || {})[selectedNodeSid];
+  if (!n) return;
+  let guessHttp = '', guessHttps = '', hasWd = false;
+  for (const inst of (n.instances || [])) {
+    for (const [p, svc] of Object.entries(inst.ports || {})) {
+      const low = String(svc || '').toLowerCase();
+      if (low === 'wd_http' || low === 'wd_https') { hasWd = true; }
+      else if ((low === 'icm_http' || low === 'wd_candidate') && !guessHttp) { guessHttp = p; }
+      else if (low === 'icm_https' && !guessHttps) { guessHttps = p; }
+    }
+  }
+  // Node already carries a wd_ port → backend reuses it; leave blank.
+  if (hasWd) return;
+  // No HTTP-ish port to promote → derive 8000+NN / 44300+NN from the
+  // first instance's instance_nr (same source showInstanceNrModal uses).
+  if (!guessHttp && !guessHttps) {
+    const nr = ((n.instances || [])[0] || {}).instance_nr;
+    if (nr !== undefined && nr !== null && /^\d{1,2}$/.test(String(nr))) {
+      const nn = parseInt(nr, 10);
+      guessHttp = String(8000 + nn);
+      guessHttps = String(44300 + nn);
+    }
+  }
+  if (guessHttp) httpEl.value = guessHttp;
+  if (guessHttps) httpsEl.value = guessHttps;
 }
 async function saveSystemType() {
   const newType = document.getElementById('type-select').value;
-  await api('POST', `node/${selectedNodeSid}/set_type`, { system_type: newType });
+  const body = { system_type: newType };
+  if (newType === 'WEB_DISPATCHER') {
+    const h = parseInt(document.getElementById('type-wd-http').value, 10);
+    const s = parseInt(document.getElementById('type-wd-https').value, 10);
+    if (h) body.wd_http_port = h;
+    if (s) body.wd_https_port = s;
+  }
+  const r = await api('POST', `node/${selectedNodeSid}/set_type`, body);
   closeModal('type-modal');
+  if (r && r.need_wd_port) {
+    showToast('Set to Web Dispatcher. ' + (r.message ||
+      'Provide a WD port to run the topology rediscovery.'), 'info');
+  } else if (r && r.status === 'started') {
+    showToast('WD topology rediscovery started — see console for cache + backend results', 'info');
+  }
   startPolling();
 }
 function showDbTypeModal(sid) {
