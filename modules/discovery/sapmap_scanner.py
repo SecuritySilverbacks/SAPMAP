@@ -2812,14 +2812,24 @@ def enrich_system_info(host: str, gw_port: int, timeout: float = 10,
                        verbose: bool = False,
                        instance_nrs: list = None,
                        sid_hint: str = "",
-                       saprouter: str = "") -> dict:
+                       saprouter: str = "",
+                       include_web_ports: bool = False) -> dict:
     """Call RFC_SYSTEM_INFO (unauthenticated) to get OS, DB, kernel, hostname, SID.
 
     Args:
         instance_nrs: Explicit instance numbers to try for SAPControl (prioritized).
         sid_hint: Optional SID to use as log prefix (for already-known systems).
         saprouter: Optional SAProuter route string prefix for reaching the system.
+        include_web_ports: When True, also probe the standard web ports 80
+            (HTTP) and 443 (HTTPS) for /sap/public/info.  Set by the
+            operator-initiated manual-add + re-run paths (a Web Dispatcher
+            often listens on 80/443); left False for the automatic scan,
+            which already covers 80/443 via ``WELL_KNOWN_WD_PORTS`` and
+            shouldn't pay two extra probes per host (issue #89 point A).
     Returns dict with fields: sid, hostname, os, db_type, kernel, sap_release, ip, etc.
+        May also carry ``alive_http_ports``: a list of ports that returned
+        an HTTP response but no parseable RFCSI (4xx/5xx/200-no-rfcsi) —
+        still evidence of a web service (issue #89 point C).
     """
     tag = sid_hint or host  # log prefix: SID if known, else IP
 
@@ -3038,7 +3048,15 @@ def enrich_system_info(host: str, gw_port: int, timeout: float = 10,
         if gw_nr not in _seen:
             _seen.add(gw_nr)
             ordered_nrs.append(gw_nr)
-    if 0 not in _seen:
+    # Only guess instance 00 as a LAST RESORT — when neither an explicit
+    # operator instance nor a gateway-derived one is known.  Previously 00
+    # was force-added whenever it wasn't already present, so a system the
+    # operator added at e.g. inst 90 also probed inst-00 default ports
+    # (8000/44300/…); on a shared host that parsed a *different* co-located
+    # system's /sap/public/info and cross-contaminated the node (issue #89
+    # point B).  A genuine inst-00 system is still discovered via its own
+    # gateway, so nothing is lost.
+    if not ordered_nrs:
         ordered_nrs.append(0)
 
     # Query SAPControl SOAP on 5XX13 for SID, DB type, and ABAP/JAVA detection.
@@ -3155,6 +3173,21 @@ def enrich_system_info(host: str, gw_port: int, timeout: float = 10,
             print(f"[*] {tag}: probing /sap/public/info on "
                   f"{len(pi_targets)} ICM port(s) from SAPControl: "
                   f"{', '.join(_fmt_target(t) for t in pi_targets)}")
+        if include_web_ports:
+            # A Web Dispatcher commonly fronts services on the standard web
+            # ports; probe 80/443 too (issue #89 point A).  Scoped to the
+            # operator-initiated manual-add / re-run paths — the automatic
+            # scan already covers 80/443 via WELL_KNOWN_WD_PORTS, so this
+            # avoids two redundant probes per host there.  inst_nr=0 here is
+            # a log placeholder only (these ports are not instance-derived).
+            _have = {(p, h) for _, p, _s, h in pi_targets}
+            for wp, whttps, wsrc in ((80, False, "default-http"),
+                                     (443, True, "default-https")):
+                if (wp, whttps) not in _have:
+                    pi_targets.append((0, wp, wsrc, whttps))
+                    print(f"[*] {tag}: also probing standard web port "
+                          f"{wp}({'s' if whttps else 'h'}) for "
+                          f"/sap/public/info (issue #89)")
         pi_to = min(timeout, 5)
         any_success = False
         for inst_nr, port, port_src, use_https in pi_targets:
@@ -3168,8 +3201,22 @@ def enrich_system_info(host: str, gw_port: int, timeout: float = 10,
                                     use_https=use_https)
             status = getattr(query_public_info, "_last_status", "?")
             if not pi:
-                print(f"[-] {tag}: /sap/public/info ({scheme}://{host}:{port}): "
-                      f"{status}")
+                # An HTTP response (any status) is still proof of a live web
+                # service on this port — record it as a qualified web
+                # endpoint even though we couldn't parse RFCSI (issue #89
+                # point C).  Only when we actually got HTTP back
+                # (http_404/http_503/http_200_no_rfcsi), NOT on a transport
+                # failure (connect_failed/no_response/error).
+                if str(status).startswith("http_"):
+                    info.setdefault("alive_http_ports", []).append({
+                        "inst_nr": inst_nr, "port": port,
+                        "https": use_https, "status": status})
+                    print(f"[~] {tag}: /sap/public/info "
+                          f"({scheme}://{host}:{port}): {status} — HTTP "
+                          f"service present, qualifying port")
+                else:
+                    print(f"[-] {tag}: /sap/public/info "
+                          f"({scheme}://{host}:{port}): {status}")
                 continue
             for k in ("sid", "hostname", "os_type", "db_type",
                        "kernel", "sap_release", "ip"):

@@ -1166,6 +1166,69 @@ def _set_wd_port_protocol(node, wd_port: int, https: bool) -> None:
             inst.ports[wd_port] = new_label
 
 
+def _apply_alive_http_ports(node, alive_ports) -> list:
+    """Label each alive-but-unparseable HTTP port found during enrichment
+    (an HTTP 4xx / 5xx / 200-no-rfcsi response from ``/sap/public/info``)
+    as ``icm_http`` / ``icm_https`` on the node — so a manually-added Web
+    Dispatcher's web ports surface instead of being silently dropped
+    (issue #89 point C).
+
+    ``alive_ports`` is the ``enrich_system_info`` ``alive_http_ports``
+    list: dicts with ``inst_nr`` / ``port`` / ``https`` / ``status``.  Each
+    port is placed on the instance whose ``instance_nr`` matches, else the
+    node's first instance (a new ``InstanceInfo`` is created only if the
+    node has none).  An existing ``wd_*`` / ``icm_*`` label is never
+    overwritten.
+
+    Deliberately does NOT set ``is_web_dispatcher``: a 4xx/5xx alone does
+    not confirm a WD (it may be an ABAP ICM), so classification stays with
+    the operator / WD fingerprint — consistent with the strict-fingerprint
+    policy.  The ``icm_*`` label it writes is exactly what
+    ``_resolve_wd_probe_port`` later relabels to ``wd_*`` when the operator
+    sets the system type to WEB_DISPATCHER (issue #93).  Returns the list
+    of newly-labelled ``(port, label)`` tuples.
+    """
+    qualified = []
+    for entry in (alive_ports or []):
+        try:
+            port = int(entry.get("port"))
+        except (TypeError, ValueError):
+            continue
+        if port <= 0 or port > 65535:
+            continue
+        https = bool(entry.get("https"))
+        label = "icm_https" if https else "icm_http"
+        want_nr = str(entry.get("inst_nr", "")).strip()
+        target = None
+        if want_nr:
+            want2 = f"{int(want_nr):02d}" if want_nr.isdigit() else want_nr
+            target = next(
+                (i for i in node.instances
+                 if str(getattr(i, "instance_nr", "")) in (want_nr, want2)),
+                None)
+        if target is None:
+            target = node.instances[0] if node.instances else None
+        if target is None:
+            target = InstanceInfo(
+                instance_nr="", ip=(node.ip or node.hostname or ""),
+                ports={})
+            node.instances.append(target)
+        if target.ports is None:
+            target.ports = {}
+        # Only SURFACE ports that would otherwise be dropped — never
+        # relabel a port that already carries a service label.  Guarding
+        # on wd_/icm_ alone would clobber e.g. java_http/java_https (a
+        # dual-stack node's Java ICM ports 404 on /sap/public/info, so they
+        # land in alive_http_ports), silently corrupting state and breaking
+        # the Java-targeted modules that find the dispatcher by svc==
+        # "java_http" — as well as dispatcher/gateway/saprouter labels.
+        if target.ports.get(port):
+            continue  # already labelled — don't clobber
+        target.ports[port] = label
+        qualified.append((port, label))
+    return qualified
+
+
 def _icm_ports_from_instance_nr(instance_nr) -> tuple:
     """Derive the ICM/WD HTTP + HTTPS ports from a 2-digit instance
     number using the SAP convention (``8000 + NN`` HTTP,
@@ -7767,7 +7830,8 @@ def create_app(api: SAPMAPApi) -> Bottle:
                         if inst.instance_nr is not None]
             info = sapmap_scanner.enrich_system_info(
                 host, gw_port, instance_nrs=inst_nrs,
-                sid_hint=node.sid, saprouter=node.saprouter)
+                sid_hint=node.sid, saprouter=node.saprouter,
+                include_web_ports=True)
             # Update node with retrieved info.  The user asked for a
             # refresh, so we normally overwrite existing fields.  BUT:
             # if the node already has data from an authoritative Stage 0
@@ -7807,6 +7871,13 @@ def create_app(api: SAPMAPApi) -> Bottle:
                     node.system_type = "JAVA"
                 else:
                     node.system_type = "ABAP"
+
+            # Qualify ports that answered HTTP but not RFCSI (4xx/5xx) as
+            # icm_* so a Web Dispatcher's web ports surface (issue #89 C).
+            for _p, _lbl in _apply_alive_http_ports(
+                    node, info.get("alive_http_ports")):
+                print(f"[+] {node.sid}: qualified web port {_p} as {_lbl} "
+                      f"(HTTP service present)")
 
             # Database port fingerprinting (if DB not yet known)
             if not node.db_type:
@@ -18712,11 +18783,19 @@ def create_app(api: SAPMAPApi) -> Bottle:
                                 else "JAVA" if sc_java else "ABAP")
                     if not fill_only or not node.system_type:
                         node.system_type = new_type
+                # Qualify ports that answered HTTP but not RFCSI (4xx/5xx)
+                # as icm_* so a manually-added Web Dispatcher's web ports
+                # surface (issue #89 point C).
+                for _p, _lbl in _apply_alive_http_ports(
+                        node, info.get("alive_http_ports")):
+                    print(f"[+] {sid}: qualified web port {_p} as {_lbl} "
+                          f"(HTTP service present)")
 
             try:
                 info = sapmap_scanner.enrich_system_info(
                     host, gw_port, instance_nrs=inst_nrs,
-                    sid_hint=sid, saprouter=saprouter)
+                    sid_hint=sid, saprouter=saprouter,
+                    include_web_ports=True)
                 _apply(info)
 
                 # For Java-only systems the user often provides the Java
