@@ -1166,6 +1166,136 @@ def _set_wd_port_protocol(node, wd_port: int, https: bool) -> None:
             inst.ports[wd_port] = new_label
 
 
+def _icm_ports_from_instance_nr(instance_nr) -> tuple:
+    """Derive the ICM/WD HTTP + HTTPS ports from a 2-digit instance
+    number using the SAP convention (``8000 + NN`` HTTP,
+    ``44300 + NN`` HTTPS).  Returns ``(http_port, https_port)`` or
+    ``(0, 0)`` when the instance number isn't numeric.
+
+    Used by the #93 WEB_DISPATCHER reclassification flow to pre-fill /
+    derive a WD probe port when the node carries no HTTP-labelled port
+    (a Web Dispatcher misclassified as ABAP/SAPROUTER typically has
+    only dispatcher/gateway/router ports).  This is the inverse of the
+    scanner's ``_derive_instance_from_wd_port``.
+    """
+    s = str(instance_nr or "").strip()
+    if not s.isdigit():
+        return (0, 0)
+    nn = int(s)
+    if nn < 0 or nn > 99:
+        return (0, 0)
+    return (8000 + nn, 44300 + nn)
+
+
+def _resolve_wd_probe_port(node, body: dict) -> dict:
+    """Decide which host port to probe as the Web Dispatcher when a node
+    is (re)classified to WEB_DISPATCHER, mutating ``node.instances[*].
+    ports`` as needed so the downstream rediscovery can find a
+    ``wd_http`` / ``wd_https`` label (issue #93).
+
+    Resolution order (first match wins):
+      (a) ``existing_wd``     — an existing ``wd_http`` / ``wd_https``
+                                 port → use as-is, no mutation.
+      (b) ``relabel_icm``     — an existing ``icm_http`` / ``icm_https``
+                                 / ``wd_candidate`` port → relabel it to
+                                 ``wd_http`` / ``wd_https``.  The
+                                 operator has DECLARED this is a WD,
+                                 overriding the scanner's ambiguous
+                                 auto-fingerprint.
+      (c) ``added_supplied``  — operator-supplied ``wd_https_port`` /
+                                 ``wd_http_port`` in ``body`` → add the
+                                 port to the node (prefer HTTPS when
+                                 both given).
+      (d) ``none``            — nothing resolvable; caller should prompt
+                                 the operator for a port.
+
+    Returns ``{"wd_port": int, "wd_https": bool, "source": str,
+               "error": str}``.
+    """
+    result = {"wd_port": 0, "wd_https": False, "source": "none",
+              "error": ""}
+
+    # (a) existing wd_ label — authoritative, no mutation.
+    for inst in node.instances:
+        for p, svc in (inst.ports or {}).items():
+            low = (svc or "").lower()
+            if low in ("wd_http", "wd_https"):
+                result.update(wd_port=int(p),
+                              wd_https=(low == "wd_https"),
+                              source="existing_wd")
+                return result
+
+    # (b) relabel an existing icm_/candidate HTTP port — operator
+    # reclassification overrides the scanner's is_wd=False verdict.
+    for inst in node.instances:
+        for p, svc in (inst.ports or {}).items():
+            low = (svc or "").lower()
+            if low in ("icm_http", "icm_https", "wd_candidate"):
+                https = low.endswith("_https")
+                _set_wd_port_protocol(node, int(p), https)
+                print(f"[*] {node.sid}: port {p} {svc} -> "
+                      f"{'wd_https' if https else 'wd_http'} "
+                      f"(operator reclassification to WEB_DISPATCHER)")
+                result.update(wd_port=int(p), wd_https=https,
+                              source="relabel_icm")
+                return result
+
+    # (c) operator-supplied port — add it (prefer HTTPS when both).
+    def _as_port(v):
+        try:
+            iv = int(v)
+            return iv if 1 <= iv <= 65535 else 0
+        except (TypeError, ValueError):
+            return 0
+    http_p = _as_port((body or {}).get("wd_http_port"))
+    https_p = _as_port((body or {}).get("wd_https_port"))
+    if http_p or https_p:
+        # Pick the instance whose instance_nr derives to one of the
+        # supplied ports, else the first numeric-instance, else the
+        # first instance; create one if the node has none.
+        from sapmap_scanner import _derive_instance_from_wd_port
+        target_inst = None
+        want_nr = ""
+        for p in (https_p, http_p):
+            if p:
+                want_nr = _derive_instance_from_wd_port(p) or want_nr
+        if want_nr:
+            target_inst = next(
+                (i for i in node.instances
+                 if str(getattr(i, "instance_nr", "")) == want_nr), None)
+        if target_inst is None:
+            target_inst = next(
+                (i for i in node.instances
+                 if str(getattr(i, "instance_nr", "")).isdigit()), None)
+        if target_inst is None and node.instances:
+            target_inst = node.instances[0]
+        if target_inst is None:
+            nr = want_nr or _derive_instance_from_wd_port(
+                https_p or http_p) or "00"
+            target_inst = InstanceInfo(
+                instance_nr=nr, ip=(node.ip or node.hostname or ""),
+                ports={})
+            node.instances.append(target_inst)
+        if target_inst.ports is None:
+            target_inst.ports = {}
+        if http_p:
+            target_inst.ports[http_p] = "wd_http"
+        if https_p:
+            target_inst.ports[https_p] = "wd_https"
+        probe_port = https_p or http_p
+        print(f"[*] {node.sid}: added operator-supplied WD port "
+              f"{probe_port} ({'wd_https' if https_p else 'wd_http'}) "
+              f"on instance {getattr(target_inst, 'instance_nr', '?')}")
+        result.update(wd_port=probe_port,
+                      wd_https=bool(https_p),
+                      source="added_supplied")
+        return result
+
+    # (d) nothing resolvable.
+    result["error"] = "no_wd_port"
+    return result
+
+
 def _enrich_wd_backends_from_admin_table(wd_node, systems: list,
                                             state=None) -> list:
     """Upgrade the WD's wd_backends list with real SID + MSHOST + MSPORT
@@ -1521,6 +1651,98 @@ class ShellSession:
             except Exception:
                 pass
             self.client_sock = None
+
+
+def _run_wd_rediscovery(node, state, wd_port: int, wd_https: bool) -> None:
+    """Re-run the WD cache + backend-topology + admin-table + cross-node
+    matching for a Web Dispatcher node.  Shared by the ``wd_rediscover``
+    ctx-menu route and the WEB_DISPATCHER reclassification flow (#93) so
+    both trigger the exact same discovery.
+
+    Raises on failure — the caller wraps this in try/except so both
+    entry points get an identical guard + traceback.
+    """
+    from sapmap_scanner import (
+        detect_wd_cache, discover_wd_backends,
+        match_wd_backends_to_nodes,
+    )
+    sid = node.sid
+    host = node.ip or node.hostname
+    print(f"[*] {sid}: WD rediscover on {host}:{wd_port}"
+          f"{'/HTTPS' if wd_https else '/HTTP'}")
+    # Cache state
+    cache = detect_wd_cache(host, wd_port, https=wd_https,
+                            timeout=6, saprouter=node.saprouter or "")
+    node.wd_cache_enabled = bool(cache.get("enabled"))
+    node.wd_cache_evidence = cache.get("evidence", "")
+    if cache.get("enabled"):
+        print(f"[+] {sid}: cache ENABLED ({cache['evidence']})")
+    else:
+        print(f"[*] {sid}: cache disabled or no signal "
+              f"({cache.get('evidence', '')})")
+    # Backend topology — Server-header bucket
+    bk_result = discover_wd_backends(
+        host, wd_port, https=wd_https,
+        timeout=6, saprouter=node.saprouter or "", verbose=True)
+    node.wd_backends = [dict(b, linked_node_sid="")
+                        for b in bk_result["backends"]]
+    # Chain the admin-table extraction when working wd_admin
+    # credentials are stored on the node — the authoritative source
+    # (Server-header buckets collapse multiple real backends into one).
+    wd_cred = None
+    for c in (node.credentials or []):
+        if getattr(c, "kind", "") == "wd_admin":
+            wd_cred = c
+            break
+    if wd_cred:
+        print(f"[*] {sid}: stored wd_admin credentials found "
+              f"({wd_cred.username}) — chaining admin-table extraction")
+        try:
+            from sap_wdisp_admin import fetch_wd_systems
+            r = fetch_wd_systems(
+                host, wd_port, https=wd_https,
+                user=wd_cred.username, pwd=wd_cred.password,
+                timeout=8, saprouter=node.saprouter or "")
+            if r["ok"]:
+                print(f"[+] {sid}: admin-table parsed "
+                      f"{len(r['systems'])} wdisp/system_* entry/entries")
+                _enrich_wd_backends_from_admin_table(
+                    node, r["systems"], state=state)
+                try:
+                    sapmap_findings.emit_finding(
+                        "INFO", sid,
+                        f"WD /sap/wdisp/admin backend table read — "
+                        f"{len(r['systems'])} backend(s) discovered "
+                        f"(SID, MSHOST, MSPORT, SSL_ENCRYPT, SRCURL)",
+                        ref="wd.backend_table.read",
+                        attack_capability="data.wd_backend_table_read")
+                except Exception:
+                    pass
+            else:
+                print(f"[-] {sid}: admin-table extract failed "
+                      f"({r['error']}) — falling back to Server-header "
+                      f"bucket placeholders")
+        except Exception as e:
+            print(f"[-] {sid}: admin-table extract crashed: "
+                  f"{type(e).__name__}: {e}")
+    # Re-run cross-node matching (link-only mode).
+    placeholders = match_wd_backends_to_nodes(
+        list(state.nodes.values()), promote_unmatched=False)
+    for p in placeholders:
+        state.add_node(p)
+    if placeholders:
+        print(f"[+] {sid}: linked {len(placeholders)} backend(s) to "
+              f"existing on-map node(s)")
+    linked = [b for b in node.wd_backends if b.get("linked_node_sid")]
+    print(f"[+] {sid}: rediscover complete — "
+          f"{len(node.wd_backends)} backend(s), {len(linked)} linked "
+          f"to on-map nodes (of which {len(placeholders)} newly "
+          f"synthesised)")
+    for b in node.wd_backends:
+        tgt = (b.get("linked_node_sid") or '<not on map>')
+        srv = b.get("server_header") or '<suppressed>'
+        print(f"      → {tgt:8s} [{srv[:60]}] "
+              f"{len(b.get('url_prefixes', []))} prefix(es)")
 
 
 def _detect_local_ip(target_host: str, saprouter: str = "") -> str:
@@ -2812,6 +3034,16 @@ def parse_landscape_xml_into_state(state, xml_text,
         node = SAPNode(
             sid=sid, hostname=host, ip=host,
             instances=[instance],
+            # SAP Logon landscape XML entries describe SAPGUI (ABAP
+            # dialog) connections — SAPGUI is the ABAP client, not
+            # the Java one.  Default system_type=ABAP so operators
+            # can immediately run ABAP-only tooling (default-cred
+            # check, pwspray, user creation) on freshly-imported
+            # systems without waiting for RFC_SYSTEM_INFO enrichment.
+            # Enrichment can later override to JAVA / ABAP+JAVA if
+            # SAPControl's stack detection disagrees (handled in
+            # landscape_post_import_discover).
+            system_type="ABAP",
             sapology_data={
                 "description": svc_name,
                 "xml_service_name": svc_name,
@@ -2845,6 +3077,342 @@ def parse_landscape_xml_into_state(state, xml_text,
 
     return {"status": "ok", "systems": systems, "added": added,
             "skipped": skipped, "dupes": dupes}
+
+
+def landscape_post_import_discover(state, sid: str,
+                                     enrich_fn=None,
+                                     client_enum_fn=None,
+                                     liveness_fn=None,
+                                     liveness_timeout: float = 2.0) -> dict:
+    """Issue #109: for a single newly-imported landscape-XML node,
+    run RFC_SYSTEM_INFO (promotes placeholder SIDs — issue #114's gap
+    for pure app-server entries that don't carry systemid) and
+    enumerate clients via DIAG (fills the empty ``clients`` field so
+    the operator can actually log on).
+
+    Called sequentially from the ``/api/import_landscape_xml`` route's
+    background post-import sweep.  Lifted to module scope (vs. living
+    inside the route closure) so it's directly unit-testable with
+    mocked scanner functions — the pure-function convention
+    ``parse_landscape_xml_into_state`` already follows.
+
+    Args:
+        state: SAPMAPState instance (needs .get_node + .rename_node_sid).
+        sid: The SID key under which the node was added by the parser.
+        enrich_fn: Override for ``sapmap_scanner.enrich_system_info``.
+            Tests inject a mock; production leaves this None.
+        client_enum_fn: Override for
+            ``sapmap_scanner.enumerate_system_clients``.  Tests inject
+            a mock; production leaves this None.
+        liveness_fn: Override for ``sapmap_scanner._scan_port``.  Tests
+            inject a mock; production leaves this None.  Called with
+            ``(host, port, timeout=liveness_timeout, saprouter=...)``
+            and must return True if the port is open.
+        liveness_timeout: per-port timeout for the liveness probe,
+            seconds.  2.0s balances dead-host short-circuit speed
+            against false-dead on slow VPN links.
+
+    Returns:
+        A dict shape ``{"status": "ok"|"skip", "reason"?: str,
+                         "new_sid"?: str, "clients_added"?: int,
+                         "enrich_source"?: str}`` for callers that want
+        a structured outcome (the GUI's _bg wrapper just logs).
+
+    Error handling: ``enrich_system_info`` and
+    ``enumerate_system_clients`` both swallow exceptions and return
+    partial/empty results — a single failed node doesn't break the
+    sweep.
+    """
+    if enrich_fn is None:
+        enrich_fn = sapmap_scanner.enrich_system_info
+    if client_enum_fn is None:
+        client_enum_fn = sapmap_scanner.enumerate_system_clients
+
+    node = state.get_node(sid)
+    if not node:
+        return {"status": "skip", "reason": "node_not_found"}
+    # Instance selection — prefer an instance with a REAL dispatcher
+    # (3200-3299) or gateway (3300-3399) port in its ports map,
+    # falling back to any instance with a parseable instance_nr.
+    #
+    # Why this matters: `<Service msid=…/>` entries get a sapms
+    # placeholder instance (port_label='sapms', inst_nr derived from
+    # the 3600-range port) built by the parser BEFORE
+    # _import_appserver_instances appends the real app-server
+    # instances (each with its own `ip` + a {32NN: 'dispatcher',
+    # 33NN: 'gateway'} ports map).  Picking the first-parseable
+    # instance would land on the sapms placeholder, derive wrong
+    # gw_port/disp_port from the MS instance_nr, and probe them on
+    # node.ip (the MS host — which may not run a dialog instance).
+    # The real-port preference rescues this case.
+    def _inst_has_real_port(inst):
+        if not isinstance(getattr(inst, "ports", None), dict):
+            return False
+        for p in inst.ports.keys():
+            try:
+                p = int(p)
+            except (TypeError, ValueError):
+                continue
+            if 3200 <= p <= 3299 or 3300 <= p <= 3399:
+                return True
+        return False
+    picked = None
+    for inst in node.instances:
+        if inst.instance_nr is None:
+            continue
+        try:
+            int(inst.instance_nr)
+        except (TypeError, ValueError):
+            continue
+        if _inst_has_real_port(inst):
+            picked = inst
+            break
+    if picked is None:
+        # Fallback: no instance carries a dispatcher/gateway port
+        # (e.g. a bare sapms placeholder on an MS-only node that
+        # fan-out couldn't resolve).  Take the first instance that
+        # at least has a parseable instance_nr.
+        for inst in node.instances:
+            if inst.instance_nr is None:
+                continue
+            try:
+                int(inst.instance_nr)
+            except (TypeError, ValueError):
+                continue
+            picked = inst
+            break
+    if picked is None:
+        print(f"[-] {sid}: Post-import scan: no usable instance_nr; "
+              f"skipping")
+        return {"status": "skip", "reason": "no_instance_nr"}
+    # Host preference: the picked instance's own ip (set by
+    # _import_appserver_instances for real app servers), falling back
+    # to the node's top-level ip/hostname.  Critical for MS-fan-out
+    # landscapes where the app servers are on different hosts than
+    # the MS.
+    host = (getattr(picked, "ip", "") or node.ip or node.hostname
+            or "")
+    if not host:
+        print(f"[-] {sid}: Post-import scan: node has no host/ip")
+        return {"status": "skip", "reason": "no_host"}
+    inst_nr = picked.instance_nr
+    nr = int(inst_nr)
+    gw_port = 3300 + nr
+    disp_port = 3200 + nr
+
+    # Liveness probe — short-circuit dead hosts before cycling through
+    # the full ~90s RFC_SYSTEM_INFO + ICM + DIAG + MS + client-enum
+    # chain.  Operator-reported 2026-10-09: on a 68-system landscape
+    # with mostly historic / demo entries whose VMs are long gone, the
+    # original sweep spent ~90s per dead host x 68 systems = ~90 min
+    # worst case.  A 2s TCP probe per port cuts a dead host to ~4s.
+    #
+    # Probes BOTH dispatcher (32NN) + gateway (33NN) because either
+    # being reachable is enough to justify the full enrichment (DIAG
+    # uses dispatcher, RFC uses gateway; some hardened installs expose
+    # only one).  Saprouter-tunneled hosts are probed through the
+    # tunnel transparently — `_scan_port` already handles the NI route
+    # dialect, so no bypass is needed.
+    if liveness_fn is None:
+        liveness_fn = sapmap_scanner._scan_port
+    saprouter_arg = getattr(node, "saprouter", "") or ""
+    alive = False
+    for probe_port in (disp_port, gw_port):
+        try:
+            if liveness_fn(host, probe_port,
+                            timeout=liveness_timeout,
+                            saprouter=saprouter_arg):
+                alive = True
+                break
+        except Exception as e:
+            # Defensive — a liveness probe that raises (DNS failure,
+            # route-string parse error, etc.) should NOT block the
+            # enrichment chain.  Treat it as "unknown" and fall
+            # through to the full enrichment so the operator still
+            # gets a diagnostic from the deeper probes.
+            print(f"[-] {sid}: Post-import liveness probe raised on "
+                  f"{host}:{probe_port}: {type(e).__name__}: {e} — "
+                  f"proceeding with full enrichment")
+            alive = True
+            break
+    if not alive:
+        print(f"[-] {sid}: Post-import scan: {host} not responding on "
+              f":{disp_port} or :{gw_port} within {liveness_timeout}s "
+              f"each — skipping enrichment (host likely down, "
+              f"firewalled, or unroutable from this network)")
+        return {"status": "skip", "reason": "host_unreachable"}
+
+    result = {"status": "ok"}
+
+    # Step 1 — RFC_SYSTEM_INFO (promotes placeholder SID; fills
+    # hostname / os_type / db_type / kernel / sap_release).
+    try:
+        info = enrich_fn(
+            host, gw_port, timeout=10,
+            instance_nrs=[inst_nr],
+            sid_hint=node.sid,
+            saprouter=node.saprouter)
+    except Exception as e:
+        print(f"[-] {sid}: Post-import RFC_SYSTEM_INFO error: "
+              f"{type(e).__name__}: {e}")
+        info = {}
+
+    # Apply enriched fields.  Mirrors the per-node rfc_system_info
+    # route but tuned for XML-imported nodes: placeholder SIDs may be
+    # freely promoted; real SIDs are kept.
+    new_source = info.get("sysinfo_source", "")
+    for fld in ("hostname", "os_type", "db_type", "kernel",
+                 "sap_release"):
+        v = info.get(fld, "")
+        if v:
+            setattr(node, fld, v)
+    if new_source and not node.sysinfo_source:
+        node.sysinfo_source = new_source
+        result["enrich_source"] = new_source
+
+    # system_type override from SAPControl stack detection.  Parser
+    # defaults every XML-imported node to ABAP (SAP Logon describes
+    # SAPGUI = ABAP dialog connections), but enrichment may discover
+    # a JAVA or dual-stack system.  Mirrors the per-node rfc_system_
+    # info route (~L7193-7201).
+    sc_abap = bool(info.get("_is_abap", False))
+    sc_java = bool(info.get("_is_java", False))
+    if sc_abap or sc_java:
+        if sc_abap and sc_java:
+            node.system_type = "ABAP+JAVA"
+        elif sc_java:
+            node.system_type = "JAVA"
+        else:
+            node.system_type = "ABAP"
+        result["system_type"] = node.system_type
+
+    # SID promotion for placeholder XML nodes.  Placeholder test is
+    # `discovered_via_xml` alone — the parser sets that flag only when
+    # a placeholder SID was synthesized (parser line ~2821:
+    # `discovered_via_xml=placeholder`), so it is already the single
+    # source of truth.
+    #
+    # Historical mistake caught by adversarial review 2026-10-09: an
+    # earlier version AND-ed in `bool(sapology_data['xml_sentinel_sid'])`,
+    # which false-negatived the common no-systemid case
+    # (`<Service server='host:port'/>` with no systemid attribute at
+    # all).  The parser writes `xml_sentinel_sid = svc_sid if
+    # placeholder else ""`, and when svc_sid is "" (the common
+    # SAPGUILandscape.xml form) the gate skipped SID promotion —
+    # defeating issue #114's residual-gap fix for the most common
+    # import shape.  Base on `discovered_via_xml` alone.
+    is_placeholder = bool(getattr(node, "discovered_via_xml", False))
+    new_sid = (info.get("sid") or "").strip().upper()
+    if is_placeholder and new_sid and new_sid != node.sid:
+        old_sid = node.sid
+        err = state.rename_node_sid(old_sid, new_sid)
+        if err:
+            # SID collision — real SID already on the map, likely
+            # from a prior scan or earlier import.  Leave the
+            # placeholder in place; the operator can resolve via Set
+            # SID.
+            print(f"[-] {old_sid}: Post-import SID promotion to "
+                  f"{new_sid} failed: {err}")
+        else:
+            print(f"[+] {old_sid}: Post-import promoted placeholder "
+                  f"SID to real SID {new_sid}")
+            result["new_sid"] = new_sid
+            sid = new_sid  # for downstream log tagging
+
+    # Step 2 — client enumeration via DIAG.  The primary issue #109
+    # ask: without this, the clients field stays empty and the
+    # operator can't do anything with the system (login, default-cred
+    # check, pwspray — all need a client).
+    try:
+        client_list = client_enum_fn(
+            host, disp_port, saprouter=node.saprouter,
+            sid_hint=node.sid)
+    except Exception as e:
+        print(f"[-] {sid}: Post-import client enumeration error: "
+              f"{type(e).__name__}: {e}")
+        client_list = []
+    if client_list:
+        # Preserve existing clients where possible: a prior scan may
+        # have populated category hints we shouldn't drop.
+        seen = {c.get("nr"): c for c in (node.clients or [])
+                if isinstance(c, dict) and c.get("nr")}
+        fresh = []
+        for nr in client_list:
+            if nr in seen:
+                fresh.append(seen[nr])
+            else:
+                fresh.append({"nr": nr, "category": ""})
+        node.clients = fresh
+        result["clients_added"] = len(client_list)
+        print(f"[+] {node.sid}: Post-import populated "
+              f"{len(client_list)} client(s): "
+              f"{', '.join(client_list)}")
+
+    return result
+
+
+def run_landscape_post_import_sweep(state, added_sids,
+                                      task_update_fn=None,
+                                      discover_fn=None):
+    """Issue #109: iterate the ``added`` SIDs returned by
+    ``parse_landscape_xml_into_state`` and run per-node discovery on
+    each (RFC_SYSTEM_INFO + client enumeration via
+    ``landscape_post_import_discover``).
+
+    Lifted to module scope (vs. living inside the route closure) so
+    it's directly unit-testable without a Bottle test client — the
+    class of API-drift bug that source-string tests cannot catch
+    (adversarial-review finding 2026-10-09: an earlier version called
+    the non-existent ``sapmap_stop.should_stop()``; the daemon thread
+    died silently with AttributeError on the FIRST iteration and the
+    entire feature was a no-op in production).
+
+    Args:
+        state: SAPMAPState.
+        added_sids: iterable of SIDs to process in order.
+        task_update_fn: callable(key, label) for GUI progress labels.
+            Default: no-op (tests inject a recorder; production
+            injects the module-level ``_task_update``).
+        discover_fn: callable(state, sid) that does the actual
+            per-node work.  Default: ``landscape_post_import_discover``.
+            Tests inject a recorder.
+
+    Returns the list of SIDs for which discovery was invoked (useful
+    for assertions in tests + for the GUI's completion message).
+    """
+    import sapmap_stop
+    if task_update_fn is None:
+        task_update_fn = lambda key, label: None  # noqa: E731
+    if discover_fn is None:
+        discover_fn = landscape_post_import_discover
+    sids = list(added_sids)
+    total = len(sids)
+    processed = []
+    if total == 0:
+        return processed
+    print(f"[*] Landscape post-import scan starting for {total} "
+          f"system(s): {', '.join(sids)}")
+    for i, s in enumerate(sids, 1):
+        if sapmap_stop.is_stop_requested():
+            print(f"[!] Landscape post-import scan cancelled after "
+                  f"{i-1}/{total}")
+            break
+        task_update_fn("landscape:post_import_scan",
+                        f"({i}/{total}) {s}: RFC_SYSTEM_INFO + "
+                        f"client enum")
+        try:
+            discover_fn(state, s)
+        except Exception as e:
+            # Defensive: a per-node discover crash must NOT abort the
+            # sweep for the remaining nodes.  landscape_post_import_
+            # discover already swallows enrich/client_enum exceptions
+            # internally, so hitting this branch means something
+            # structural went wrong — log + continue.
+            print(f"[-] {s}: Post-import discover crashed: "
+                  f"{type(e).__name__}: {e}")
+        processed.append(s)
+    print(f"[+] Landscape post-import scan complete")
+    return processed
 
 
 def _import_appserver_instances(node, ms_host: str, ms_port) -> int:
@@ -6823,11 +7391,51 @@ def create_app(api: SAPMAPApi) -> Bottle:
             # ICMAD severity logic + GUI menu gating see consistent
             # state.  Pick WEB_DISPATCHER -> is_web_dispatcher=True;
             # pick any other type -> clear the flag (operator might
-            # have mis-flagged it earlier).
+            # have mis-flagged it earlier).  Changing AWAY from
+            # WEB_DISPATCHER does no cleanup — wd_ port labels +
+            # wd_backends are left intact (issue #93 decision).
             node.is_web_dispatcher = (new_type.upper() == "WEB_DISPATCHER")
             print(f"[*] System type for {sid} set to: {new_type}"
                   + (" (is_web_dispatcher=True)"
                      if node.is_web_dispatcher else ""))
+            # Issue #93: reclassifying to WEB_DISPATCHER must TRIGGER the
+            # WD topology rediscovery (previously it silently did
+            # nothing).  Resolve a WD probe port first — a node
+            # misclassified as ABAP/SAPROUTER has no wd_ label, so we
+            # promote an existing icm_/candidate port or add an
+            # operator-supplied one.  If none resolvable, tell the GUI
+            # to prompt for a port rather than failing silently.
+            if node.is_web_dispatcher:
+                res = _resolve_wd_probe_port(node, data)
+                if res["source"] == "none":
+                    return json.dumps({
+                        "status": "ok",
+                        "need_wd_port": True,
+                        "message": (
+                            "No WD HTTP/HTTPS port found on this node. "
+                            "Provide the Web Dispatcher port to run the "
+                            "topology rediscovery.")})
+                wd_port = res["wd_port"]
+                wd_https = res["wd_https"]
+
+                def _run():
+                    try:
+                        _run_wd_rediscovery(node, api.state,
+                                            wd_port, wd_https)
+                    except Exception as e:
+                        import traceback
+                        print(f"[-] {sid}: WD rediscover (via set_type) "
+                              f"failed: {type(e).__name__}: {e}")
+                        traceback.print_exc()
+
+                _bg(f"{sid}:wd_rediscover",
+                    "WD Rediscover (cache + backends)", _run)
+                return json.dumps({
+                    "status": "started",
+                    "wd_rediscover": True,
+                    "wd_port": wd_port,
+                    "wd_https": wd_https,
+                    "source": res["source"]})
         return json.dumps({"status": "ok"})
 
     @app.route("/api/node/<sid>/set_db_type", method="POST")
@@ -7299,122 +7907,7 @@ def create_app(api: SAPMAPApi) -> Bottle:
 
         def _run():
             try:
-                from sapmap_scanner import (
-                    detect_wd_cache, discover_wd_backends,
-                    match_wd_backends_to_nodes,
-                )
-                host = node.ip or node.hostname
-                print(f"[*] {sid}: WD rediscover on {host}:{wd_port}"
-                      f"{'/HTTPS' if wd_https else '/HTTP'}")
-                # Cache state
-                cache = detect_wd_cache(host, wd_port, https=wd_https,
-                                          timeout=6,
-                                          saprouter=node.saprouter or "")
-                node.wd_cache_enabled = bool(cache.get("enabled"))
-                node.wd_cache_evidence = cache.get("evidence", "")
-                if cache.get("enabled"):
-                    print(f"[+] {sid}: cache ENABLED "
-                          f"({cache['evidence']})")
-                else:
-                    print(f"[*] {sid}: cache disabled or no signal "
-                          f"({cache.get('evidence', '')})")
-                # Backend topology — Server-header bucket
-                bk_result = discover_wd_backends(
-                    host, wd_port, https=wd_https,
-                    timeout=6, saprouter=node.saprouter or "",
-                    verbose=True)
-                node.wd_backends = [dict(b, linked_node_sid="")
-                                      for b in bk_result["backends"]]
-                # Chain the admin-table extraction when working
-                # wd_admin credentials are stored on the node.  This
-                # is the authoritative source — Server-header
-                # buckets collapse multiple real backends into one
-                # entry; the admin readout splits them apart with
-                # real SID + MSHOST + MSPORT.  Without this, every
-                # rediscover would revert the map to the bucketed
-                # view and re-create the synthetic B-prefix
-                # placeholders the operator just got rid of.
-                wd_cred = None
-                for c in (node.credentials or []):
-                    if getattr(c, "kind", "") == "wd_admin":
-                        wd_cred = c
-                        break
-                if wd_cred:
-                    print(f"[*] {sid}: stored wd_admin credentials "
-                          f"found ({wd_cred.username}) — chaining "
-                          f"admin-table extraction")
-                    try:
-                        from sap_wdisp_admin import fetch_wd_systems
-                        r = fetch_wd_systems(
-                            host, wd_port, https=wd_https,
-                            user=wd_cred.username,
-                            pwd=wd_cred.password,
-                            timeout=8,
-                            saprouter=node.saprouter or "",
-                        )
-                        if r["ok"]:
-                            print(f"[+] {sid}: admin-table parsed "
-                                  f"{len(r['systems'])} wdisp/system_*"
-                                  f" entry/entries")
-                            _enrich_wd_backends_from_admin_table(
-                                node, r["systems"], state=api.state)
-                            # ATT&CK: landscape-topology dump via
-                            # authenticated WD admin.  T1213 + T1526
-                            # in one HTTP GET.  Info-level — the
-                            # WD-admin default-creds finding above
-                            # carries the CRITICAL severity.
-                            try:
-                                sapmap_findings.emit_finding(
-                                    "INFO", sid,
-                                    f"WD /sap/wdisp/admin backend "
-                                    f"table read — {len(r['systems'])}"
-                                    f" backend(s) discovered "
-                                    f"(SID, MSHOST, MSPORT, "
-                                    f"SSL_ENCRYPT, SRCURL)",
-                                    ref="wd.backend_table.read",
-                                    attack_capability=(
-                                        "data.wd_backend_table_read"))
-                            except Exception:
-                                pass
-                        else:
-                            print(f"[-] {sid}: admin-table extract "
-                                  f"failed ({r['error']}) — falling "
-                                  f"back to Server-header bucket "
-                                  f"placeholders")
-                    except Exception as e:
-                        print(f"[-] {sid}: admin-table extract "
-                              f"crashed: {type(e).__name__}: {e}")
-                # Re-run cross-node matching (link-only mode).
-                # Synthetic B-prefix placeholders are NOT auto-created
-                # from Server-header buckets — those are too generic
-                # to deserve a node on the map.  Real-SID placeholders
-                # come from the admin-table extraction above (when
-                # wd_admin credentials are stored on the node); the
-                # WD's wd_backends list still carries the bucket data
-                # for the node-details panel display.
-                placeholders = match_wd_backends_to_nodes(
-                    list(api.state.nodes.values()),
-                    promote_unmatched=False)
-                for p in placeholders:
-                    api.state.add_node(p)
-                if placeholders:
-                    print(f"[+] {sid}: linked "
-                          f"{len(placeholders)} backend(s) to "
-                          f"existing on-map node(s)")
-                # Surface linked-node summary
-                linked = [b for b in node.wd_backends
-                            if b.get("linked_node_sid")]
-                print(f"[+] {sid}: rediscover complete — "
-                      f"{len(node.wd_backends)} backend(s), "
-                      f"{len(linked)} linked to on-map nodes "
-                      f"(of which {len(placeholders)} newly "
-                      f"synthesised)")
-                for b in node.wd_backends:
-                    tgt = (b.get("linked_node_sid")
-                            or '<not on map>')
-                    srv = b.get("server_header") or '<suppressed>'
-                    print(f"      → {tgt:8s} [{srv[:60]}] "
-                          f"{len(b.get('url_prefixes', []))} prefix(es)")
+                _run_wd_rediscovery(node, api.state, wd_port, wd_https)
             except Exception as e:
                 import traceback
                 print(f"[-] {sid}: WD rediscover failed: "
@@ -17896,6 +18389,8 @@ def create_app(api: SAPMAPApi) -> Bottle:
         body = request.json or {}
         dry_run = bool(body.get("dry_run", True))
         accept_risk = bool(body.get("accept_lockout_risk", False))
+        rfc_fallback_for_service_users = bool(
+            body.get("rfc_fallback_for_service_users", True))
         try:
             cap_per_user = int(body.get("cap_per_user", 1))
         except (TypeError, ValueError):
@@ -17922,6 +18417,8 @@ def create_app(api: SAPMAPApi) -> Bottle:
                 dry_run=dry_run,
                 accept_lockout_risk=accept_risk,
                 cap_per_user=cap_per_user,
+                rfc_fallback_for_service_users=(
+                    rfc_fallback_for_service_users),
                 manual_wordlist=[(u, p) for (u, p) in operator_wordlist],
             )
 
@@ -18546,6 +19043,11 @@ def create_app(api: SAPMAPApi) -> Bottle:
             accept_production_risk = _strict_bool(
                 "accept_production_risk", False)
             purple_mode = _strict_bool("purple_mode", False)
+            # RFC fallback for service users (issue #106).  Default
+            # True — safe (same lockout accounting as DIAG) and
+            # strictly more complete.
+            rfc_fallback_for_service_users = _strict_bool(
+                "rfc_fallback_for_service_users", True)
         except ValueError as e:
             response.status = 400
             return json.dumps({
@@ -18658,6 +19160,8 @@ def create_app(api: SAPMAPApi) -> Bottle:
                 accept_lockout_risk=accept_risk,
                 cap_per_user=cap_per_user,
                 purple_mode=purple_mode,
+                rfc_fallback_for_service_users=(
+                    rfc_fallback_for_service_users),
                 manual_wordlist=[(u, p) for (u, p) in operator_wordlist],
             )
             # Build engine-side scope_filter: preserve the legacy
@@ -19663,7 +20167,17 @@ def create_app(api: SAPMAPApi) -> Bottle:
     def api_import_landscape_xml():
         """Import SAP systems from a SAP UI Landscape / SAPGUILandscape
         XML — thin wrapper around parse_landscape_xml_into_state (which
-        does all the real work and is directly unit-testable)."""
+        does all the real work and is directly unit-testable).
+
+        Issue #109: unless the operator ticked "no scan for app
+        servers, only file import" (default: unticked → scan on), each
+        newly-added system is enriched in a background sweep that
+        runs RFC_SYSTEM_INFO + client enumeration.  Without this the
+        clients field stays empty after import and the operator can't
+        do anything with the systems.  The same flag also already
+        gates the message-server app-server fan-out inside the parser,
+        giving operators a single "silent import" toggle for
+        OPSEC-sensitive engagements."""
         no_scan_appservers = (request.query.get('no_scan') == '1')
         response.content_type = "application/json"
         raw = request.body.read()
@@ -19680,6 +20194,24 @@ def create_app(api: SAPMAPApi) -> Bottle:
         except ValueError as e:
             print(f"[-] Invalid XML: {e}")
             return json.dumps({"error": f"Invalid XML: {e}"})
+
+        # Issue #109: kick off per-node RFC_SYSTEM_INFO + client enum
+        # for every system that landed via `added`.  One single _bg
+        # task iterates them sequentially (via module-level
+        # run_landscape_post_import_sweep) so progress is visible via
+        # _task_update and STOP cancels cleanly between nodes.  The
+        # sweep logic lives at module scope — not here as a closure —
+        # so it's directly unit-testable without Bottle plumbing.
+        added_sids = list(summary.get("added", []))
+        if not no_scan_appservers and added_sids:
+            _bg("landscape:post_import_scan",
+                f"Post-import discovery: {len(added_sids)} system(s)",
+                lambda: run_landscape_post_import_sweep(
+                    api.state, added_sids,
+                    task_update_fn=_task_update))
+            summary["post_import_scan_started"] = True
+        else:
+            summary["post_import_scan_started"] = False
         return json.dumps(summary)
 
     # -- Business Impact Assessment --
