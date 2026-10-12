@@ -886,6 +886,147 @@ body {
   background: linear-gradient(135deg, transparent 50%, #484f58 50%, transparent 60%,
     #484f58 70%, transparent 80%, #484f58 90%);
 }
+/* TLP report selection modal */
+.report-tlp-modal {
+  width: min(560px, calc(100vw - 32px));
+  max-width: 560px;
+  max-height: 90vh;
+  overflow-y: auto;
+  box-sizing: border-box;
+}
+
+.report-tlp-subtitle {
+  margin: -4px 0 18px;
+  color: #8b949e;
+  font-size: 12px;
+  line-height: 1.5;
+}
+.report-tlp-group {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 18px;
+}
+.report-tlp-group-title {
+  margin-bottom: 2px;
+  color: #8b949e;
+  font-size: 10px;
+  font-weight: 750;
+  letter-spacing: .8px;
+  text-transform: uppercase;
+}
+.report-tlp-group-caution {
+  padding-top: 12px;
+  border-top: 1px solid #484f58;
+}
+
+.report-tlp-group-caution .report-tlp-group-title {
+  color: #e3b341;
+}
+.report-tlp-options {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.report-tlp-option {
+  display: flex;
+  align-items: flex-start;
+  gap: 4px;
+  padding: 6px 10px;
+  border: 1px solid #30363d;
+  border-radius: 8px;
+  background: #161b22;
+  cursor: pointer;
+  transition: border-color 120ms ease, background 120ms ease;
+}
+
+.report-tlp-option:hover {
+  border-color: #6e7681;
+  background: #1c2129;
+}
+
+.report-tlp-option.selected {
+  border-color: #58a6ff;
+  background: #1b2635;
+}
+
+.report-tlp-option input[type="radio"] {
+  flex: 0 0 auto;
+  margin: 4px 0 0;
+  accent-color: #58a6ff;
+}
+
+.report-tlp-content {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.report-tlp-heading {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.report-tlp-badge {
+  display: inline-block;
+  background: #000000;
+  padding: 3px 8px;
+  border: 1px solid currentColor;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 750;
+  letter-spacing: 0.35px;
+}
+.tlp-red { color: #FF2B2B; }
+.tlp-amber { color: #FFC000; }
+.tlp-green { color: #33FF00; }
+.tlp-clear { color: #FFFFFF; }
+
+.report-tlp-recommended {
+  color: #8b949e;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.7px;
+}
+
+.report-tlp-description {
+  color: #c9d1d9;
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.report-tlp-warning {
+  margin: 14px 0;
+  padding: 11px 12px;
+  border-left: 3px solid #d29922;
+  border-radius: 4px;
+  background: #211c11;
+  color: #c9d1d9;
+  font-size: 11px;
+  line-height: 1.6;
+}
+
+.report-tlp-warning strong {
+  display: block;
+  margin-bottom: 3px;
+  color: #e3b341;
+}
+
+.report-tlp-warning a {
+  display: inline-block;
+  margin-top: 4px;
+  color: #79c0ff;
+  text-decoration: none;
+}
+
+.report-tlp-warning a:hover {
+  text-decoration: underline;
+}
 </style>
 </head>
 <body>
@@ -1481,7 +1622,103 @@ body {
   <div class="ctx-item" data-action="map_fit">&#128208; Fit to Window</div>
   <div class="ctx-item" data-action="map_reset_layout">&#128260; Reset Layout</div>
 </div>
-
+<!-- Engagement Report TLP Selection Modal -->
+<div class="modal-overlay" id="report-tlp-modal">
+  <div class="modal report-tlp-modal">
+    <h3>Report sharing classification</h3>
+    <p class="report-tlp-subtitle">
+      Choose how the generated reports may be shared.
+    </p>
+    <div class="report-tlp-options">
+    <div class="report-tlp-group">
+      <div class="report-tlp-group-title">
+      Restricted sharing
+      </div>
+      <label class="report-tlp-option selected" data-tlp="TLP_RED">
+        <input type="radio" name="report-tlp" value="TLP_RED" checked>
+        <span class="report-tlp-content">
+          <span class="report-tlp-heading">
+            <span class="report-tlp-badge tlp-red">TLP:RED</span>
+            <span class="report-tlp-recommended">Highly restricted sharing - RECOMMENDED</span>
+          </span>
+          <span class="report-tlp-description">
+            Restricted to named recipients. No further sharing.
+          </span>
+        </span>
+      </label>
+      <label class="report-tlp-option" data-tlp="TLP_AMBERSTRICT">
+        <input type="radio" name="report-tlp" value="TLP_AMBERSTRICT">
+        <span class="report-tlp-content">
+          <span class="report-tlp-heading">
+            <span class="report-tlp-badge tlp-amber">TLP:AMBER+STRICT</span>
+            <span class="report-tlp-recommended">Strict controlled sharing</span>
+            </span>
+          <span class="report-tlp-description">
+            Sharing is restricted to the recipient's organization. External sharing requires the originator’s permission.
+          </span>
+        </span>
+      </label>
+      <label class="report-tlp-option" data-tlp="TLP_AMBER">
+        <input type="radio" name="report-tlp" value="TLP_AMBER">
+        <span class="report-tlp-content">
+          <span class="report-tlp-heading">
+            <span class="report-tlp-badge tlp-amber">TLP:AMBER</span>
+            <span class="report-tlp-recommended">Controlled sharing</span>
+          </span>
+          <span class="report-tlp-description">
+            Need-to-know sharing within the recipient's organization and its eligible clients.
+          </span>
+        </span>
+      </label>
+      </div>
+    <div class="report-tlp-group report-tlp-group-caution">
+      <div class="report-tlp-group-title">
+      Broader sharing — use with caution
+      </div>
+      <label class="report-tlp-option" data-tlp="TLP_GREEN">
+        <input type="radio" name="report-tlp" value="TLP_GREEN">
+        <span class="report-tlp-content">
+          <span class="report-tlp-heading">
+            <span class="report-tlp-badge tlp-green">TLP:GREEN</span>
+            <span class="report-tlp-recommended">Community sharing</span>
+          </span>
+          <span class="report-tlp-description">
+            Only if the intended community and sharing boundaries are understood. Never on public channels.
+          </span>
+        </span>
+      </label>
+      <label class="report-tlp-option" data-tlp="TLP_CLEAR">
+        <input type="radio" name="report-tlp" value="TLP_CLEAR">
+        <span class="report-tlp-content">
+          <span class="report-tlp-heading">
+            <span class="report-tlp-badge tlp-clear">TLP:CLEAR</span>
+            <span class="report-tlp-recommended">Public disclosure</span>
+            </span>
+          <span class="report-tlp-description">
+            Broad sharing. Use only after confirming that public release is appropriate.
+          </span>
+        </span>
+      </label>
+    </div>
+    </div>
+    <div class="report-tlp-warning">
+      <strong>Important</strong>
+      <p>TLP defines sharing restrictions, not finding severity. Demo or sandbox environments do not automatically make findings public.
+      <a href="https://www.first.org/tlp/" target="_blank" rel="noopener noreferrer">FIRST TLP v2.0 ↗</a></p>
+      <p>Security reports may contain sensitive technical and operational information. 
+      GREEN and CLEAR are available when your sharing context justifies them, but should not be selected by default. 
+      Assess the report contents, recipients and execution environment before choosing a broader sharing level.</p>
+    </div>
+    <div class="form-actions">
+      <button class="btn btn-primary" onclick="confirmReportExport()">
+        Generate reports
+      </button>
+      <button class="btn" onclick="closeModal('report-tlp-modal')">
+        Cancel
+      </button>
+    </div>
+  </div>
+</div>
 <!-- SAP Cloud Connector Context Menu -->
 <div class="ctx-menu" id="scc-ctx-menu">
   <!-- Top-level quick actions -->
@@ -19837,7 +20074,25 @@ async function exportJSON() {
   window.open('/api/export/json', '_blank');
 }
 
-async function exportReport() {
+function exportReport() {
+  // Open the TLP selection modal before generating the reports.
+  document.querySelector(
+    'input[name="report-tlp"][value="TLP_RED"]'
+  ).checked = true;
+
+  document.getElementById('report-tlp-modal').classList.add('visible');
+}
+
+function confirmReportExport() {
+  const selectedTlp =
+    document.querySelector('input[name="report-tlp"]:checked')?.value
+    || 'TLP_RED';
+
+  closeModal('report-tlp-modal');
+  generateReport(selectedTlp);
+}
+
+async function generateReport(selectedTlp) {
   // Engagement-style Markdown report.  We do NOT trigger a browser
   // download — pywebview's embedded Chromium navigates the main
   // window away when handed a blob/data response, replacing the map
@@ -19851,7 +20106,11 @@ async function exportReport() {
     {autoCloseMs: 4000}
   );
   try {
-    const r = await fetch('/api/export/report');
+    const r = await fetch('/api/export/report', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({var_tlp: selectedTlp || 'TLP_RED'})
+    });
     const j = await r.json();
     if (!j.ok) {
       showToast('Report export failed: ' + (j.error || 'unknown'),
@@ -21464,7 +21723,19 @@ async function _lootRender(relPath) {
   body.innerHTML = _buildRows().join('');
   _wireRows();
 }
-
+// TLP report selection modal: highlight the selected option.
+document.querySelectorAll(
+  '.report-tlp-option input[name="report-tlp"]'
+).forEach(radio => {
+  radio.addEventListener('change', () => {
+    document.querySelectorAll('.report-tlp-option').forEach(option => {
+      option.classList.toggle(
+        'selected',
+        option.querySelector('input[name="report-tlp"]').checked
+      );
+    });
+  });
+});
 // --- Init ---
 startPolling();
 </script>
