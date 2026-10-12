@@ -461,6 +461,60 @@ def _verify_sap_diag(host: str, port: int, timeout: float = 2.0) -> bool:
     return False
 
 
+def _verify_saprouter(host: str, port: int, timeout: float = 3.0) -> bool:
+    """Verify *host:port* actually speaks the SAProuter protocol.
+
+    Port 3299 (or any port) being TCP-open is NOT proof of a SAProuter — a
+    Web Dispatcher, or any TCP service, may listen there.  Based on the
+    nmap-sap SAProuter probe (gelim/nmap-sap): send 4 null bytes; a real
+    SAProuter answers with a banner containing the string ``SAProuter``.
+    Falls back to an NI_ROUTE admin-info request.  Mirrors SAPology's
+    ``fingerprint_saprouter``.
+
+    Used to gate the ``saprouter`` service label (and the SAPROUTER system
+    classification) the same way DIAG/CPIC gate dispatcher/gateway ports —
+    so an open 3299 can no longer cascade a Web Dispatcher into a fictitious
+    SAPROUTER system (issue #90).  Returns True ONLY on a positive handshake.
+    """
+    import struct as _struct
+    _ni_admin = b"NI_ROUTE\x00\x02\x00\x05"
+    probes = (b"\x00\x00\x00\x00",                       # nmap-sap null probe
+              _struct.pack(">I", len(_ni_admin)) + _ni_admin)  # NI_ROUTE admin
+    for probe in probes:
+        s = None
+        resp = b""
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.settimeout(timeout)
+            s.connect((host, port))
+            s.sendall(probe)
+            try:
+                while len(resp) < 4096:
+                    chunk = s.recv(4096)
+                    if not chunk:
+                        break
+                    resp += chunk
+            except socket.timeout:
+                pass
+        except Exception:
+            # This probe failed (reset / refused / unreachable).  DON'T
+            # abort — fall through to the next probe (the NI_ROUTE
+            # fallback), because a real SAProuter may reset the raw
+            # null-length probe yet still answer the well-formed NI_ROUTE
+            # request.  Also check whatever bytes we did receive, in case
+            # the banner arrived just before the reset.
+            pass
+        finally:
+            if s is not None:
+                try:
+                    s.close()
+                except Exception:
+                    pass
+        if resp and b"SAProuter" in resp:
+            return True
+    return False
+
+
 # ---------------------------------------------------------------------------
 # SAP Gateway fingerprint (verifies 33XX / 48XX is really an SAP GW)
 #
@@ -1007,6 +1061,24 @@ def fast_scan_host(host: str, instance_range: tuple = DEFAULT_INSTANCE_RANGE,
         if _cancelled():
             break
         if not _verify_sap_diag(host, port, timeout=min(timeout, 2.0)):
+            del result["open_ports"][port]
+
+    # Verify saprouter ports (3299) with the SAProuter NI handshake — an
+    # open 3299 alone is NOT a SAProuter (a Web Dispatcher or any TCP
+    # service may listen there).  Drop the tag when the protocol isn't
+    # confirmed, exactly as unverified DIAG/CPIC ports are dropped, so it
+    # can't cascade a WD into a fictitious SAPROUTER system (issue #90).
+    router_ports = [p for p, info in result["open_ports"].items()
+                    if info["service"] == "saprouter"]
+    if router_ports and not _cancelled():
+        print(f"[*] {host}: Verifying {len(router_ports)} SAProuter port(s) "
+              f"with NI handshake ...")
+    for port in list(router_ports):
+        if _cancelled():
+            break
+        if not _verify_saprouter(host, port, timeout=min(timeout, 3.0)):
+            print(f"[-] {host}:{port}  not a SAProuter (no NI protocol "
+                  f"handshake) — dropping saprouter label")
             del result["open_ports"][port]
 
     # Verify WD-candidate ports (80/443/8000/8080/8443/44300/50000/50001
@@ -5609,6 +5681,17 @@ def _build_nodes_from_fast_scan(scan_result: dict, timeout: float = 10,
             system_type = "SAPROUTER"
         elif has_hana_port:
             system_type = "HANA"
+        elif has_icm_only:
+            # A host exposing only ICM HTTP/HTTPS (fingerprinted as SAP ICM
+            # but not positively confirmed wd_http/wd_https) is an HTTP
+            # front-end — classify it WEB_DISPATCHER rather than letting it
+            # fall through to the generic "SAP" default (issue #90).  Placed
+            # AFTER has_saprouter/has_hana_port so a real router or a HANA
+            # host that also exposes an ICM port keeps its specific type;
+            # an open 3299 can no longer force SAPROUTER anyway because the
+            # saprouter label is now NI-handshake-gated.  is_web_dispatcher
+            # stays driven by the WD fingerprint; this only sets the label.
+            system_type = "WEB_DISPATCHER"
         elif has_saphost:
             system_type = "SAP"
         else:
@@ -6142,9 +6225,29 @@ def _sapology_system_to_node(sys_obj, target_ip: str) -> SAPNode:
     # Clients
     clients = [{"nr": c, "category": ""} for c in (sys_obj.clients or [])]
 
+    # Defense-in-depth (issue #90): SAPMAP may run against an older SAPology
+    # that still registered "saprouter" on a bare TCP-open.  If the copied
+    # verdict is SAPROUTER, re-confirm with the NI handshake against 3299 and
+    # demote to a neutral type when the host doesn't speak the SAProuter
+    # protocol — so a Web Dispatcher is never carried over as a fictitious
+    # SAPROUTER system.
+    system_type = sys_obj.system_type or "SAP"
+    if system_type == "SAPROUTER":
+        router_port = SAPROUTER_PORT
+        for inst in sys_obj.instances:
+            svc = (inst.services or {}).get("saprouter")
+            if isinstance(svc, dict) and svc.get("port"):
+                router_port = svc["port"]
+                break
+        if not _verify_saprouter(target_ip, router_port, timeout=3.0):
+            print(f"[-] {target_ip}: SAPology reported SAPROUTER but port "
+                  f"{router_port} gives no NI handshake — demoting to SAP "
+                  f"(issue #90)")
+            system_type = "SAP"
+
     node = SAPNode(
         sid=sys_obj.sid if sys_obj.sid != "UNKNOWN" else f"UNK_{target_ip.replace('.', '_')}",
-        system_type=sys_obj.system_type or "SAP",
+        system_type=system_type,
         hostname=sys_obj.hostname or "",
         ip=target_ip,
         instances=instances,
