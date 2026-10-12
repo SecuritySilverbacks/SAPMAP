@@ -2288,7 +2288,7 @@ body {
     <div id="type-system-info" style="font-size:12px;color:#8b949e;margin-bottom:12px"></div>
     <div class="form-row">
       <label>System Type</label>
-      <select id="type-select">
+      <select id="type-select" onchange="_toggleWdPortFields()">
         <option value="" disabled selected hidden>Select type...</option>
         <option value="ABAP">ABAP</option>
         <option value="JAVA">Java</option>
@@ -2301,6 +2301,23 @@ body {
         <option value="MDM">MDM</option>
         <option value="HANA">HANA</option>
       </select>
+    </div>
+    <!-- WD port fields (issue #93) — revealed only for WEB_DISPATCHER.
+         Reclassifying to Web Dispatcher triggers a topology
+         rediscovery; it needs the WD's HTTP(S) port.  Pre-filled with a
+         best-effort guess so the operator usually just confirms.  Blank
+         is fine when the node already carries a wd_ port (the backend
+         reuses it). -->
+    <div id="type-wd-hint" style="display:none;font-size:11px;color:#8b949e;margin-bottom:8px">
+      Reclassifying to Web Dispatcher runs a topology rediscovery on the port(s) below.
+    </div>
+    <div class="form-row" id="type-wd-http-row" style="display:none">
+      <label>WD HTTP port</label>
+      <input id="type-wd-http" type="number" min="1" max="65535" placeholder="e.g. 8000">
+    </div>
+    <div class="form-row" id="type-wd-https-row" style="display:none">
+      <label>WD HTTPS port</label>
+      <input id="type-wd-https" type="number" min="1" max="65535" placeholder="e.g. 44300">
     </div>
     <div class="form-actions">
       <button class="btn btn-primary" onclick="saveSystemType()">Save</button>
@@ -3203,6 +3220,21 @@ body {
         when UCON blocks or S_TABU_DIS is missing).
       </div>
     </div>
+    <div style="margin-bottom:10px;padding:8px;background:#0d1117;border-left:3px solid #58a6ff;border-radius:3px">
+      <label style="font-size:12px;color:#c9d1d9">
+        <input type="checkbox" id="pws-rfc-service-users" checked>
+        &#128273; <strong>Verify service/system users via RFC</strong> (USTYP B/S/C)
+      </label>
+      <div style="font-size:11px;color:#8b949e;margin-top:4px;line-height:1.4">
+        DIAG (SAPGUI) can't confirm a password for a SYSTEM / COMMUNICATION / SERVICE
+        user &mdash; SAP refuses the interactive channel before checking it, so a correct
+        and a wrong password both return <em>&ldquo;log on with a dialog user&rdquo;</em>.
+        When DIAG returns that, the spray re-checks that one candidate over
+        <strong>RFC</strong>, which does validate it.  Uses whichever RFC backend is
+        available on this host.  A failed RFC logon still bumps
+        <code>USR02.LOCNT</code>, so it counts against the same lockout cap / circuit breaker.
+      </div>
+    </div>
 
     <div style="margin-top:14px;margin-bottom:4px;font-size:12px;color:#c9d1d9;font-weight:600">
       Operator wordlist (optional)
@@ -3280,6 +3312,15 @@ body {
       <span id="pws-pct" style="font-size:11px;color:#8b949e;min-width:36px;text-align:right">0%</span>
     </div>
     <div class="autopwn-log" id="pws-log"></div>
+    <!-- Live hit feed — populated in real time from /status.hit_rows
+         as each credential is confirmed, so the operator doesn't have
+         to wait for the run to finish to see hits. -->
+    <div id="pws-live-hits-wrap" style="margin-top:8px;display:none">
+      <div style="font-size:11px;color:#3fb950;font-weight:bold;margin-bottom:4px">
+        &#9989; Confirmed credentials (<span id="pws-live-hits-count">0</span>)
+      </div>
+      <div id="pws-live-hits" style="max-height:140px;overflow-y:auto;font-size:11px;font-family:monospace;line-height:1.5"></div>
+    </div>
     <div style="margin-top:8px;display:flex;gap:6px;flex-wrap:wrap">
       <button class="btn" onclick="showPwsprayResults()" style="font-size:11px">Show Hits</button>
       <button class="btn" onclick="showPwsprayHistory()" style="font-size:11px">History</button>
@@ -14698,12 +14739,71 @@ function showTypeModal(sid) {
       }
     }
   }
+  _toggleWdPortFields();
   document.getElementById('type-modal').classList.add('visible');
+}
+// Issue #93 — reveal + pre-fill the WD HTTP/HTTPS port fields when the
+// operator picks WEB_DISPATCHER.  A node misclassified as ABAP/SAPROUTER
+// has no wd_ port, so reclassification needs a probe port to run the
+// topology rediscovery.  Pre-fill a best-effort guess so the operator
+// usually just confirms; leave blank when the node already has a wd_
+// port (the backend reuses it).
+function _toggleWdPortFields() {
+  const isWd = document.getElementById('type-select').value === 'WEB_DISPATCHER';
+  const hint = document.getElementById('type-wd-hint');
+  const httpRow = document.getElementById('type-wd-http-row');
+  const httpsRow = document.getElementById('type-wd-https-row');
+  hint.style.display = isWd ? '' : 'none';
+  httpRow.style.display = isWd ? '' : 'none';
+  httpsRow.style.display = isWd ? '' : 'none';
+  if (!isWd) return;
+  const httpEl = document.getElementById('type-wd-http');
+  const httpsEl = document.getElementById('type-wd-https');
+  // Only pre-fill empty fields (don't clobber the operator's edits).
+  if (httpEl.value || httpsEl.value) return;
+  const n = (mapState.nodes || {})[selectedNodeSid];
+  if (!n) return;
+  let guessHttp = '', guessHttps = '', hasWd = false;
+  for (const inst of (n.instances || [])) {
+    for (const [p, svc] of Object.entries(inst.ports || {})) {
+      const low = String(svc || '').toLowerCase();
+      if (low === 'wd_http' || low === 'wd_https') { hasWd = true; }
+      else if ((low === 'icm_http' || low === 'wd_candidate') && !guessHttp) { guessHttp = p; }
+      else if (low === 'icm_https' && !guessHttps) { guessHttps = p; }
+    }
+  }
+  // Node already carries a wd_ port → backend reuses it; leave blank.
+  if (hasWd) return;
+  // No HTTP-ish port to promote → derive 8000+NN / 44300+NN from the
+  // first instance's instance_nr (same source showInstanceNrModal uses).
+  if (!guessHttp && !guessHttps) {
+    const nr = ((n.instances || [])[0] || {}).instance_nr;
+    if (nr !== undefined && nr !== null && /^\d{1,2}$/.test(String(nr))) {
+      const nn = parseInt(nr, 10);
+      guessHttp = String(8000 + nn);
+      guessHttps = String(44300 + nn);
+    }
+  }
+  if (guessHttp) httpEl.value = guessHttp;
+  if (guessHttps) httpsEl.value = guessHttps;
 }
 async function saveSystemType() {
   const newType = document.getElementById('type-select').value;
-  await api('POST', `node/${selectedNodeSid}/set_type`, { system_type: newType });
+  const body = { system_type: newType };
+  if (newType === 'WEB_DISPATCHER') {
+    const h = parseInt(document.getElementById('type-wd-http').value, 10);
+    const s = parseInt(document.getElementById('type-wd-https').value, 10);
+    if (h) body.wd_http_port = h;
+    if (s) body.wd_https_port = s;
+  }
+  const r = await api('POST', `node/${selectedNodeSid}/set_type`, body);
   closeModal('type-modal');
+  if (r && r.need_wd_port) {
+    showToast('Set to Web Dispatcher. ' + (r.message ||
+      'Provide a WD port to run the topology rediscovery.'), 'info');
+  } else if (r && r.status === 'started') {
+    showToast('WD topology rediscovery started — see console for cache + backend results', 'info');
+  }
   startPolling();
 }
 function showDbTypeModal(sid) {
@@ -18893,6 +18993,9 @@ function showPwsprayModal(opts) {
   document.getElementById('pws-include-prod').checked = false;
   document.getElementById('pws-accept-prod-risk').checked = false;
   document.getElementById('pws-purple-mode').checked = false;
+  // Default ON — the RFC service-user check is safe (same lockout
+  // accounting as DIAG) and strictly more complete (issue #106).
+  document.getElementById('pws-rfc-service-users').checked = true;
   document.getElementById('pws-wordlist').value = '';
   document.getElementById('pws-preview-result').innerHTML = '';
   document.getElementById('pwspray-config-modal').classList.add('visible');
@@ -18935,6 +19038,8 @@ function _pwsprayCollectConfig() {
     dry_run: document.getElementById('pws-dry-run').checked,
     accept_lockout_risk: document.getElementById('pws-accept-risk').checked,
     purple_mode: document.getElementById('pws-purple-mode').checked,
+    rfc_fallback_for_service_users:
+      document.getElementById('pws-rfc-service-users').checked,
     wordlist_text: document.getElementById('pws-wordlist').value || '',
   };
 }
@@ -19088,6 +19193,14 @@ function _pwsprayShowProgressPanel(launchResult) {
     + (launchResult.purple_mode ? ' — purple' : '');
   // Reset the aborted-run colour from any previous run.
   label.style.color = launchResult.purple_mode ? '#a371f7' : '#ffa657';
+  // Clear the live hit feed from any previous run so stale hits don't
+  // flash before the first /status poll of the new run.
+  const liveWrap = document.getElementById('pws-live-hits-wrap');
+  if (liveWrap) {
+    liveWrap.style.display = 'none';
+    document.getElementById('pws-live-hits').innerHTML = '';
+    document.getElementById('pws-live-hits-count').textContent = '0';
+  }
   document.getElementById('pws-stop-btn').style.display = '';
   document.getElementById('pws-close-btn').style.display = 'none';
   // Purple-only phase boxes (issue #69, PR4).  Shown when the
@@ -19147,6 +19260,30 @@ async function _pwsprayPollStatus() {
       st.attempts_done + ' / ' + st.attempts_total;
     document.getElementById('pws-st-hits').textContent = st.hits;
     document.getElementById('pws-st-locks').textContent = st.locks;
+    // Live hit feed — render confirmed credentials in real time so the
+    // operator sees each hit the moment it lands (not only in the final
+    // results modal).  st.hit_rows carries {sid, client, user, result,
+    // channel} appended by the engine as each hit is recorded.
+    const liveWrap = document.getElementById('pws-live-hits-wrap');
+    const liveHits = document.getElementById('pws-live-hits');
+    if (liveWrap && liveHits) {
+      const rows = st.hit_rows || [];
+      if (rows.length) {
+        liveWrap.style.display = '';
+        document.getElementById('pws-live-hits-count').textContent = rows.length;
+        liveHits.innerHTML = rows.map(h => {
+          const via = h.channel === 'rfc'
+            ? ' <span style="color:#58a6ff">[RFC]</span>' : '';
+          return '<div><span style="color:#3fb950">&#10003;</span> '
+            + _escapeHtml((h.sid || '') + '/' + (h.client || ''))
+            + ' <strong>' + _escapeHtml(h.user || '') + '</strong> '
+            + '<span style="color:#f85149">' + _escapeHtml(h.result || '')
+            + '</span>' + via + '</div>';
+        }).join('');
+      } else {
+        liveWrap.style.display = 'none';
+      }
+    }
     // "Now trying" + "Last result" rows (slow/silent/no-stop fix).
     // Rendered as a two-line block above the log pane so operators
     // see what the engine is currently doing — previously the panel
