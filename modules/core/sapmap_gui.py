@@ -795,6 +795,133 @@ def _record_verified_scc_cred(sn, user: str, pwd: str) -> None:
     sn.credentials.append(Credentials(username=user, password=pwd, verified=True))
 
 
+def _record_wd_default_probe_result(node, sid, wd_port, wd_https,
+                                    live, working, attempts):
+    """Apply a WD admin default-credential probe result to node state +
+    findings; return the ``(user, pwd)`` to pull the backend table with, or
+    ``None``.
+
+    issue #63: only a confirmed-live verdict raises the CRITICAL finding and
+    stores a verified ``wd_admin`` credential.  When nothing is confirmed but
+    at least one attempt is ``ambiguous_unconfirmed`` (a non-401 response with
+    no WD-admin content markers — e.g. /sap/wdisp/admin rewritten to a static
+    2xx page), emit a LOW/INFO 'reachable but unconfirmed' note and store
+    nothing — never a false CRITICAL and never a bogus verified credential.
+    """
+    if live and working:
+        print(f"[+] {sid}: DEFAULT CREDENTIALS LIVE — "
+              f"{working[0]} / {working[1]}")
+        node.credentials = [
+            c for c in (node.credentials or [])
+            if not (getattr(c, "kind", "") == "wd_admin"
+                    and (getattr(c, "username", "") or "").lower()
+                    == working[0].lower())
+        ]
+        node.credentials.append(Credentials(
+            username=working[0], password=working[1],
+            client="", instance="",
+            verified=True, kind="wd_admin",
+        ))
+        emit_finding(
+            "CRITICAL", sid,
+            f"WD admin default credentials LIVE "
+            f"({working[0]} / {working[1]}) — full "
+            f"wdisp/system_* table + parameter readouts "
+            f"+ kernel patch level all reachable without "
+            f"further effort",
+            cve="",
+            attack_capability="creds.default_probe",
+        )
+        node.findings.append(Finding(
+            name=(f"WD admin default credentials live "
+                   f"({working[0]} / {working[1]})"),
+            severity=Severity.CRITICAL,
+            description=(
+                "The SAP Web Dispatcher's /sap/wdisp/admin "
+                "HTTP Basic-auth gate accepted credentials "
+                "from the SAPMAP default-creds wordlist.  "
+                "An unauthenticated attacker on the network "
+                "can read the full wdisp/system_* table "
+                "(every backend SID + MSHOST + MSPORT + "
+                "SSL_ENCRYPT + SRCURL), the WD's kernel "
+                "patch level, the URL permission table, "
+                "trusted-reverse-proxy whitelist, and the "
+                "WD's SAPSSLS.pse certificate store path — "
+                "all without further exploitation effort.  "
+                "Pivots from there: full landscape topology "
+                "exposure, kernel CVE patch-table lookup "
+                "(see ICMAD / 3123396), and lateral creds "
+                "via the SSL key store."
+            ),
+            remediation=(
+                "Change /sap/wdisp/admin credentials to a "
+                "strong unique password.  Set "
+                "icm/HTTP/admin_0=...,CLIENTHOST=<bastion-IP> "
+                "to restrict admin access by source IP.  "
+                "Consider service/sso_admin_user_* for "
+                "client-cert auth instead of Basic."
+            ),
+            detail=(f"User: {working[0]} · Port: "
+                    f"{wd_port}{'/HTTPS' if wd_https else ''}"),
+        ))
+        node.has_critical_finding = True
+        return working
+    # Not live.  issue #63: a non-401 response on a path with NO 401 auth-gate
+    # (e.g. /sap/wdisp/admin rewritten to a static 2xx page) is NOT proof the
+    # creds were accepted — surface a low-severity note, never a CRITICAL.
+    amb = next((a for a in attempts
+                if a.get("confidence") == "ambiguous_unconfirmed"), None)
+    if amb:
+        _vp = amb.get("verify_path", "")
+        _st = amb.get("status", "?")
+        print(f"[*] {sid}: WD admin endpoint reachable but "
+              f"credential acceptance NOT confirmed (no 401 "
+              f"auth-gate; response lacked admin markers — "
+              f"possible static/rewrite page) "
+              f"[{_vp} status={_st}]")
+        emit_finding(
+            "INFO", sid,
+            f"WD admin endpoint reachable but credential "
+            f"acceptance could not be confirmed — no 401 "
+            f"auth-gate and the response carried no Web "
+            f"Dispatcher admin markers (possible "
+            f"static/rewrite page at {_vp}, status {_st}).  "
+            f"No default credentials were proven valid.",
+            ref="wd.admin.creds.unconfirmed",
+        )
+        node.findings.append(Finding(
+            name=("WD admin credential check inconclusive "
+                  "(no auth-gate — possible static/rewrite "
+                  "page)"),
+            severity=Severity.LOW,
+            description=(
+                "SAPMAP received a non-401 response at the "
+                "Web Dispatcher admin path but could NOT "
+                "confirm that any default credential was "
+                "accepted: no probe path returned a 401 "
+                "Basic-auth challenge, and the response "
+                "carried no WD admin content markers "
+                "(wdisp/system_*, admin nav JSON, or an "
+                "icmauth dump).  This is consistent with the "
+                "admin interface being unreachable and the "
+                "listener rewriting /sap/wdisp/admin to a "
+                "static page.  No credentials were proven "
+                "valid and no critical finding is raised."),
+            remediation=(
+                "If the admin interface is intentionally "
+                "firewalled/rewritten, no action is needed.  "
+                "To verify manually, curl the admin path with "
+                "-u: expect 401 without creds and the admin "
+                "UI (wdisp/system_* table) with creds."),
+            detail=(f"Path: {_vp} · Status: {_st} · "
+                    f"Port: {wd_port}"
+                    f"{'/HTTPS' if wd_https else ''}"),
+        ))
+    else:
+        print(f"[-] {sid}: no default credentials worked")
+    return None
+
+
 def _add_console_line(ts, text, css_class="cl-info"):
     with _console_lock:
         _console_lines.append({"ts": ts, "text": text, "cls": css_class})
@@ -8282,70 +8409,15 @@ def create_app(api: SAPMAPApi) -> Bottle:
                     print(f"      → user={att['user']!r} "
                           f"live={att['live']} "
                           f"status={att.get('status', '?')}")
-                if live and working:
-                    print(f"[+] {sid}: DEFAULT CREDENTIALS LIVE — "
-                          f"{working[0]} / {working[1]}")
-                    node.credentials = [
-                        c for c in (node.credentials or [])
-                        if not (getattr(c, "kind", "") == "wd_admin"
-                                and (getattr(c, "username", "") or "").lower()
-                                == working[0].lower())
-                    ]
-                    node.credentials.append(Credentials(
-                        username=working[0], password=working[1],
-                        client="", instance="",
-                        verified=True, kind="wd_admin",
-                    ))
-                    emit_finding(
-                        "CRITICAL", sid,
-                        f"WD admin default credentials LIVE "
-                        f"({working[0]} / {working[1]}) — full "
-                        f"wdisp/system_* table + parameter readouts "
-                        f"+ kernel patch level all reachable without "
-                        f"further effort",
-                        cve="",
-                        attack_capability="creds.default_probe",
-                    )
-                    node.findings.append(Finding(
-                        name=(f"WD admin default credentials live "
-                               f"({working[0]} / {working[1]})"),
-                        severity=Severity.CRITICAL,
-                        description=(
-                            "The SAP Web Dispatcher's /sap/wdisp/admin "
-                            "HTTP Basic-auth gate accepted credentials "
-                            "from the SAPMAP default-creds wordlist.  "
-                            "An unauthenticated attacker on the network "
-                            "can read the full wdisp/system_* table "
-                            "(every backend SID + MSHOST + MSPORT + "
-                            "SSL_ENCRYPT + SRCURL), the WD's kernel "
-                            "patch level, the URL permission table, "
-                            "trusted-reverse-proxy whitelist, and the "
-                            "WD's SAPSSLS.pse certificate store path — "
-                            "all without further exploitation effort.  "
-                            "Pivots from there: full landscape topology "
-                            "exposure, kernel CVE patch-table lookup "
-                            "(see ICMAD / 3123396), and lateral creds "
-                            "via the SSL key store."
-                        ),
-                        remediation=(
-                            "Change /sap/wdisp/admin credentials to a "
-                            "strong unique password.  Set "
-                            "icm/HTTP/admin_0=...,CLIENTHOST=<bastion-IP> "
-                            "to restrict admin access by source IP.  "
-                            "Consider service/sso_admin_user_* for "
-                            "client-cert auth instead of Basic."
-                        ),
-                        detail=(f"User: {working[0]} · Port: "
-                                f"{wd_port}{'/HTTPS' if wd_https else ''}"),
-                    ))
-                    node.has_critical_finding = True
-                    # Pull the backend table while we're holding
-                    # working creds.
+                pull_creds = _record_wd_default_probe_result(
+                    node, sid, wd_port, wd_https, live, working, attempts)
+                if pull_creds:
+                    # Pull the backend table while we're holding working creds.
                     print(f"[*] {sid}: pulling wdisp/system_* table "
                           f"with newly-discovered credentials ...")
                     r = fetch_wd_systems(
                         host, wd_port, https=resolved_https,
-                        user=working[0], pwd=working[1],
+                        user=pull_creds[0], pwd=pull_creds[1],
                         timeout=8, saprouter=node.saprouter or "",
                     )
                     if r["ok"]:
@@ -8357,8 +8429,6 @@ def create_app(api: SAPMAPApi) -> Bottle:
                     else:
                         print(f"[-] {sid}: backend-table extraction "
                               f"failed: {r['error']}")
-                else:
-                    print(f"[-] {sid}: no default credentials worked")
             except Exception as e:
                 import traceback
                 print(f"[-] {sid}: WD admin probe crashed: "
