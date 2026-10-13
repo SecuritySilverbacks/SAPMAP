@@ -7986,8 +7986,8 @@ function showSCCCtxMenu(e, host) {
     info.style.cssText = 'padding:4px 12px;font-size:10px;color:#8b949e;border-top:1px solid #30363d;pointer-events:none';
     const lines = creds.map(c => {
       const u = c.username || c.user || '?';
-      const p = c.password || '';
-      return `\u2705 ${escHtml(u)}${p ? ' / ' + escHtml(p) : ''}`;
+      const mark = c.verified ? '\u2705' : '\u274c';   // mirror the ABAP-node menu
+      return `${mark} ${escHtml(u)}`;                   // username only \u2014 never the password (#87)
     });
     info.innerHTML = lines.join('<br>');
     const credItem = menu.querySelector('[data-action="scc_set_credentials"]');
@@ -8753,11 +8753,12 @@ function _copyToClipboard(text, label) {
 }
 
 function _sccStoredCreds(host) {
-  // Return the first stored credential for an SCC node, or null.
+  // Return the best stored credential for an SCC node, or null.  Prefer a
+  // verified + complete pair so reuse / the modal pre-fill pick it (#87).
   const sn = (mapState.scc_nodes || {})[host];
-  const creds = sn && sn.credentials;
-  if (creds && creds.length > 0) return creds[0];
-  return null;
+  const creds = (sn && sn.credentials) || [];
+  if (!creds.length) return null;
+  return creds.find(c => c.verified && c.username && c.password) || creds[0];
 }
 
 function showSCCCredModal(host) {
@@ -13394,13 +13395,15 @@ async function sccProbeCreds(host) {
 }
 
 async function sccPullMappings(host) {
+  // Reuse the stored credential pair instead of re-prompting (and
+  // re-displaying the password).  No creds yet -> masked modal, never a
+  // plaintext prompt().  (issue #87)
   const stored = _sccStoredCreds(host);
-  const defUser = (stored && stored.username) ? stored.username : 'Administrator';
-  const defPass = (stored && stored.password) ? stored.password : '';
-  const u = prompt('SCC admin username for ' + host + ':', defUser);
-  if (!u) return;
-  const p = prompt('Password for ' + u + ':', defPass);
-  if (p === null) return;
+  if (!(stored && stored.username && stored.password)) { showSCCCredModal(host); return; }
+  const tag = stored.verified ? 'verified ' : '';
+  if (!confirm('Pull Mappings from ' + host + ' using stored ' + tag
+               + 'credentials for ' + stored.username + '?')) return;
+  const u = stored.username, p = stored.password;
   try {
     flashActivity('SCC ' + host + ': pulling mappings', 12000);
     const r = await fetch('/api/scc/' + encodeURIComponent(host) + '/pull_mappings',
@@ -14353,6 +14356,15 @@ async function sccLookupHashesOnline() {
 }
 
 async function sccExtractKeystore(host) {
+  // Reuse the stored admin credential pair rather than re-prompting /
+  // re-displaying it; only the (distinct) backup passphrase is asked for,
+  // and it no longer defaults to the stored password.  No creds yet ->
+  // masked modal.  (issue #87)
+  const stored = _sccStoredCreds(host);
+  const credNote = (stored && stored.username && stored.password)
+    ? '\n\nUsing stored ' + (stored.verified ? 'verified ' : '')
+      + 'credentials for ' + stored.username + '.'
+    : '\n\nNo stored credentials — you will be asked to set them first.';
   if (!confirm('EXTRACT FULL SCC KEYSTORE BACKUP from ' + host + '?\n\n' +
                'This calls POST /api/v1/configuration/backup which returns a zip ' +
                'containing every tunnel client cert + private key, the system ' +
@@ -14363,15 +14375,10 @@ async function sccExtractKeystore(host) {
                'Plaintext secrets land in a side-file at mode 0600; only key ' +
                'NAMES enter findings.\n\n' +
                'The zip will be saved under ./loot/scc/' + host + '/ with mode 0600. ' +
-               'Treat as crown-jewels material.')) return;
-  const stored = _sccStoredCreds(host);
-  const defUser = (stored && stored.username) ? stored.username : 'Administrator';
-  const defPass = (stored && stored.password) ? stored.password : '';
-  const u = prompt('SCC admin username for ' + host + ':', defUser);
-  if (!u) return;
-  const p = prompt('Password for ' + u + ':', defPass);
-  if (p === null) return;
-  const bp = prompt('Backup encryption password (passphrase that locks keystores in the zip):', p || defPass);
+               'Treat as crown-jewels material.' + credNote)) return;
+  if (!(stored && stored.username && stored.password)) { showSCCCredModal(host); return; }
+  const u = stored.username, p = stored.password;
+  const bp = prompt('Backup encryption password (passphrase that locks keystores in the zip):', '');
   if (!bp) return;
   try {
     flashActivity('SCC ' + host + ': extracting keystore', 30000);
