@@ -3142,11 +3142,62 @@ def parse_landscape_xml_into_state(state, xml_text,
             "skipped": skipped, "dupes": dupes}
 
 
+def _resolve_gateway_port(host, nr, *, saprouter="", timeout=3.0,
+                          gw_verify_fn=None, snc_probe_fn=None) -> tuple:
+    """Probe instance ``nr``'s gateway and return ``(port, label)`` for the
+    real, reachable gateway — or ``(0, "")`` when none answers.
+
+    Mirrors the scanner's Pass-2 gateway logic so an imported/added node
+    never carries a *phantom* gateway port (issue #135): previously both
+    the XML-import fan-out and the manual-add route recorded ``3300+NN``
+    unconditionally, which was wrong for SNC-only landscapes where plain
+    33XX is closed and the gateway actually listens on the SNC port 48XX.
+
+      * ``3300+NN`` confirmed by the CPIC fingerprint  -> ``"gateway"``
+      * else ``4800+NN`` TCP-open (SNC gateway)          -> ``"gateway_snc"``
+        (``_verify_sap_gateway`` returns False on an SNC gateway — a False
+        there means "SNC required", not "not a gateway" — so 48XX is gated
+        on a plain TCP connect, exactly as the scanner keeps unverified
+        ``gateway_snc`` ports.)
+      * else ``(0, "")`` — no reachable gateway.
+
+    ``gw_verify_fn`` / ``snc_probe_fn`` are injectable for hermetic tests;
+    both default to the scanner probes and honour the SAProuter tunnel arg.
+    """
+    try:
+        nn = int(nr)
+    except (TypeError, ValueError):
+        return (0, "")
+    if nn < 0 or nn > 99:
+        return (0, "")
+    if gw_verify_fn is None:
+        gw_verify_fn = sapmap_scanner._verify_sap_gateway
+    if snc_probe_fn is None:
+        snc_probe_fn = sapmap_scanner._scan_port
+
+    gw_port = 3300 + nn
+    try:
+        if gw_verify_fn(host, gw_port, timeout=timeout, saprouter=saprouter):
+            return (gw_port, "gateway")
+    except Exception:
+        pass
+
+    snc_port = 4800 + nn
+    try:
+        if snc_probe_fn(host, snc_port, timeout=timeout, saprouter=saprouter):
+            return (snc_port, "gateway_snc")
+    except Exception:
+        pass
+
+    return (0, "")
+
+
 def landscape_post_import_discover(state, sid: str,
                                      enrich_fn=None,
                                      client_enum_fn=None,
                                      liveness_fn=None,
-                                     liveness_timeout: float = 2.0) -> dict:
+                                     liveness_timeout: float = 2.0,
+                                     gateway_resolve_fn=None) -> dict:
     """Issue #109: for a single newly-imported landscape-XML node,
     run RFC_SYSTEM_INFO (promotes placeholder SIDs — issue #114's gap
     for pure app-server entries that don't carry systemid) and
@@ -3306,6 +3357,29 @@ def landscape_post_import_discover(state, sid: str,
         return {"status": "skip", "reason": "host_unreachable"}
 
     result = {"status": "ok"}
+
+    # Issue #135: record the gateway port only after probing it, instead of
+    # the old unconditional 3300+NN.  Confirmed plain gateway -> "gateway";
+    # else an open SNC gateway -> "gateway_snc"; else nothing (SNC-only with
+    # 33NN closed → no phantom gateway).  Recorded on the picked instance.
+    if gateway_resolve_fn is None:
+        gateway_resolve_fn = _resolve_gateway_port
+    try:
+        gport, glabel = gateway_resolve_fn(
+            host, nr, saprouter=(node.saprouter or ""))
+    except Exception as e:
+        print(f"[-] {sid}: Post-import gateway probe raised: "
+              f"{type(e).__name__}: {e}")
+        gport, glabel = 0, ""
+    if gport and glabel:
+        if picked.ports is None:
+            picked.ports = {}
+        picked.ports.setdefault(gport, glabel)
+        print(f"[+] {sid}: gateway confirmed on {host}:{gport} ({glabel})")
+    else:
+        print(f"[*] {sid}: no reachable gateway for inst {inst_nr} "
+              f"(plain 33{nr:02d} closed, SNC 48{nr:02d} absent) — "
+              f"no gateway port recorded")
 
     # Step 1 — RFC_SYSTEM_INFO (promotes placeholder SID; fills
     # hostname / os_type / db_type / kernel / sap_release).
@@ -3479,8 +3553,10 @@ def run_landscape_post_import_sweep(state, added_sids,
 
 
 def _import_appserver_instances(node, ms_host: str, ms_port) -> int:
-    """Fan out from a Message Server to its application servers and add
-    dispatcher (32NN) + gateway (33NN) InstanceInfo pairs to ``node``.
+    """Fan out from a Message Server to its application servers and add a
+    dispatcher (32NN) InstanceInfo per server to ``node``; the gateway is
+    probed and recorded later by the post-import sweep (issue #135), not
+    assumed here.
 
     Uses the ``servers`` list returned by ``query_app_servers``.  Only
     application servers running a dialog work process ("DIA" in
@@ -3488,8 +3564,10 @@ def _import_appserver_instances(node, ms_host: str, ms_port) -> int:
     short ``host`` is qualified with the Message Server's domain suffix,
     while its ``ip`` is used verbatim.  The instance number NN is parsed
     from the logical name (``host_SID_NN``); each matching server yields
-    a single instance carrying both the dispatcher (3200+NN) and gateway
-    (3300+NN) ports in one ports map.
+    a single instance carrying the dispatcher (3200+NN) port.  The gateway
+    is NOT assumed here — the post-import sweep probes it and records the
+    real, reachable gateway (33NN or the SNC 48NN), so SNC-only app servers
+    don't get a phantom gateway port (issue #135).
 
     Returns the number of application servers imported.
     """
@@ -3529,15 +3607,18 @@ def _import_appserver_instances(node, ms_host: str, ms_port) -> int:
         ip = srv.get("ip", "")
         inst_nr = f"{nn:02d}"
 
-        # One instance per server, carrying both the dispatcher (32NN)
-        # and gateway (33NN) ports in a single ports map.
+        # One instance per server, carrying ONLY the dispatcher (32NN).
+        # The gateway port (33NN or the SNC 48NN) is NOT assumed here — the
+        # post-import sweep probes and records the real, reachable gateway
+        # via _resolve_gateway_port, so SNC-only app servers (plain 33NN
+        # closed) no longer get a phantom gateway port (issue #135).
         node.instances.append(InstanceInfo(
             instance_nr=inst_nr, ip=ip,
-            ports={3200 + nn: "dispatcher", 3300 + nn: "gateway"},
+            ports={3200 + nn: "dispatcher"},
             info={"host": fqdn_host}))
         imported += 1
         print(f"[+]   app server {srv.get('name', '')} -> {fqdn_host} "
-              f"({ip})  dispatcher :{3200 + nn}  gateway :{3300 + nn}")
+              f"({ip})  dispatcher :{3200 + nn}  (gateway probed post-import)")
 
     return imported
 
@@ -18739,11 +18820,14 @@ def create_app(api: SAPMAPApi) -> Bottle:
         saprouter = (data.get("saprouter") or "").strip()
 
         nr = inst_nr
-        # Only set dispatcher/gateway ports (derived from instance nr)
-        # — other ports are discovered by scanning
+        # Only set the dispatcher port (derived from instance nr).  The
+        # gateway is NOT assumed — a 33NN gateway that isn't actually open
+        # (e.g. an SNC-only system whose gateway is on the 48NN SNC port)
+        # would be a phantom port (issue #135).  The background _enrich
+        # below probes and records the real gateway.  Other ports are
+        # discovered by scanning.
         ports = {
             int(f"32{nr}"): "dispatcher",
-            int(f"33{nr}"): "gateway",
         }
         instance = InstanceInfo(instance_nr=nr, ip=ip, ports=ports)
         node = SAPNode(sid=sid, ip=ip, hostname=ip, instances=[instance],
@@ -18758,6 +18842,26 @@ def create_app(api: SAPMAPApi) -> Bottle:
             gw_port = int(f"33{nr}")
             inst_nrs = [nr]
             print(f"[*] {sid}: Auto-enriching via RFC_SYSTEM_INFO...")
+
+            # Issue #135: probe + record the real gateway (33NN confirmed via
+            # CPIC, else the SNC 48NN) instead of assuming 33NN is open.
+            try:
+                _gp, _gl = _resolve_gateway_port(
+                    host, nr, saprouter=saprouter)
+                if _gp and _gl and node.instances:
+                    _inst0 = node.instances[0]
+                    if _inst0.ports is None:
+                        _inst0.ports = {}
+                    _inst0.ports.setdefault(_gp, _gl)
+                    print(f"[+] {sid}: gateway confirmed on {host}:{_gp} "
+                          f"({_gl})")
+                else:
+                    print(f"[*] {sid}: no reachable gateway for inst {nr} "
+                          f"(plain 33{nr} closed, SNC 48{nr} absent) — no "
+                          f"gateway port recorded")
+            except Exception as e:
+                print(f"[-] {sid}: gateway probe failed: "
+                      f"{type(e).__name__}: {e}")
 
             def _apply(info, fill_only=False):
                 # fill_only: only populate fields that are currently empty —
