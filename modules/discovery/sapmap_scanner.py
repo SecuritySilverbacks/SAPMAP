@@ -1460,6 +1460,50 @@ def fast_scan_network(targets: list, instance_range: tuple = DEFAULT_INSTANCE_RA
     return found
 
 
+def _record_instance_port(node, inst_nr, port, label, host="") -> None:
+    """Find-or-create the ``InstanceInfo`` for ``inst_nr`` on ``node`` and
+    record ``port -> label`` in its ports map so the sidebar's Open-Ports
+    display surfaces it.  ``setdefault`` semantics — never clobber an
+    existing service label.  Non-fatal on error (a finding still fires;
+    only the port chip is missed).
+
+    Single-sources the find-or-create block that
+    ``check_ms_info_disclosure`` introduced (issue #48) so the MS /
+    CVE-2026-58240 checks can surface confirmed-open MS/ASCS ports too
+    (issue #141) instead of leaving them only in node-level scalars.
+    """
+    try:
+        inst_str = (f"{int(inst_nr):02d}" if str(inst_nr).isdigit()
+                    else str(inst_nr))
+        matched = None
+        for inst in node.instances:
+            if getattr(inst, "instance_nr", "") == inst_str:
+                matched = inst
+                break
+        if matched is None:
+            matched = InstanceInfo(instance_nr=inst_str,
+                                   ip=(host or node.ip or ""), ports={})
+            node.instances.append(matched)
+        if matched.ports is None:
+            matched.ports = {}
+        matched.ports.setdefault(int(port), label)
+    except Exception as _e:
+        print(f"[!] {node.sid}: could not attach port {port} to instance "
+              f"{inst_nr}: {type(_e).__name__}: {_e}")
+
+
+def _ms_port_label(port):
+    """Return (inst_nr_str, label) for a message-server port — ``sapms`` for
+    the external 36NN, ``ms_internal`` for the internal 39NN — or ``None``
+    when ``port`` isn't an MS port.  Mirrors the fast-scan labels."""
+    p = int(port)
+    if 3600 <= p <= 3699:
+        return (f"{p - 3600:02d}", "sapms")
+    if 3900 <= p <= 3999:
+        return (f"{p - 3900:02d}", "ms_internal")
+    return None
+
+
 # ---------------------------------------------------------------------------
 # MS betrusted ACL check (CVE-2020-6207)
 # ---------------------------------------------------------------------------
@@ -1526,6 +1570,14 @@ def check_ms_betrusted(node: SAPNode, timeout: float = 8.0) -> bool:
             node.ms_acl_protected = result.get("acl_protected", False)
             node.ms_secure_comms_required = result.get(
                 "secure_comms_required", False)
+
+            # Issue #141: surface a GENUINELY-open internal MS port (39NN) in
+            # Open Ports — a parsed MS reply (vulnerable / ACL-denied) or a
+            # TLS/SystemPKI handshake, NOT a bare TCP accept (accessible-only).
+            if (result.get("acl_protected")
+                    or result.get("secure_comms_required")):
+                _record_instance_port(node, inst_nr, ms_p, "ms_internal",
+                                      host=host)
 
             if result["vulnerable"]:
                 logger.info(f"{node.sid}: MS port {ms_p} VULNERABLE (CVE-2020-6207) "
@@ -1780,24 +1832,7 @@ def check_ms_info_disclosure(node: SAPNode, timeout: float = 5.0,
     # sidebar's Open-Ports display picks it up.  A successful dump
     # response proves the port is reachable, and the operator wants to
     # see it in the port breakdown alongside dispatcher / gateway.
-    try:
-        inst_str = f"{inst_nr:02d}"
-        matched = None
-        for inst in node.instances:
-            if getattr(inst, "instance_nr", "") == inst_str:
-                matched = inst
-                break
-        if matched is None:
-            matched = InstanceInfo(instance_nr=inst_str,
-                                    ip=(host or ""), ports={})
-            node.instances.append(matched)
-        if int(port) not in (matched.ports or {}):
-            matched.ports[int(port)] = "msghttp"
-    except Exception as _e:
-        # Non-fatal — the finding still fires; port list just misses
-        # this entry.  Log and continue.
-        print(f"[!] {node.sid}: MS info-disclosure — could not attach "
-              f"port {port} to instance {inst_nr}: {_e}")
+    _record_instance_port(node, inst_nr, port, "msghttp", host=host)
 
     node.ms_info_leak = {
         "checked":          True,
@@ -2071,6 +2106,11 @@ def check_cve_2026_58240(node: SAPNode, timeout: float = 6.0) -> bool:
             # the register handler.
             node.cve_2026_58240_ms_port = ms_port
             node.cve_2026_58240_ascs_identity = ident
+            # Issue #141: this opcode branch returns early (below), so record
+            # the confirmed-open MS port here before we leave the function.
+            _ms = _ms_port_label(ms_port)
+            if _ms:
+                _record_instance_port(node, _ms[0], ms_port, _ms[1], host=host)
             leaked = ident or "(no identity in reply)"
             print(f"[!] {node.sid}: MS port {ms_port} — ASCS_GW opcode "
                   f"family PRESENT; leaked identity: {leaked}. "
@@ -2212,6 +2252,23 @@ def check_cve_2026_58240(node: SAPNode, timeout: float = 6.0) -> bool:
                 _tls_hit = True
                 _tls_probed_port = _p
                 break
+
+        # Issue #141: surface every CONFIRMED-open MS/ASCS port in Open
+        # Ports — a genuine MS protocol reply (opcode_recognised /
+        # opcode_absent / login_denied, and opcode_out_of_scope, which is a
+        # downgraded-but-successful MS_LOGIN_2 on a pre-9.x kernel) or a
+        # completed TLS handshake.  Bare TCP accepts (no_ms_reply) and
+        # unreachable ports are skipped.
+        _open_ms_ports = {
+            _p for _p, _v in _verdicts_seen.items()
+            if _v in ("opcode_recognised", "opcode_absent",
+                      "opcode_out_of_scope", "login_denied")}
+        if _tls_hit and _tls_probed_port:
+            _open_ms_ports.add(_tls_probed_port)
+        for _p in sorted(_open_ms_ports):
+            _ms = _ms_port_label(_p)
+            if _ms:
+                _record_instance_port(node, _ms[0], _p, _ms[1], host=host)
 
         if _tls_hit and kernel_9x:
             node.cve_2026_58240_evidence = "blocked_secure_comms"
