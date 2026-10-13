@@ -20084,11 +20084,13 @@ async function exportJSON() {
 }
 
 function exportReport() {
-  // Open the TLP selection modal before generating the reports.
+  // Open the TLP selection modal before generating the reports. - issue:#139
+  // Reset the selection to the default TLP level.
   document.querySelector(
     'input[name="report-tlp"][value="TLP_RED"]'
   ).checked = true;
-
+  // Keep the CSS highlight in sync with the radio state. - issue:#148
+  syncReportTlpSelection();
   document.getElementById('report-tlp-modal').classList.add('visible');
 }
 
@@ -21838,18 +21840,17 @@ async function _lootRender(relPath) {
   body.innerHTML = _buildRows().join('');
   _wireRows();
 }
-// TLP report selection modal: highlight the selected option.
+// TLP report selection modal: highlight the selected option. - issues:#139,#148
+function syncReportTlpSelection() {
+  document.querySelectorAll('.report-tlp-option').forEach(option => {
+    const radio = option.querySelector('input[name="report-tlp"]');
+    option.classList.toggle('selected', !!radio?.checked);
+  });
+}
 document.querySelectorAll(
   '.report-tlp-option input[name="report-tlp"]'
 ).forEach(radio => {
-  radio.addEventListener('change', () => {
-    document.querySelectorAll('.report-tlp-option').forEach(option => {
-      option.classList.toggle(
-        'selected',
-        option.querySelector('input[name="report-tlp"]').checked
-      );
-    });
-  });
+  radio.addEventListener('change', syncReportTlpSelection);
 });
 // --- Init ---
 startPolling();
