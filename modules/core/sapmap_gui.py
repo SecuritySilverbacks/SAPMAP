@@ -774,6 +774,27 @@ def ui_command(cmd: str, **kwargs):
         _ui_commands.append({"cmd": cmd, **kwargs})
 
 
+def _record_verified_scc_cred(sn, user: str, pwd: str) -> None:
+    """Record a successfully-verified SCC admin credential on an SCCNode.
+
+    Upgrades an existing same-username entry IN PLACE (set ``verified=True`` and
+    refresh the password with the pair that just logged in) instead of skipping
+    it.  A pair stored earlier via Set Credentials is ``verified=False``; with
+    the old append-only guard it stayed unverified forever even after a
+    successful pull/extract, so working creds kept showing as unverified in the
+    UI (issue #145).  Appends a new verified entry only when none matches.
+    """
+    from sapmap_models import Credentials
+    for c in (sn.credentials or []):
+        if getattr(c, "username", "") == user:
+            c.verified = True
+            c.password = pwd
+            return
+    if sn.credentials is None:
+        sn.credentials = []
+    sn.credentials.append(Credentials(username=user, password=pwd, verified=True))
+
+
 def _add_console_line(ts, text, css_class="cl-info"):
     with _console_lock:
         _console_lines.append({"ts": ts, "text": text, "cls": css_class})
@@ -4158,14 +4179,9 @@ def create_app(api: SAPMAPApi) -> Bottle:
                 sn.pwned = True
                 # Cache verified Administrator credentials on the SCC node so
                 # subsequent map actions (e.g. tunnel-relay tests) can reuse
-                # them without prompting again.
-                from sapmap_models import Credentials
-                already = any(getattr(c, "username", "") == user
-                              for c in (sn.credentials or []))
-                if not already:
-                    sn.credentials.append(Credentials(
-                        username=user, password=pwd, verified=True,
-                    ))
+                # them without prompting again.  Upgrades an existing entry in
+                # place so a Set-Credentials pair flips to verified (issue #145).
+                _record_verified_scc_cred(sn, user, pwd)
                 sapmap_findings.emit_finding(
                     "CRITICAL", host,
                     f"SCC admin credentials verified: {user} — full Cloud "
@@ -4588,11 +4604,9 @@ def create_app(api: SAPMAPApi) -> Bottle:
                 # pull_mappings flow flips); set if not already.
                 sn.admin_session_obtained = True
                 sn.pwned = True
-                from sapmap_models import Credentials
-                if not any(getattr(c, "username", "") == user
-                           for c in (sn.credentials or [])):
-                    sn.credentials.append(Credentials(
-                        username=user, password=pwd, verified=True))
+                # Upgrade an existing entry in place so a Set-Credentials pair
+                # flips to verified rather than staying stale (issue #145).
+                _record_verified_scc_cred(sn, user, pwd)
                 sn.keystore_extracted = True
                 sn.keystore_loot_path = res.get("loot_path", "")
                 # Store backup password in-memory for future decryption attempts
