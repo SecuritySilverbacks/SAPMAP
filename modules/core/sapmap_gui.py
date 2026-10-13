@@ -20807,7 +20807,7 @@ def create_app(api: SAPMAPApi) -> Bottle:
         )
         return api.state.to_json(indent=2)
 
-    @app.route("/api/export/report")
+    @app.route("/api/export/report", method="POST")
     def export_report():
         """Build the engagement report in BOTH Markdown and HTML
         formats and write them to loot/reports/.
@@ -20822,14 +20822,21 @@ def create_app(api: SAPMAPApi) -> Bottle:
         report.  Files are written server-side, the JSON response
         carries the paths so the GUI can show them in a toast.
         """
+        from bottle import request
+        payload = request.json
+        var_tlp = (
+          payload.get("var_tlp", "TLP_RED")
+          if isinstance(payload, dict)
+          else "TLP_RED"
+        )
         from sapmap_report import build_markdown_report, build_html_report
         import sapmap_state as _ss
         response.content_type = "application/json"
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
 
         try:
-            md = build_markdown_report(api.state)
-            html = build_html_report(api.state)
+            md = build_markdown_report(api.state, var_tlp=var_tlp)
+            html = build_html_report(api.state, var_tlp=var_tlp)
             reports_dir = _ss.ensure_loot_dir("reports")
             md_path = os.path.join(reports_dir, f"sapmap_report_{ts}.md")
             html_path = os.path.join(reports_dir, f"sapmap_report_{ts}.html")
