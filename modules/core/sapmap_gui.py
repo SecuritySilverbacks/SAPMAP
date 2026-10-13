@@ -822,49 +822,66 @@ def _record_wd_default_probe_result(node, sid, wd_port, wd_https,
             client="", instance="",
             verified=True, kind="wd_admin",
         ))
-        emit_finding(
-            "CRITICAL", sid,
-            f"WD admin default credentials LIVE "
-            f"({working[0]} / {working[1]}) — full "
-            f"wdisp/system_* table + parameter readouts "
-            f"+ kernel patch level all reachable without "
-            f"further effort",
-            cve="",
-            attack_capability="creds.default_probe",
-        )
-        node.findings.append(Finding(
-            name=(f"WD admin default credentials live "
-                   f"({working[0]} / {working[1]})"),
-            severity=Severity.CRITICAL,
-            description=(
-                "The SAP Web Dispatcher's /sap/wdisp/admin "
-                "HTTP Basic-auth gate accepted credentials "
-                "from the SAPMAP default-creds wordlist.  "
-                "An unauthenticated attacker on the network "
-                "can read the full wdisp/system_* table "
-                "(every backend SID + MSHOST + MSPORT + "
-                "SSL_ENCRYPT + SRCURL), the WD's kernel "
-                "patch level, the URL permission table, "
-                "trusted-reverse-proxy whitelist, and the "
-                "WD's SAPSSLS.pse certificate store path — "
-                "all without further exploitation effort.  "
-                "Pivots from there: full landscape topology "
-                "exposure, kernel CVE patch-table lookup "
-                "(see ICMAD / 3123396), and lateral creds "
-                "via the SSL key store."
-            ),
-            remediation=(
-                "Change /sap/wdisp/admin credentials to a "
-                "strong unique password.  Set "
-                "icm/HTTP/admin_0=...,CLIENTHOST=<bastion-IP> "
-                "to restrict admin access by source IP.  "
-                "Consider service/sso_admin_user_* for "
-                "client-cert auth instead of Basic."
-            ),
-            detail=(f"User: {working[0]} · Port: "
-                    f"{wd_port}{'/HTTPS' if wd_https else ''}"),
-        ))
+        # issue #64: record ONE Web-Dispatcher-specific Finding, keyed to the
+        # same `msg` the bus emit uses, and append it BEFORE emit_finding so
+        # emit_finding's auto-mirror (_persist_to_node, which dedups a node
+        # Finding by name == msg) does NOT add a second, sparser node Finding
+        # carrying generic ABAP default-account remediation.
+        msg = (f"WD admin default credentials LIVE "
+               f"({working[0]} / {working[1]}) — full "
+               f"wdisp/system_* table + parameter readouts "
+               f"+ kernel patch level all reachable without "
+               f"further effort")
+        # Idempotent on re-probe, and keyed to `msg` so emit_finding's
+        # auto-mirror dedups against it (issue #64).
+        if not any(getattr(f, "name", "") == msg
+                   for f in (node.findings or [])):
+            node.findings.append(Finding(
+                name=msg,
+                severity=Severity.CRITICAL,
+                description=(
+                    "The SAP Web Dispatcher's /sap/wdisp/admin "
+                    "HTTP Basic-auth gate accepted credentials "
+                    "from the SAPMAP default-creds wordlist.  "
+                    "An unauthenticated attacker on the network "
+                    "can read the full wdisp/system_* table "
+                    "(every backend SID + MSHOST + MSPORT + "
+                    "SSL_ENCRYPT + SRCURL), the WD's kernel "
+                    "patch level, the URL permission table, "
+                    "trusted-reverse-proxy whitelist, and the "
+                    "WD's SAPSSLS.pse certificate store path — "
+                    "all without further exploitation effort.  "
+                    "Pivots from there: full landscape topology "
+                    "exposure, kernel CVE patch-table lookup "
+                    "(see ICMAD / 3123396), and lateral creds "
+                    "via the SSL key store."
+                ),
+                remediation=(
+                    "Change /sap/wdisp/admin credentials to a "
+                    "strong unique password.  Set "
+                    "icm/HTTP/admin_0=...,CLIENTHOST=<bastion-IP> "
+                    "to restrict admin access by source IP.  "
+                    "Consider service/sso_admin_user_* for "
+                    "client-cert auth instead of Basic."
+                ),
+                detail=(f"User: {working[0]} · Port: "
+                        f"{wd_port}{'/HTTPS' if wd_https else ''}"),
+                # Keep the ATT&CK tags on the PERSISTENT node Finding (the
+                # report/heatmap/Navigator read node.findings, not the bus) —
+                # T1078.001 Valid Accounts: Default + T1110.001 Password
+                # Guessing, the same ids creds.default_probe resolved to before
+                # the auto-mirror was deduped away (issue #64).
+                attack_techniques=["T1078.001", "T1110.001"],
+            ))
         node.has_critical_finding = True
+        # Engagement-bus record (bell / timeline).  WD-appropriate ATT&CK
+        # tags only — NOT the generic creds.default_probe capability, whose
+        # remediation is the ABAP SAP*/DDIC/RSUSR003 default-account guidance
+        # (wrong for a Web Dispatcher finding) — issue #64.
+        emit_finding(
+            "CRITICAL", sid, msg, cve="",
+            attack_techniques=["T1078.001", "T1110.001"],
+        )
         return working
     # Not live.  issue #63: a non-401 response on a path with NO 401 auth-gate
     # (e.g. /sap/wdisp/admin rewritten to a static 2xx page) is NOT proof the
@@ -8301,7 +8318,10 @@ def create_app(api: SAPMAPApi) -> Bottle:
                     f"verified ({working[0]}) — full wdisp/system_* "
                     f"table now reachable",
                     cve="",
-                    attack_capability="creds.default_probe",
+                    # WD-appropriate ATT&CK only; not creds.default_probe,
+                    # whose remediation is the generic ABAP default-account
+                    # guidance (wrong for a Web Dispatcher cred) — issue #64.
+                    attack_techniques=["T1078.001"],
                 )
                 if extract:
                     print(f"[*] {sid}: pulling wdisp/system_* table ...")
