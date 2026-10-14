@@ -119,6 +119,7 @@ def emit_finding(severity: str, node: str, msg: str,
                  meta: Optional[Dict] = None,
                  attack_capability: Optional[str] = None,
                  attack_techniques: Optional[List[str]] = None,
+                 persist_node: bool = True,
                  ) -> Optional[Dict]:
     """Publish a finding.  Returns the stored record, or None if dropped
     (e.g. severity rejected, or deduped against a recent identical entry).
@@ -199,10 +200,15 @@ def emit_finding(severity: str, node: str, msg: str,
     # the operator having to hunt through the bell-icon log.  Runs
     # outside the lock so a slow state mutation doesn't stall further
     # emits.
-    try:
-        _persist_to_node(record)
-    except Exception:
-        pass
+    # persist_node=False lets a callsite that appends its OWN (richer) node
+    # Finding opt out of the auto-mirror, so one detection does not land twice
+    # on the node (issue #151).  Default True keeps every emit-only callsite's
+    # node finding.
+    if persist_node:
+        try:
+            _persist_to_node(record)
+        except Exception:
+            pass
 
     # 1. Visible to operators running the CLI scanner directly.
     emoji = {"CRITICAL": "!!!", "HIGH": "!!", "MEDIUM": "!", "INFO": "*"}[sev]
