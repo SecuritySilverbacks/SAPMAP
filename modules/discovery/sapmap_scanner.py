@@ -1588,6 +1588,9 @@ def check_ms_betrusted(node: SAPNode, timeout: float = 8.0) -> bool:
                     f"10KBLAZE betrusted attack path open",
                     cve="CVE-2020-6207",
                     attack_capability="exploit.ms_betrusted",
+                    # The richer CRITICAL node Finding is appended below —
+                    # don't also auto-mirror this HIGH bus event (issue #151).
+                    persist_node=False,
                 )
                 node.findings.append(Finding(
                     name="MS Internal Port Without ACL (CVE-2020-6207)",
@@ -1897,6 +1900,9 @@ def check_ms_info_disclosure(node: SAPNode, timeout: float = 5.0,
             cve="Info Disclosure / MS ACL missing (Notes 1421005 / 2696233)",
             ref="ms.info_disclosure.text_dump",
             attack_capability="recon.ms_info_disclosure",
+            # The node Finding is appended below — don't also auto-mirror this
+            # bus event (issue #151).
+            persist_node=False,
         )
         node.findings.append(Finding(
             name="Message Server HTTP text/dump Info Disclosure",
