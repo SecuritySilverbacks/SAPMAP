@@ -8944,6 +8944,9 @@ def create_app(api: SAPMAPApi) -> Bottle:
                     f"smuggled={r['smuggled_status']})",
                     cve="CVE-2022-22536",
                     attack_capability="exploit.cve_2022_22536",
+                    # The CVE-named node Finding is appended below — don't also
+                    # auto-mirror this bus event (issue #151).
+                    persist_node=False,
                 )
                 if not any(f.detail and path in f.detail
                               and f.name.startswith("CVE-2022-22536")
@@ -9075,6 +9078,9 @@ def create_app(api: SAPMAPApi) -> Bottle:
                     f"({mb:.0f} MB) via CVE-2022-22536 bypass",
                     cve="CVE-2022-22536",
                     attack_capability="exploit.cve_2022_22536",
+                    # The CVE-named node Finding is appended below — don't also
+                    # auto-mirror this bus event (issue #151).
+                    persist_node=False,
                 )
                 node.findings.append(Finding(
                     name="CVE-2022-22536 — HPROF heap dump captured",
