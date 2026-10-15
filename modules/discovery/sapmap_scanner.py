@@ -5322,6 +5322,50 @@ def _maybe_build_scc_node(scan_result: dict, timeout: float = 5.0,
 # Build SAPNode from scan results
 # ---------------------------------------------------------------------------
 
+def _reconcile_instance_sid(host, inst_nr, rfc_sid, rfc_sysinfo,
+                            timeout=3, saprouter=""):
+    """Prefer the authoritative per-instance SAPControl SID (50N13) over the
+    gateway RFC_SYSTEM_INFO SID when they conflict (issue #155).
+
+    On a host running more than one SAP SID, the gateway RFC probe for a
+    *secondary* system's instance can return the *primary* system's SID
+    (gateway proxying / sid_hint contamination).  That would attribute the
+    instance's dispatcher + gateway ports to the wrong node, leaving the real
+    owner with no gateway.  SAPControl's ``50N13`` is the instance agent for
+    instance ``NN`` (gateway ``3300+NN`` and SAPControl ``50000+NN*100+13``
+    are keyed by the same instance number, and an instance belongs to exactly
+    one SID), so its SID is the ground truth.
+
+    Returns ``(sid, sysinfo)`` — unchanged for a non-digit instance, or when
+    SAPControl has no answer or agrees with the RFC SID.
+    """
+    if not (inst_nr or "").isdigit():
+        return rfc_sid, rfc_sysinfo
+    try:
+        sc_port = 50000 + int(inst_nr) * 100 + 13
+        sc_sid, sc_j, sc_a, sc_db, _sc_http, _sc_https = _query_sapcontrol_sid(
+            host, sc_port, timeout=min(timeout, 3), saprouter=saprouter)
+    except Exception:
+        return rfc_sid, rfc_sysinfo
+    if not sc_sid or sc_sid.upper() == (rfc_sid or "").upper():
+        return rfc_sid, rfc_sysinfo
+    # Conflict — trust SAPControl, but keep the RFC probe's enrichment
+    # (kernel / hostname / release) which SAPControl doesn't carry.
+    merged = dict(rfc_sysinfo or {})
+    merged["sid"] = sc_sid
+    if sc_j:
+        merged["_is_java"] = True
+    if sc_a:
+        merged["_is_abap"] = True
+    if sc_db and not merged.get("db_type"):
+        merged["db_type"] = sc_db
+    print(f"[*] {host}: instance {inst_nr} — gateway RFC reported SID="
+          f"{rfc_sid} but SAPControl ({sc_port}) reports SID={sc_sid}; "
+          f"trusting SAPControl so this instance's ports follow the real "
+          f"owner (issue #155)")
+    return sc_sid, merged
+
+
 def _build_nodes_from_fast_scan(scan_result: dict, timeout: float = 10,
                                 verbose: bool = False,
                                 saprouter: str = "") -> list:
@@ -5400,10 +5444,13 @@ def _build_nodes_from_fast_scan(scan_result: dict, timeout: float = 10,
                                           sid_hint=known_host_sid,
                                           saprouter=saprouter)
             if sys_info.get("sid"):
-                instance_sid_map[inst_nr] = sys_info["sid"]
+                _sid, sys_info = _reconcile_instance_sid(
+                    host, inst_nr, sys_info["sid"], sys_info,
+                    timeout=timeout, saprouter=saprouter)
+                instance_sid_map[inst_nr] = _sid
                 instance_sysinfo[inst_nr] = sys_info
                 if not known_host_sid:
-                    known_host_sid = sys_info["sid"]
+                    known_host_sid = _sid
                 continue
 
         # No gateway open (or gateway enrichment yielded no SID) — try the
@@ -5425,10 +5472,13 @@ def _build_nodes_from_fast_scan(scan_result: dict, timeout: float = 10,
                                               sid_hint=known_host_sid,
                                               saprouter=saprouter)
                 if sys_info.get("sid"):
-                    instance_sid_map[inst_nr] = sys_info["sid"]
+                    _sid, sys_info = _reconcile_instance_sid(
+                        host, inst_nr, sys_info["sid"], sys_info,
+                        timeout=timeout, saprouter=saprouter)
+                    instance_sid_map[inst_nr] = _sid
                     instance_sysinfo[inst_nr] = sys_info
                     if not known_host_sid:
-                        known_host_sid = sys_info["sid"]
+                        known_host_sid = _sid
                 # Restore the derived gateway port to open_ports when the
                 # RFC_SYSTEM_INFO probe returned any SAP-shaped evidence
                 # (sid / hostname / kernel / sap_release).  The Phase-1
