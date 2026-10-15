@@ -130,6 +130,10 @@ body {
   display: inline-flex; align-items: center; gap: 4px;
 }
 .btn:hover { background: #30363d; border-color: #8b949e; }
+.btn:disabled, .btn:disabled:hover {
+  opacity: 0.45; cursor: not-allowed;
+  background: #21262d; border-color: #30363d;
+}
 .btn-primary { background: #238636; border-color: #2ea043; color: #fff; }
 .btn-primary:hover { background: #2ea043; }
 .btn-danger { background: #da3633; border-color: #f85149; color: #fff; }
@@ -1102,6 +1106,7 @@ body {
       <div class="dd-item" onclick="clearCreatedDestinations()">&#128465; Clear TCP/IP Destinations List</div>
       <div class="dd-sep"></div>
       <div class="dd-header">Add / configure</div>
+      <div class="dd-item" onclick="showConfigureSncModal()">&#128274; Configure SNC</div>
       <div class="dd-item" onclick="showAddSystemModal()">&#10133; Add System Manually</div>
       <div class="dd-item" onclick="showSetPasswordModal()">&#128273; Set Default Password</div>
       <div class="dd-item" onclick="showHashesApiKeyModal()">&#128273; Set hashes.com API Key</div>
@@ -1459,8 +1464,6 @@ body {
       <div class="ctx-item" data-action="ssh_test_keys">&#128640; SSH Lateral Movement (test keys against targets)</div>
       <div class="ctx-sep"></div>
       <div class="ctx-item" data-action="propagate">&#128640; Propagate (exploit next hop)</div>
-      <div class="ctx-item" data-action="discover_colocated">&#128269; Discover Co-located SAP Instances (/usr/sap)</div>
-      <div class="ctx-item" data-action="pivot_colocated">&#128640; Pivot to Co-located (Gateway, then OS Secure-Store harvest)</div>
       <div class="ctx-item" data-action="harvest_btp_creds">&#9729; Harvest BTP Credentials (lateral to cloud)</div>
       <div class="ctx-item" data-action="verify_pp_impersonation">&#127919; Verify PP Impersonation (Live Probe)</div>
     </div>
@@ -2343,6 +2346,43 @@ body {
     <div class="form-actions">
       <button class="btn btn-primary" id="sdk-path-save-btn" onclick="saveSdkPath()">Save</button>
       <button class="btn" onclick="closeModal('sdk-path-modal')" id="sdk-path-cancel-btn">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<!-- Configure SNC Modal -->
+<div class="modal-overlay" id="snc-config-modal">
+  <div class="modal" style="max-width:560px">
+    <h3>&#128274; Configure SNC</h3>
+    <div style="font-size:12px;color:#8b949e;margin-bottom:12px;line-height:1.5">
+      Secure Network Communications (SNC) requires the SAP Cryptographic
+      Library and a configured <code>SECUDIR</code>.  The checks below reflect
+      the environment of the running SAPMAP process.
+    </div>
+    <div class="form-row">
+      <label>SECUDIR</label>
+      <div id="snc-secudir" style="font-family:monospace;font-size:12px;color:#c9d1d9;word-break:break-all;overflow-wrap:anywhere">&mdash;</div>
+    </div>
+    <div class="form-row">
+      <label>sapcryptolib</label>
+      <div id="snc-sapcryptolib" style="font-family:monospace;font-size:12px;color:#c9d1d9">&mdash;</div>
+    </div>
+    <div class="form-row">
+      <label>SNC Identity</label>
+      <input type="text" id="snc-identity" readonly placeholder="(run Test SNC Configuration)" autocomplete="off" style="background:#0d1117;color:#c9d1d9;cursor:default">
+    </div>
+    <div class="form-row">
+      <label>Status</label>
+      <div id="snc-status" style="font-size:12px;font-weight:600;color:#c9d1d9">&mdash;</div>
+    </div>
+    <div class="form-row" id="snc-output-row" style="display:none">
+      <label>Output</label>
+      <textarea id="snc-output" readonly rows="8" style="width:100%;font-family:monospace;font-size:11px;background:#0d1117;color:#c9d1d9;border:1px solid #30363d;border-radius:4px;padding:8px;resize:vertical;white-space:pre;overflow:auto"></textarea>
+    </div>
+    <div class="form-actions">
+      <button class="btn btn-primary" id="snc-test-btn" onclick="testSncConfiguration()">Test SNC Configuration</button>
+      <button class="btn btn-primary" id="snc-save-btn" onclick="saveSncConfig()">Save</button>
+      <button class="btn" onclick="closeModal('snc-config-modal')">Close</button>
     </div>
   </div>
 </div>
@@ -6916,10 +6956,6 @@ function showCtxMenu(e, sid) {
     // separate flag and doesn't care about MS TLS.
     'create_user_betrusted': (hasMsVuln && !msSecureComms) || hasGwVuln,
     'create_user_gw':   hasGwVuln,                  // need GW vulnerability
-    // Same-host co-location (issue #70): discovery needs an owned host; the
-    // pivot needs at least one co-located system already plotted on the map.
-    'discover_colocated': !!n.pwned,
-    'pivot_colocated': !!(n.colocated_sids && n.colocated_sids.some(c => c && c.plotted)),
     'create_user_dpmon_sapstar': hasGwVuln && isAbapStack && n.dpmon_sap_star_available,  // kernel>=790 + ABAP + GW
     // Transport import needs an OS-exec channel on the target.  Two
     // primitives are wired in:
@@ -10036,8 +10072,6 @@ async function ctxAction(action) {
     case 'tms_propagate':    showTMSPropagateModal(sid); break;
     case 'create_tcpip': showTcpipModal(sid); break;
     case 'propagate': showPropagateModal(sid); break;
-    case 'discover_colocated': discoverColocated(sid); break;
-    case 'pivot_colocated': pivotColocated(sid); break;
     case 'harvest_btp_creds': await showHarvestBtpCredsModal(sid); break;
     case 'cleanup':
       if (confirm(`Delete SAPMAP00 user from ${sid}?`))
@@ -10818,49 +10852,6 @@ async function probeCertDest(sid, destName) {
   showToast('Cert-auth probe on ' + destName +
              ' — watch the console for BTP loot / status.', 'info');
   startPolling();
-}
-
-// Same-host co-location (issue #70): list /usr/sap on an owned node to find
-// other SAP SIDs on the host, and pivot to a plotted co-located system via its
-// RFC Gateway (reusing the existing gateway primitive server-side).
-async function discoverColocated(sid) {
-  flashActivity('SAP ' + sid + ': discovering co-located instances', 8000);
-  try {
-    const r = await fetch('/api/node/' + encodeURIComponent(sid) + '/discover_colocated',
-                          { method: 'POST', headers: { 'Content-Type': 'application/json' },
-                            body: '{}' });
-    const d = await r.json();
-    if (d.error) { alert('Discovery failed: ' + d.error); return; }
-    showToast('Scanning /usr/sap on ' + sid + ' — watch the console.', 'info');
-    startPolling();
-  } catch (e) { alert('Discovery error: ' + e); }
-}
-
-async function pivotColocated(sid) {
-  const n = (mapState.nodes || {})[sid];
-  const cands = ((n && n.colocated_sids) || []).filter(c => c && c.plotted)
-                                               .map(c => c.sid);
-  if (!cands.length) {
-    alert('No co-located plotted system to pivot to.  Run "Discover Co-located '
-          + 'SAP Instances" first, and make sure the other system is scanned.');
-    return;
-  }
-  if (!confirm('Pivot to co-located system(s) on this host: ' + cands.join(', ')
-               + '?\n\nTries each sibling\'s RFC Gateway first; when that is '
-               + 'rejected (the sibling trusts only localhost / internal_hosts), '
-               + 'falls back to reading its Secure Store off /usr/sap through '
-               + 'THIS node\'s OS-exec channel to recover its DB-connect '
-               + 'credentials.')) return;
-  flashActivity('SAP ' + sid + ': pivoting to co-located instances', 15000);
-  try {
-    const r = await fetch('/api/node/' + encodeURIComponent(sid) + '/pivot_colocated',
-                          { method: 'POST', headers: { 'Content-Type': 'application/json' },
-                            body: '{}' });
-    const d = await r.json();
-    if (d.error) { alert('Pivot failed: ' + d.error); return; }
-    showToast('Pivoting to ' + (d.targets || []).join(', ') + ' — watch the console.', 'info');
-    startPolling();
-  } catch (e) { alert('Pivot error: ' + e); }
 }
 
 async function createUserViaRfc(sourceSid, destName, targetSid) {
@@ -14279,6 +14270,143 @@ async function saveSdkPath() {
     closeModal('sdk-path-modal');
   } else {
     showToast('Failed to save: ' + (d.error || '?'), 'error');
+  }
+}
+
+// Last /api/snc/status payload — lets Save persist the real values
+// (incl. the resolved libsapcrypto.so path) without re-parsing the
+// modal's display text.
+let _sncStatus = null;
+
+async function showConfigureSncModal() {
+  // Pull the live SNC prerequisites (SECUDIR + libsapcrypto.so presence)
+  // from the backend and render them.  Status reads "ok" only when both
+  // conditions hold; otherwise "SNC Configuration not ok!".
+  const secEl = document.getElementById('snc-secudir');
+  const libEl = document.getElementById('snc-sapcryptolib');
+  const statEl = document.getElementById('snc-status');
+  const testBtn = document.getElementById('snc-test-btn');
+  const outRow = document.getElementById('snc-output-row');
+  const outEl = document.getElementById('snc-output');
+  const identEl = document.getElementById('snc-identity');
+  if (secEl) secEl.textContent = '…';
+  if (libEl) libEl.textContent = '…';
+  if (statEl) { statEl.textContent = '…'; statEl.style.color = '#c9d1d9'; }
+  // Reset any prior test output when re-opening the modal.
+  if (outRow) outRow.style.display = 'none';
+  if (outEl) outEl.value = '';
+  if (identEl) identEl.value = '';
+  // Keep the Test button disabled until we confirm the config is ok —
+  // a failed/incomplete config has nothing to test.
+  if (testBtn) testBtn.disabled = true;
+  try {
+    const d = await fetch('/api/snc/status').then(r => r.json());
+    _sncStatus = d;
+    if (secEl) secEl.textContent = d.secudir || '(not set)';
+    if (libEl) libEl.textContent = d.sapcryptolib
+      ? (d.sapcryptolib_path || '(found)')
+      : '❌ libsapcrypto.so not found';
+    if (statEl) {
+      if (d.ok) {
+        statEl.textContent = 'SNC Configuration ok';
+        statEl.style.color = '#3fb950';
+      } else {
+        statEl.textContent = 'SNC Configuration not ok!';
+        statEl.style.color = '#f85149';
+      }
+    }
+    if (identEl) identEl.value = d.snc_identity || '';
+    if (testBtn) testBtn.disabled = !d.ok;
+  } catch(e) {
+    _sncStatus = null;
+    if (secEl) secEl.textContent = '(error)';
+    if (libEl) libEl.textContent = '(error)';
+    if (statEl) {
+      statEl.textContent = 'SNC Configuration not ok!';
+      statEl.style.color = '#f85149';
+    }
+    if (testBtn) testBtn.disabled = true;
+  }
+  document.getElementById('snc-config-modal').classList.add('visible');
+}
+
+async function testSncConfiguration() {
+  // Run `sapgenpse get_my_name` in $SECUDIR on the backend and show the
+  // raw OS output.  Status flips to OK only when the child process exits
+  // with return code 0; any failure (including a missing sapgenpse
+  // executable) sets "SNC Configuration not ok".
+  const statEl = document.getElementById('snc-status');
+  const outRow = document.getElementById('snc-output-row');
+  const outEl = document.getElementById('snc-output');
+  const identEl = document.getElementById('snc-identity');
+  const testBtn = document.getElementById('snc-test-btn');
+  if (testBtn) testBtn.disabled = true;
+  if (outRow) outRow.style.display = '';
+  if (outEl) outEl.value = 'Running sapgenpse get_my_name …';
+  try {
+    const d = await fetch('/api/snc/test', {method: 'POST'}).then(r => r.json());
+    if (outEl) outEl.value = d.output || '(no output)';
+    if (statEl) {
+      if (d.ok) {
+        statEl.textContent = 'OK';
+        statEl.style.color = '#3fb950';
+        // On success, lift the PSE's own distinguished name out of the
+        // `sapgenpse get_my_name` output and mirror it into the
+        // read-only SNC Identity field.  sapgenpse prints a line like
+        //   Subject : CN=SID, O=SOMEORG
+        const subj = parseSncSubject(d.output || '');
+        if (identEl && subj) identEl.value = subj;
+      } else {
+        statEl.textContent = 'SNC Configuration not ok!';
+        statEl.style.color = '#f85149';
+      }
+    }
+  } catch(e) {
+    if (outEl) outEl.value = 'Request failed: ' + e;
+    if (statEl) {
+      statEl.textContent = 'SNC Configuration not ok!';
+      statEl.style.color = '#f85149';
+    }
+  } finally {
+    if (testBtn) testBtn.disabled = false;
+  }
+}
+
+function parseSncSubject(output) {
+  // Pull the distinguished name out of a `sapgenpse get_my_name` dump.
+  // The tool prints a line such as:
+  //   Subject : CN=SID, O=SOMEORG
+  // Tolerate optional whitespace around the colon and surrounding quotes.
+  const m = /^\s*Subject\s*:\s*(.+?)\s*$/im.exec(output || '');
+  if (!m) return '';
+  return m[1].replace(/^["']|["']$/g, '').trim();
+}
+
+async function saveSncConfig() {
+  // Persist SECUDIR, sapcryptolib and SNC Identity into the engagement
+  // state (top-level globals, siblings of `nodes`).  Reads the values
+  // straight off the modal's current display.
+  const identEl = document.getElementById('snc-identity');
+  const payload = {
+    secudir: (_sncStatus && _sncStatus.secudir) || '',
+    // Persist the resolved libsapcrypto.so path (empty when absent).
+    sapcryptolib: (_sncStatus && _sncStatus.sapcryptolib)
+      ? (_sncStatus.sapcryptolib_path || '') : '',
+    snc_identity: identEl ? (identEl.value || '').trim() : '',
+  };
+  try {
+    const d = await fetch('/api/snc/save', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(payload),
+    }).then(r => r.json());
+    if (d.ok) {
+      showToast('SNC configuration saved to state.', 'success');
+    } else {
+      showToast('Failed to save SNC configuration: ' + (d.error || '?'), 'error');
+    }
+  } catch(e) {
+    showToast('Failed to save SNC configuration: ' + e, 'error');
   }
 }
 

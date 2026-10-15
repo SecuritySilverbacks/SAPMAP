@@ -9,6 +9,7 @@ All operations run in background threads; JS polls for state updates.
 import io
 import json
 import os
+import subprocess
 import sys
 import threading
 import time
@@ -5703,6 +5704,100 @@ def create_app(api: SAPMAPApi) -> Bottle:
             "host_sdk_path": os.environ.get("SAPMAP_HOST_SDK_PATH", ""),
         })
 
+    @app.route("/api/snc/status", method="GET")
+    def get_snc_status():
+        """Report SNC prerequisites so the Configure SNC modal can show them.
+
+        Two checks, both read-only:
+          * SECUDIR   — value of the SECUDIR environment variable.
+          * sapcryptolib — whether $SECUDIR/libsapcrypto.so exists.
+        SNC is considered "ok" only when SECUDIR is set AND the crypto
+        library is present in it."""
+        response.content_type = "application/json"
+        secudir = os.environ.get("SECUDIR", "")
+        lib_exists = False
+        lib_path = ""
+        if secudir:
+            try:
+                candidate = os.path.join(secudir, "libsapcrypto.so")
+                lib_exists = os.path.isfile(candidate)
+                if lib_exists:
+                    lib_path = candidate
+            except Exception:
+                lib_exists = False
+        return json.dumps({
+            "secudir": secudir,
+            "sapcryptolib": lib_exists,
+            "sapcryptolib_path": lib_path,
+            "ok": bool(secudir) and lib_exists,
+            # Previously-saved SNC Identity (if any) so the modal can
+            # prefill the read-only field on re-open.
+            "snc_identity": getattr(api.state, "snc_identity", "") or "",
+        })
+
+    @app.route("/api/snc/test", method="POST")
+    def test_snc_config():
+        """Run `sapgenpse get_my_name` inside $SECUDIR and report the result.
+
+        The OS output (stdout + stderr) is returned verbatim for display in
+        the modal's textarea.  "ok" is true only when the child process
+        exits with return code 0.  If the executable itself is missing
+        (sapgenpse not on PATH) we surface the OS error text the same way,
+        with ok=false."""
+        response.content_type = "application/json"
+        secudir = os.environ.get("SECUDIR", "")
+        if not secudir:
+            return json.dumps({
+                "ok": False,
+                "returncode": None,
+                "output": "SECUDIR is not set — cannot run sapgenpse.",
+            })
+        try:
+            proc = subprocess.run(
+                ["./sapgenpse", "get_my_name"],
+                cwd=secudir,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            output = (proc.stdout or "") + (proc.stderr or "")
+            return json.dumps({
+                "ok": proc.returncode == 0,
+                "returncode": proc.returncode,
+                "output": output or "(no output)",
+            })
+        except FileNotFoundError as e:
+            # sapgenpse executable not found on PATH.
+            return json.dumps({
+                "ok": False,
+                "returncode": None,
+                "output": "sapgenpse executable not found: " + str(e),
+            })
+        except subprocess.TimeoutExpired:
+            return json.dumps({
+                "ok": False,
+                "returncode": None,
+                "output": "sapgenpse get_my_name timed out after 30s.",
+            })
+        except Exception as e:
+            return json.dumps({
+                "ok": False,
+                "returncode": None,
+                "output": "Error running sapgenpse: " + str(e),
+            })
+
+    @app.route("/api/snc/save", method="POST")
+    def save_snc_config():
+        """Persist the SNC posture (SECUDIR, sapcryptolib, SNC Identity)
+        into the live state as top-level globals (siblings of ``nodes``).
+        They round-trip with the .sapmap file on the next save/exit."""
+        response.content_type = "application/json"
+        data = request.json or {}
+        api.state.snc_secudir = str(data.get("secudir", "") or "")
+        api.state.snc_sapcryptolib = str(data.get("sapcryptolib", "") or "")
+        api.state.snc_identity = str(data.get("snc_identity", "") or "")
+        return json.dumps({"ok": True})
+
     @app.route("/api/settings/local", method="POST")
     def save_local_settings():
         """Save local settings to settings.local.json (gitignored)."""
@@ -10165,69 +10260,6 @@ def create_app(api: SAPMAPApi) -> Bottle:
 
         _bg(f"{sid}:create_user", "Create User", _run)
         return json.dumps({"status": "started"})
-
-    # ── Same-host co-location (issue #70) ───────────────────────────
-    @app.route("/api/node/<sid>/discover_colocated", method="POST")
-    def node_discover_colocated(sid):
-        """List /usr/sap on an owned node and correlate the other SAP SIDs with
-        the map (plots dashed placeholders for unscanned ones)."""
-        response.content_type = "application/json"
-        node = api.state.get_node(sid)
-        if not node:
-            return json.dumps({"error": f"Node {sid} not found"})
-
-        def _run():
-            try:
-                from sap_colocation import discover_colocated_sids
-                res = discover_colocated_sids(node, api.state)
-                if res.get("ok"):
-                    found = [c["sid"] for c in res.get("colocated", [])]
-                    if found:
-                        added = res.get("placeholders_added") or []
-                        print(f"[+] {sid}: co-located SAP instances on host: "
-                              f"{', '.join(found)} "
-                              f"(new on map: {', '.join(added) or 'none'})")
-                    else:
-                        print(f"[*] {sid}: no other SAP instances found under "
-                              f"/usr/sap")
-                else:
-                    print(f"[-] {sid}: co-located discovery could not run "
-                          f"({res.get('reason')})")
-            except Exception as e:
-                print(f"[-] {sid}: co-located discovery error: {e}")
-
-        _bg(f"{sid}:discover_colocated", "Discover Co-located Instances", _run)
-        return json.dumps({"status": "started"})
-
-    @app.route("/api/node/<sid>/pivot_colocated", method="POST")
-    def node_pivot_colocated(sid):
-        """Pivot to co-located SAP system(s) on the same host via their RFC
-        Gateway, reusing the existing gateway primitive.  Body: optional
-        {"target_sid": "<SID>"} for one; otherwise every plotted co-located
-        system on the same host."""
-        response.content_type = "application/json"
-        data = request.json or {}
-        node = api.state.get_node(sid)
-        if not node:
-            return json.dumps({"error": f"Node {sid} not found"})
-        target_sid = (data.get("target_sid") or "").strip()
-
-        from sap_colocation import _resolve_same_host_targets, pivot_colocated
-        targets = _resolve_same_host_targets(node, api.state,
-                                             only_sid=target_sid or None)
-        if not targets:
-            return json.dumps({"error": "no co-located plotted system to pivot "
-                                        "to — run discovery, and scan the "
-                                        "co-located system first"})
-
-        def _run():
-            # Shared orchestration (Gateway, then OS Secure-Store harvest) —
-            # same routine the automatic post-ownership pivot uses.
-            pivot_colocated(node, api.state, only_sid=target_sid or None)
-
-        _bg(f"{sid}:pivot_colocated", "Pivot to Co-located", _run)
-        return json.dumps({"status": "started",
-                           "targets": [t.sid for t in targets]})
 
     # ── MYSAPSSO2 ticket forgery (Phase D commits 7-9) ──────────────
     #

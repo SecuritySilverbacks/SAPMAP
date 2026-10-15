@@ -887,15 +887,6 @@ class SAPNode:
     # promoted in-place (same code path as discovered_via_btp /
     # discovered_via_rfc_g).  Renders dashed on the map until promoted.
     discovered_via_xml: bool = False
-    # True when this placeholder was materialized by same-host co-location
-    # discovery (issue #70): another SAP SID found under /usr/sap on a host we
-    # already own, not yet scanned on its own.  Renders dashed in the host
-    # zone until promoted (same treatment as the other discovered_via_* flags).
-    discovered_via_colocation: bool = False
-    # Other SAP SIDs found installed on THIS node's host (via /usr/sap listing
-    # after OS-command access).  Each entry: {"sid","ip","plotted": bool}
-    # (issue #70 — same-host lateral candidates).
-    colocated_sids: list = field(default_factory=list)
     # True when this node is the transport-domain controller.  Set
     # when TMSMCONF.DOMAINCTL matches this SID.  Rendered as a
     # "CTRL" pill on the map (like the "SAP" badge on DBCON).
@@ -1175,8 +1166,6 @@ class SAPNode:
             "sysinfo_source": self.sysinfo_source,
             "discovered_via_tms": self.discovered_via_tms,
             "discovered_via_xml": self.discovered_via_xml,
-            "discovered_via_colocation": self.discovered_via_colocation,
-            "colocated_sids": list(self.colocated_sids),
             "tms_parent_sid": self.tms_parent_sid,
             "is_tms_controller": self.is_tms_controller,
             "tms_domain": self.tms_domain,
@@ -1330,8 +1319,6 @@ class SAPNode:
             sysinfo_source=d.get("sysinfo_source", ""),
             discovered_via_tms=d.get("discovered_via_tms", False),
             discovered_via_xml=d.get("discovered_via_xml", False),
-            discovered_via_colocation=d.get("discovered_via_colocation", False),
-            colocated_sids=list(d.get("colocated_sids", [])),
             tms_parent_sid=d.get("tms_parent_sid", ""),
             is_tms_controller=d.get("is_tms_controller", False),
             tms_domain=d.get("tms_domain", ""),
@@ -2232,6 +2219,16 @@ class SAPMAPState:
     # (so the GUI side-panel keeps rendering) + on the on-disk loot
     # bundle at ``loot/logon_banners/<run_id>/``.
     logon_banner_runs: list = field(default_factory=list)
+    # SNC (Secure Network Communications) configuration captured from the
+    # Configure SNC modal.  Stored as top-level globals (siblings of
+    # ``nodes``) so the engagement's SNC posture round-trips with the
+    # .sapmap file.  snc_secudir mirrors $SECUDIR, snc_sapcryptolib
+    # holds the resolved path to libsapcrypto.so (empty when it was not
+    # found), snc_identity holds the distinguished name parsed from
+    # `sapgenpse get_my_name` (the PSE's own Subject / CN=..., O=...).
+    snc_secudir: str = ""
+    snc_sapcryptolib: str = ""
+    snc_identity: str = ""
     timestamp: str = ""
     version: str = "1.0"
 
@@ -3413,6 +3410,9 @@ class SAPMAPState:
             "pwspray_locked_users": dict(self.pwspray_locked_users or {}),
             "spray_runs": list(self.spray_runs or []),
             "logon_banner_runs": list(self.logon_banner_runs or []),
+            "snc_secudir": self.snc_secudir,
+            "snc_sapcryptolib": self.snc_sapcryptolib,
+            "snc_identity": self.snc_identity,
         }
 
     @classmethod
@@ -3450,6 +3450,9 @@ class SAPMAPState:
             d.get("pwspray_locked_users", {}))
         state.spray_runs = list(d.get("spray_runs", []))
         state.logon_banner_runs = list(d.get("logon_banner_runs", []))
+        state.snc_secudir = d.get("snc_secudir", "")
+        state.snc_sapcryptolib = d.get("snc_sapcryptolib", "") or ""
+        state.snc_identity = d.get("snc_identity", "")
         # One-shot dedup pass: fold FQDN-keyed placeholder BTP nodes
         # (from earlier materialise_type_g_target runs) into any
         # real-UUID node that shares the same subdomain.  Handles
