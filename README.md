@@ -208,6 +208,7 @@ The OA2C reader uses a three-tier resilience chain: `DDIF_FIELDINFO_GET` for col
 - **Self-contained HTML engagement report** — File → Export Engagement Report writes both Markdown and HTML versions to `loot/reports/`. The HTML is presentable: gradient hero with colour-coded overall-risk pill, 9 KPI cards with delta colouring, severity-coloured finding cards, ranked attack-path table, **inline SVG snapshot of the discovered landscape** (auto-grid layout, ⚡ pwned overlay, red production halo), folded SCC + SAP inventory, masked credentials table, and **structural recommendations derived from state** (gateway ACL, MS ACL, SAProuter ACL, default-cred rotation, SecStore rotation, SCC default creds, IR for pwned PRD, untested-RFC-to-PRD review, etc., each with SAP Note refs)
 - **Diff between two .sapmap snapshots** — File → Diff Two Runs picks any two saved states (or one against the live in-memory state) and writes a self-contained HTML diff to `loot/reports/`. Hero strip is colour-banded ("MAJOR REGRESSION" / "New exposure" / "Remediation progress" / "No major change"), 9 signed-delta KPI cards, sections for new vs. remediated findings, new vs. disappeared trust chains, added/removed/changed nodes with before-after tables, and SCC + RFC connection deltas
 - **Trust-chain analysis** — BFS from every entry-point system across the RFC adjacency graph, ranks paths by severity (CRITICAL/HIGH/MEDIUM/LOW based on production endpoints + SAP_ALL throughout); includes **untested RFC edges** with an explicit `UNTESTED` flag (only proven-broken edges are dropped, so chains landing on PRD aren't silently hidden)
+- **Compliance-framework tagging (issue #28)** — Findings are auto-tagged with the regulatory frameworks they implicate — **SOX, GDPR, NIS2, ISO 27001, DORA** — anchored on the same capability key that drives the MITRE ATT&CK mapping, so a finding already wired for ATT&CK gets compliance tags for free.  Tags render as chips in the GUI findings panel and feed a **Compliance coverage** section in the engagement report (per-framework finding counts + a *Findings by framework* drill-down so an auditor can see **which** findings map to each regulation).  The framework set is an extensible registry (`modules/core/sapmap_compliance.py`) — PCI-DSS / NIST CSF / DSAG-BSI can be added with no code change
 
 ### Evasion & Detection Avoidance (Tier 3)
 - **SAL slot disable** — Temporarily disable Security Audit Log recording slots via shared-memory-only writes (RSAU_UPD_AUDIT_CONFIG), then auto-restore after a configurable hold window.  No disk persistence, no SM19 "Last changed by" header update — stealth path confirmed on kernel 793
@@ -1791,6 +1792,26 @@ The **HTML version** is the one to hand to management:
 - **Recovered credentials** — passwords masked, source / verified pills.
 - **Recommendations** section — combines per-finding remediations with up to 10 **structural categories derived from state** (gateway ACL, MS ACL, SAProuter ACL, Java patching, default-cred rotation, SecStore rotation, SCC default creds, IR for pwned PRD, untested-RFC-to-PRD review, SCC keystore rebuild). Each carries category, scope (SIDs/hosts), title, multi-paragraph body, and SAP Note references. Cards are colour-coded by severity tier.
 - `@media print` rules — prints to PDF cleanly without surprises.
+
+### Compliance Framework Tags (issue #28)
+
+Every finding carries a `compliance_tags` list mapping it to the regulatory frameworks it implicates, so a SAPMAP report doubles as cross-framework audit evidence.  Five frameworks ship mapped:
+
+| Tag | Framework | Control area |
+|-----|-----------|--------------|
+| `SOX` | Sarbanes-Oxley Act (§404 — ICFR) | Internal controls over financial reporting — access governance, segregation of duties |
+| `GDPR` | General Data Protection Regulation (EU) 2016/679 | Confidentiality, integrity & accountability for personal data |
+| `NIS2` | NIS2 Directive (EU) 2022/2555 | Cyber risk-management measures & incident readiness |
+| `ISO27001` | ISO/IEC 27001:2022 (Annex A) | ISMS technical & organisational controls — access, crypto, logging |
+| `DORA` | Digital Operational Resilience Act (EU) 2022/2554 | ICT risk management & operational resilience for financial entities |
+
+**How tagging works** — identical to the MITRE ATT&CK mapping it mirrors.  Tags are resolved from the finding's `attack_capability` key via a central catalog (`modules/core/sapmap_compliance.py`, `COMPLIANCE_MAP`), so any `emit_finding(..., attack_capability=...)` callsite picks up compliance tags automatically — no per-callsite wiring.  A callsite can also pass an explicit `compliance=["PCI-DSS", ...]` list, which is merged on top (unknown framework IDs are allowed through, so the registry extends without a code change).  Findings store only the framework IDs; names and links are resolved at render time (keeping `.sapmap` files small, exactly like ATT&CK storing raw technique IDs).
+
+**Where tags surface:**
+- **GUI findings panel** — green compliance chips next to the ATT&CK pills on each finding.
+- **Engagement report** — a per-finding **Compliance:** line, plus a **Compliance coverage** section: a table of per-framework finding counts (catalog version stamped), followed by a **Findings by framework** drill-down that lists *which* findings (SID + name + severity) map to each regulation.  The whole section is omitted when no finding carries a tag.
+
+> Tags are indicative mappings to help assemble audit evidence — **not** a formal compliance assessment.
 
 ### Diff Two Runs
 
