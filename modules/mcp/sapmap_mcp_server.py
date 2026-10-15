@@ -1416,6 +1416,57 @@ def cleanup(sid: str = "", confirm: bool = False) -> str:
 # ===== TOOLS: Generic passthrough =====
 
 @mcp.tool()
+def colocated_pivot(sid: str, action: str = "discover",
+                    colocated_sid: str = "", confirm: bool = False) -> str:
+    """Same-host co-located SAP pivot (issue #70).
+
+    When several SAP SIDs share one host, owning one box exposes the
+    others — through each sibling's own RFC Gateway, or through a
+    same-host Secure-Store secret harvest that reads the sibling's SSFS
+    files via the owned node's OS-exec channel.  During AutoPwn this runs
+    automatically after a box is owned; this tool drives it on demand.
+
+    Args:
+        sid: the OWNED source node's SID (needs an OS-exec channel).
+        action:
+            "discover" — enumerate co-located SIDs on the owned node's
+                host and plot same-host siblings as placeholders.
+                Read-only; safe to run anytime.
+            "pivot"    — pivot from the owned node to its same-host
+                siblings (Gateway, then Secure-Store harvest).  Creates a
+                SAPMAP user on owned siblings, so it is DESTRUCTIVE and
+                requires confirm=true.  Run "discover" first (and scan the
+                sibling) so there is a plotted same-host target.
+        colocated_sid: restrict a "pivot" to one sibling SID (default:
+            every plotted same-host sibling).
+        confirm: required for action="pivot".
+    """
+    act = (action or "discover").strip().lower()
+    if act in ("discover", "discover_colocated"):
+        resp = _api("POST", f"/api/node/{sid}/discover_colocated", {})
+        _wait_for_tasks(timeout=120)
+        return json.dumps(resp)
+    if act in ("pivot", "pivot_colocated"):
+        if (ro := _read_only_guard()):
+            return ro
+        if not confirm:
+            return json.dumps({
+                "status": "blocked",
+                "message": "action='pivot' creates a SAPMAP user on "
+                           "co-located siblings — set confirm=true.",
+            })
+        payload = {}
+        if colocated_sid:
+            payload["target_sid"] = colocated_sid
+        resp = _api("POST", f"/api/node/{sid}/pivot_colocated", payload)
+        _wait_for_tasks(timeout=600)
+        return json.dumps(resp)
+    return json.dumps({
+        "error": f"unknown action {action!r} — use 'discover' or 'pivot'.",
+    })
+
+
+@mcp.tool()
 def run_sapmap_action(action: str, target: str = "",
                       params: dict = None,
                       confirm: bool = False) -> str:
