@@ -887,6 +887,15 @@ class SAPNode:
     # promoted in-place (same code path as discovered_via_btp /
     # discovered_via_rfc_g).  Renders dashed on the map until promoted.
     discovered_via_xml: bool = False
+    # True when this placeholder was materialized by same-host co-location
+    # discovery (issue #70): another SAP SID found under /usr/sap on a host we
+    # already own, not yet scanned on its own.  Renders dashed in the host
+    # zone until promoted (same treatment as the other discovered_via_* flags).
+    discovered_via_colocation: bool = False
+    # Other SAP SIDs found installed on THIS node's host (via /usr/sap listing
+    # after OS-command access).  Each entry: {"sid","ip","plotted": bool}
+    # (issue #70 — same-host lateral candidates).
+    colocated_sids: list = field(default_factory=list)
     # True when this node is the transport-domain controller.  Set
     # when TMSMCONF.DOMAINCTL matches this SID.  Rendered as a
     # "CTRL" pill on the map (like the "SAP" badge on DBCON).
@@ -1166,6 +1175,8 @@ class SAPNode:
             "sysinfo_source": self.sysinfo_source,
             "discovered_via_tms": self.discovered_via_tms,
             "discovered_via_xml": self.discovered_via_xml,
+            "discovered_via_colocation": self.discovered_via_colocation,
+            "colocated_sids": list(self.colocated_sids),
             "tms_parent_sid": self.tms_parent_sid,
             "is_tms_controller": self.is_tms_controller,
             "tms_domain": self.tms_domain,
@@ -1319,6 +1330,8 @@ class SAPNode:
             sysinfo_source=d.get("sysinfo_source", ""),
             discovered_via_tms=d.get("discovered_via_tms", False),
             discovered_via_xml=d.get("discovered_via_xml", False),
+            discovered_via_colocation=d.get("discovered_via_colocation", False),
+            colocated_sids=list(d.get("colocated_sids", [])),
             tms_parent_sid=d.get("tms_parent_sid", ""),
             is_tms_controller=d.get("is_tms_controller", False),
             tms_domain=d.get("tms_domain", ""),

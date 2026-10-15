@@ -1459,6 +1459,8 @@ body {
       <div class="ctx-item" data-action="ssh_test_keys">&#128640; SSH Lateral Movement (test keys against targets)</div>
       <div class="ctx-sep"></div>
       <div class="ctx-item" data-action="propagate">&#128640; Propagate (exploit next hop)</div>
+      <div class="ctx-item" data-action="discover_colocated">&#128269; Discover Co-located SAP Instances (/usr/sap)</div>
+      <div class="ctx-item" data-action="pivot_colocated">&#128640; Pivot to Co-located via Gateway</div>
       <div class="ctx-item" data-action="harvest_btp_creds">&#9729; Harvest BTP Credentials (lateral to cloud)</div>
       <div class="ctx-item" data-action="verify_pp_impersonation">&#127919; Verify PP Impersonation (Live Probe)</div>
     </div>
@@ -6914,6 +6916,10 @@ function showCtxMenu(e, sid) {
     // separate flag and doesn't care about MS TLS.
     'create_user_betrusted': (hasMsVuln && !msSecureComms) || hasGwVuln,
     'create_user_gw':   hasGwVuln,                  // need GW vulnerability
+    // Same-host co-location (issue #70): discovery needs an owned host; the
+    // pivot needs at least one co-located system already plotted on the map.
+    'discover_colocated': !!n.pwned,
+    'pivot_colocated': !!(n.colocated_sids && n.colocated_sids.some(c => c && c.plotted)),
     'create_user_dpmon_sapstar': hasGwVuln && isAbapStack && n.dpmon_sap_star_available,  // kernel>=790 + ABAP + GW
     // Transport import needs an OS-exec channel on the target.  Two
     // primitives are wired in:
@@ -10030,6 +10036,8 @@ async function ctxAction(action) {
     case 'tms_propagate':    showTMSPropagateModal(sid); break;
     case 'create_tcpip': showTcpipModal(sid); break;
     case 'propagate': showPropagateModal(sid); break;
+    case 'discover_colocated': discoverColocated(sid); break;
+    case 'pivot_colocated': pivotColocated(sid); break;
     case 'harvest_btp_creds': await showHarvestBtpCredsModal(sid); break;
     case 'cleanup':
       if (confirm(`Delete SAPMAP00 user from ${sid}?`))
@@ -10810,6 +10818,46 @@ async function probeCertDest(sid, destName) {
   showToast('Cert-auth probe on ' + destName +
              ' — watch the console for BTP loot / status.', 'info');
   startPolling();
+}
+
+// Same-host co-location (issue #70): list /usr/sap on an owned node to find
+// other SAP SIDs on the host, and pivot to a plotted co-located system via its
+// RFC Gateway (reusing the existing gateway primitive server-side).
+async function discoverColocated(sid) {
+  flashActivity('SAP ' + sid + ': discovering co-located instances', 8000);
+  try {
+    const r = await fetch('/api/node/' + encodeURIComponent(sid) + '/discover_colocated',
+                          { method: 'POST', headers: { 'Content-Type': 'application/json' },
+                            body: '{}' });
+    const d = await r.json();
+    if (d.error) { alert('Discovery failed: ' + d.error); return; }
+    showToast('Scanning /usr/sap on ' + sid + ' — watch the console.', 'info');
+    startPolling();
+  } catch (e) { alert('Discovery error: ' + e); }
+}
+
+async function pivotColocated(sid) {
+  const n = (mapState.nodes || {})[sid];
+  const cands = ((n && n.colocated_sids) || []).filter(c => c && c.plotted)
+                                               .map(c => c.sid);
+  if (!cands.length) {
+    alert('No co-located plotted system to pivot to.  Run "Discover Co-located '
+          + 'SAP Instances" first, and make sure the other system is scanned.');
+    return;
+  }
+  if (!confirm('Pivot to co-located system(s) on this host via their RFC '
+               + 'Gateway: ' + cands.join(', ') + '?\n\nThis reuses the Gateway '
+               + 'user-creation primitive against each.')) return;
+  flashActivity('SAP ' + sid + ': pivoting to co-located instances', 15000);
+  try {
+    const r = await fetch('/api/node/' + encodeURIComponent(sid) + '/pivot_colocated',
+                          { method: 'POST', headers: { 'Content-Type': 'application/json' },
+                            body: '{}' });
+    const d = await r.json();
+    if (d.error) { alert('Pivot failed: ' + d.error); return; }
+    showToast('Pivoting to ' + (d.targets || []).join(', ') + ' — watch the console.', 'info');
+    startPolling();
+  } catch (e) { alert('Pivot error: ' + e); }
 }
 
 async function createUserViaRfc(sourceSid, destName, targetSid) {
