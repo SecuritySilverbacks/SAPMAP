@@ -608,6 +608,12 @@ def enumerate_clients(host, port, timeout=5, max_workers=20,
     """
     result = {"clients": [], "status": "ok", "probed": 0, "errors": 0}
 
+    # Prefix every verbose line with an identifier so concurrent multi-system
+    # scans stay legible.  The SID is best when known; during discovery it
+    # usually isn't yet, so fall back to host:port — the dispatcher port
+    # disambiguates co-located SIDs on one host (e.g. 3200 vs 3202).
+    tag = f"{sid_hint}: " if sid_hint else f"{host}:{port}: "
+
     # Quick init to verify the port is a DIAG dispatcher.  On S/4
     # kernels that enforce SNC (snc/accept_insecure_gui=0) the plain-
     # text DIAG init gets silently rejected (server closes the socket
@@ -646,7 +652,7 @@ def enumerate_clients(host, port, timeout=5, max_workers=20,
                                     if resp else ""))
             return result
         if verbose:
-            print("  DIAG init OK (%d bytes response)" % resp_len)
+            print("  %sDIAG init OK (%d bytes response)" % (tag, resp_len))
     except Exception as e:
         result["status"] = "error"
         result["error"] = (f"DIAG init failed on {host}:{port} — "
@@ -658,7 +664,7 @@ def enumerate_clients(host, port, timeout=5, max_workers=20,
     # enumeration impossible. Detect this before wasting 1000 probes.
     is_redirecting, default_client, _ = _check_client_redirection(host, port, timeout, saprouter=saprouter)
     if is_redirecting:
-        print("  [!] Client redirection/hardening detected — server never returns")
+        print("  [!] %sClient redirection/hardening detected — server never returns" % tag)
         print("      'Client not available', making per-client enumeration impossible.")
         print("      Default client from login screen: %s" % (default_client or "unknown"))
         print("      Note: other clients may exist but cannot be detected via DIAG.")
@@ -686,7 +692,6 @@ def enumerate_clients(host, port, timeout=5, max_workers=20,
             result["probed"] += 1
             try:
                 client_str, available, detail = f.result()
-                tag = f"{sid_hint}: " if sid_hint else ""
                 if available is True:
                     found.append(client_str)
                     if verbose:
