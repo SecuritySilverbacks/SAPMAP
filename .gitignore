@@ -17,6 +17,10 @@ nwrfcsdk/
 # Lab/user-specific target lists — may contain internal IPs/hostnames
 targets.txt
 loot/
+# Password-spray run protocols — contain target SIDs / users / clients and
+# the sprayed password(s); a pentest run artifact that must never be committed.
+pwspray_protocol.json
+*pwspray*protocol*.json
 # Local settings — contains API keys, never push to git
 settings.local.json
 # Sensitive key material — never push to git
