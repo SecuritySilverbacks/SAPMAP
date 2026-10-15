@@ -656,6 +656,15 @@ body {
   text-decoration: none; cursor: pointer; line-height: 14px;
 }
 .attack-pill:hover { background: #2563eb; color: #fff; border-color: #2563eb; }
+/* Compliance-framework chips (issue #28) — same shape as the ATT&CK pills
+   but a green accent so they read as governance tags, not techniques. */
+.compliance-pill {
+  display: inline-block; font-family: system-ui, sans-serif; font-size: 10px;
+  padding: 1px 5px; border-radius: 2px;
+  background: #0f2e24; color: #6ee7b7; border: 1px solid #14532d;
+  text-decoration: none; cursor: pointer; line-height: 14px;
+}
+.compliance-pill:hover { background: #059669; color: #fff; border-color: #059669; }
 /* Remediation badges next to the fix summary (restart needed / online,
    effort estimate, severity if delayed).  Same shape language as the
    ATT&CK pills but in muted grey so they don't fight the green block. */
@@ -6546,6 +6555,33 @@ function renderAttackPills(tids, opts) {
     ? `<span class="attack-pill attack-pill-more" title="${escHtml(tids.slice(maxVisible).join(', '))}">+${extra}</span>`
     : '';
   return `<span class="attack-pills">${pills}${more}</span>`;
+}
+
+// Compliance-framework chips (issue #28).  Tags are framework IDs
+// (SOX/GDPR/NIS2/ISO27001/DORA); resolved here to a short label + link.
+// Unknown IDs (e.g. an explicitly-added framework) render as a plain chip.
+function renderCompliancePills(tags) {
+  if (!tags || !tags.length) return '';
+  const FW = {
+    'SOX':      { name: 'SOX',       url: 'https://www.sec.gov/spotlight/sarbanes-oxley.htm' },
+    'GDPR':     { name: 'GDPR',      url: 'https://eur-lex.europa.eu/eli/reg/2016/679/oj' },
+    'NIS2':     { name: 'NIS2',      url: 'https://eur-lex.europa.eu/eli/dir/2022/2555/oj' },
+    'ISO27001': { name: 'ISO 27001', url: 'https://www.iso.org/standard/27001' },
+    'DORA':     { name: 'DORA',      url: 'https://eur-lex.europa.eu/eli/reg/2022/2554/oj' },
+  };
+  const order = ['SOX', 'GDPR', 'NIS2', 'ISO27001', 'DORA'];
+  const sorted = tags.slice().sort((a, b) => {
+    const ia = order.indexOf(a), ib = order.indexOf(b);
+    return (ia < 0 ? 99 : ia) - (ib < 0 ? 99 : ib);
+  });
+  const pills = sorted.map(fid => {
+    const info = FW[fid];
+    if (info) {
+      return `<a href="${escHtml(info.url)}" target="_blank" rel="noopener noreferrer" class="compliance-pill" title="${escHtml(fid)}">${escHtml(info.name)}</a>`;
+    }
+    return `<span class="compliance-pill" title="${escHtml(fid)}">${escHtml(fid)}</span>`;
+  }).join('');
+  return `<span class="attack-pills">${pills}</span>`;
 }
 
 // Render a remediation block — accepts either a legacy plain string
@@ -14813,6 +14849,7 @@ function showFindings(sid) {
     detail: f.detail || '',
     remediation: f.remediation || '',
     attack_techniques: f.attack_techniques || [],
+    compliance_tags: f.compliance_tags || [],
     _source: 'persistent',
   }));
   const persistentNames = new Set(persistent.map(p => p.name));
@@ -14836,6 +14873,7 @@ function showFindings(sid) {
       detail: f.ref || '',
       remediation: '',
       attack_techniques: f.attack_techniques || [],
+      compliance_tags: f.compliance_tags || [],
       _source: 'live',
       _id: f.id,
       _ts: f.ts,
@@ -14854,6 +14892,7 @@ function showFindings(sid) {
     ${all.map(f => {
       const cls = 'finding-' + (sevMap[f.severity] || 'info');
       const pills = renderAttackPills(f.attack_techniques || [], {max: 4});
+      const cpills = renderCompliancePills(f.compliance_tags || []);
       const sourceTag = f._source === 'live'
         ? ` <span style="font-size:9px;color:#8b949e;border:1px solid #30363d;border-radius:2px;padding:0 4px;vertical-align:middle" title="From the live findings bus (emit_finding) — also visible in the bell-icon log.  Click bell to dismiss.">live</span>`
         : '';
@@ -14861,7 +14900,7 @@ function showFindings(sid) {
         ? `<br><span style="color:#6e7681;font-size:10px;font-family:monospace">${escHtml(f.detail)}</span>`
         : '';
       const remediationLine = renderRemediationBlock(f.remediation);
-      return `<div class="finding-item ${cls}"><strong>${escHtml(f.severity_label || 'INFO')}</strong>${sourceTag} — ${escHtml(f.name)} ${pills}<br><span style="color:#8b949e;font-size:10px">${escHtml(f.description)}</span>${detailLine}${remediationLine}</div>`;
+      return `<div class="finding-item ${cls}"><strong>${escHtml(f.severity_label || 'INFO')}</strong>${sourceTag} — ${escHtml(f.name)} ${pills} ${cpills}<br><span style="color:#8b949e;font-size:10px">${escHtml(f.description)}</span>${detailLine}${remediationLine}</div>`;
     }).join('') || '<div style="color:#484f58">No findings</div>'}
   `;
   panel.classList.add('visible');

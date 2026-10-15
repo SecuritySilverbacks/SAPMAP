@@ -75,6 +75,11 @@ class Finding:
     # source of truth.  Empty list = capability is explicitly un-mapped or
     # the finding pre-dates the mapping addition.
     attack_techniques: list = field(default_factory=list)
+    # Compliance-framework IDs ("SOX", "GDPR", "NIS2", "ISO27001", "DORA")
+    # mapped to this finding's capability.  Names/URLs/control areas are
+    # resolved at render time via modules.core.sapmap_compliance so state
+    # files stay small.  Empty list = un-mapped (issue #28).
+    compliance_tags: list = field(default_factory=list)
 
     def to_dict(self) -> dict:
         # Pass dict-shaped remediation through verbatim; coerce anything
@@ -92,6 +97,7 @@ class Finding:
             "remediation": rem,
             "detail": self.detail,
             "attack_techniques": list(self.attack_techniques or []),
+            "compliance_tags": list(self.compliance_tags or []),
         }
 
     @classmethod
@@ -103,6 +109,7 @@ class Finding:
             remediation=d.get("remediation", ""),
             detail=d.get("detail", ""),
             attack_techniques=list(d.get("attack_techniques", [])),
+            compliance_tags=list(d.get("compliance_tags", [])),
         )
 
 

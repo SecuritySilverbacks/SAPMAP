@@ -106,6 +106,7 @@ def _persist_to_node(record: Dict) -> None:
             detail=record.get("ref", ""),
             remediation=rem,
             attack_techniques=list(record.get("attack_techniques", [])),
+            compliance_tags=list(record.get("compliance_tags", [])),
         ))
     except Exception:
         # Persistence is best-effort.  The bus + console output are
@@ -119,6 +120,7 @@ def emit_finding(severity: str, node: str, msg: str,
                  meta: Optional[Dict] = None,
                  attack_capability: Optional[str] = None,
                  attack_techniques: Optional[List[str]] = None,
+                 compliance: Optional[List[str]] = None,
                  persist_node: bool = True,
                  ) -> Optional[Dict]:
     """Publish a finding.  Returns the stored record, or None if dropped
@@ -129,6 +131,12 @@ def emit_finding(severity: str, node: str, msg: str,
     technique IDs are stored on the record under ``attack_techniques``.
     The kwarg is optional — existing callsites continue to work and
     their findings carry no ATT&CK tags until updated.
+
+    Compliance tagging (issue #28): the SAME ``attack_capability`` key also
+    resolves compliance-framework IDs (SOX/GDPR/NIS2/ISO27001/DORA) via
+    modules.core.sapmap_compliance, stored under ``compliance_tags`` — so a
+    callsite already wired for ATT&CK gets compliance tags for free.  An
+    explicit ``compliance=[...]`` list is merged in on top.
     """
     sev = (severity or "").strip().upper()
     if sev not in SEVERITIES:
@@ -152,6 +160,20 @@ def emit_finding(severity: str, node: str, msg: str,
         for tid in attack_techniques:
             if tid and tid not in resolved_techniques:
                 resolved_techniques.append(tid)
+
+    # Resolve compliance-framework tags (issue #28) — anchored on the same
+    # capability key as ATT&CK, plus any explicit list the caller supplies.
+    resolved_compliance: List[str] = []
+    if attack_capability:
+        try:
+            from sapmap_compliance import frameworks_for
+            resolved_compliance.extend(frameworks_for(attack_capability))
+        except Exception:
+            pass
+    if compliance:
+        for fid in compliance:
+            if fid and fid not in resolved_compliance:
+                resolved_compliance.append(fid)
 
     # Resolve structured remediation from the catalog — same capability
     # key as ATT&CK so we get hardening guidance for free on every emit
@@ -187,6 +209,7 @@ def emit_finding(severity: str, node: str, msg: str,
             "meta": dict(meta or {}),
             "attack_capability":  attack_capability or "",
             "attack_techniques":  resolved_techniques,
+            "compliance_tags":    resolved_compliance,
             "remediation":        remediation_dict,
         }
         _next_id += 1

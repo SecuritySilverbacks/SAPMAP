@@ -432,6 +432,33 @@ def _findings_section(state: SAPMAPState) -> list:
                     out.append(f"**ATT&CK:** {' · '.join(parts)}")
                 except Exception:
                     pass
+            ctags = getattr(f, "compliance_tags", None) or []
+            if ctags:
+                try:
+                    from sapmap_compliance import FRAMEWORKS, FRAMEWORK_ORDER
+                    seen = []
+                    for fid in ctags:
+                        if fid and fid not in seen:
+                            seen.append(fid)
+                    seen.sort(key=lambda x: (FRAMEWORK_ORDER.index(x)
+                                             if x in FRAMEWORK_ORDER else 99))
+                    parts = []
+                    for fid in seen:
+                        fw = FRAMEWORKS.get(fid)
+                        if fw:
+                            parts.append(f"[{fw['name']}]({fw['url']})")
+                        else:
+                            # Non-catalog tag (e.g. an explicit compliance=
+                            # ID not yet in the registry) — render it plain,
+                            # mirroring the ATT&CK line's unknown-ID fallback
+                            # so the per-finding line never silently drops a
+                            # tag the coverage table + GUI still show.
+                            parts.append(_esc(fid))
+                    if parts:
+                        out.append("")
+                        out.append(f"**Compliance:** {' · '.join(parts)}")
+                except Exception:
+                    pass
             out.append("")
     return out
 
@@ -482,6 +509,75 @@ def _attack_coverage_section(state: SAPMAPState) -> list:
         f"_Drop the matching `sapmap_attack_layer.json` into "
         f"[ATT&CK Navigator](https://mitre-attack.github.io/attack-navigator/) "
         f"for the interactive heatmap._")
+    out.append("")
+    return out
+
+
+def _compliance_findings_index(state: SAPMAPState) -> dict:
+    """Reverse index: framework ID -> [(sid, finding_name, severity_label)] so
+    the coverage section can show WHICH findings map to each framework, not just
+    a count (issue #28).  Order follows node SID then finding order."""
+    by_fw: dict = {}
+    for sid, node in sorted(getattr(state, "nodes", {}).items()):
+        for f in (getattr(node, "findings", None) or []):
+            sev = getattr(getattr(f, "severity", None), "name", "")
+            fname = getattr(f, "name", "")
+            for fid in (getattr(f, "compliance_tags", None) or []):
+                by_fw.setdefault(fid, []).append((sid, fname, sev))
+    return by_fw
+
+
+def _compliance_coverage_section(state: SAPMAPState) -> list:
+    """Per-framework summary of compliance tags across all findings (#28)."""
+    try:
+        from sapmap_compliance import (
+            counts_from_findings, FRAMEWORKS, FRAMEWORK_ORDER,
+            COMPLIANCE_VERSION,
+        )
+    except Exception:
+        return []
+
+    all_findings = []
+    for node in getattr(state, "nodes", {}).values():
+        all_findings.extend(getattr(node, "findings", []) or [])
+    counts = counts_from_findings(all_findings)
+    if not counts:
+        return []   # nothing tagged — skip the section entirely
+
+    out = ["## Compliance coverage", ""]
+    out.append(
+        f"Findings in this engagement map to **{len(counts)} framework "
+        f"area(s)** (catalog {COMPLIANCE_VERSION}).  The count is the number "
+        f"of findings evidencing a control gap under each.")
+    out.append("")
+    out.append("| Framework | Findings | Control area |")
+    out.append("| --- | --- | --- |")
+    ordered = ([fid for fid in FRAMEWORK_ORDER if fid in counts]
+               + [fid for fid in counts if fid not in FRAMEWORK_ORDER])
+    for fid in ordered:
+        fw = FRAMEWORKS.get(fid, {})
+        name = fw.get("name", fid)
+        url = fw.get("url", "")
+        area = fw.get("control_area", "")
+        label = f"[{name}]({url})" if url else name
+        out.append(f"| {label} | {counts[fid]} | {_esc(area)} |")
+    out.append("")
+    # Reverse index — which findings map to each framework (the drill-down).
+    by_fw = _compliance_findings_index(state)
+    out.append("### Findings by framework")
+    out.append("")
+    for fid in ordered:
+        name = FRAMEWORKS.get(fid, {}).get("name", fid)
+        rows = by_fw.get(fid, [])
+        out.append(f"**{name}** ({len(rows)})")
+        out.append("")
+        for sid, fname, sev in rows:
+            sevtag = f" _{sev}_" if sev else ""
+            out.append(f"- `{_esc(sid)}` — {_esc(fname)}{sevtag}")
+        out.append("")
+    out.append(
+        "_Tags are indicative mappings to help assemble audit evidence, "
+        "not a formal compliance assessment._")
     out.append("")
     return out
 
@@ -2666,6 +2762,11 @@ def build_markdown_report(state: SAPMAPState,
         sections.append("---")
         sections.append("")
         sections.extend(attack_section)
+    compliance_section = _compliance_coverage_section(state)
+    if compliance_section:
+        sections.append("---")
+        sections.append("")
+        sections.extend(compliance_section)
     sections.append("---")
     sections.append("")
     sections.extend(_trust_chains_section(state))
@@ -3177,6 +3278,72 @@ def _html_attack_coverage_section(state: SAPMAPState) -> str:
         '<table class="grid"><thead><tr>'
         '<th>Tactic</th><th>Techniques</th><th>SIDs touched</th>'
         '</tr></thead><tbody>' + "".join(rows) + '</tbody></table>'
+        '</section>')
+
+
+def _html_compliance_coverage_section(state: SAPMAPState) -> str:
+    """Compliance coverage — per-framework count of tagged findings.
+    Mirrors _compliance_coverage_section (MD).  (issue #28)"""
+    try:
+        from sapmap_compliance import (
+            counts_from_findings, FRAMEWORKS, FRAMEWORK_ORDER,
+            COMPLIANCE_VERSION,
+        )
+    except Exception:
+        return ""
+    all_findings = []
+    for node in getattr(state, "nodes", {}).values():
+        all_findings.extend(getattr(node, "findings", []) or [])
+    counts = counts_from_findings(all_findings)
+    if not counts:
+        return ""
+    ordered = ([fid for fid in FRAMEWORK_ORDER if fid in counts]
+               + [fid for fid in counts if fid not in FRAMEWORK_ORDER])
+    rows = []
+    for fid in ordered:
+        fw = FRAMEWORKS.get(fid, {})
+        name = fw.get("name", fid)
+        url = fw.get("url", "")
+        area = fw.get("control_area", "")
+        label = (f'<a href="{_hesc(url)}" target="_blank" rel="noopener" '
+                 f'style="color:#0969da;text-decoration:none">{_hesc(name)}</a>'
+                 if url else _hesc(name))
+        rows.append(
+            f'<tr><td>{label}</td>'
+            f'<td class="mono">{counts[fid]}</td>'
+            f'<td style="font-size:12px;color:#6b7280">{_hesc(area)}</td>'
+            f'</tr>')
+    # Reverse index — expandable list of WHICH findings map to each framework.
+    by_fw = _compliance_findings_index(state)
+    details = []
+    for fid in ordered:
+        name = FRAMEWORKS.get(fid, {}).get("name", fid)
+        frows = by_fw.get(fid, [])
+        items = "".join(
+            f'<li><span class="mono">{_hesc(sid)}</span> — {_hesc(fname)}'
+            + (f' <em style="color:#6b7280">{_hesc(sev)}</em>' if sev else '')
+            + '</li>'
+            for sid, fname, sev in frows)
+        details.append(
+            f'<details style="margin:4px 0"><summary style="cursor:pointer">'
+            f'<b>{_hesc(name)}</b> '
+            f'<span style="color:#6b7280">({len(frows)})</span></summary>'
+            f'<ul style="margin:4px 0 8px 18px;font-size:13px">{items}</ul>'
+            f'</details>')
+    return (
+        '<section id="sec-compliance">'
+        '<h2>⚖️ Compliance coverage</h2>'
+        '<p style="font-size:12px;color:#6b7280;margin:0 0 12px">'
+        f'Findings map to <b>{len(counts)} framework area(s)</b> '
+        f'(catalog {_hesc(COMPLIANCE_VERSION)}).  The count is the number of '
+        f'findings evidencing a control gap under each.  Indicative mappings '
+        f'to help assemble audit evidence — not a formal assessment.'
+        '</p>'
+        '<table class="grid"><thead><tr>'
+        '<th>Framework</th><th>Findings</th><th>Control area</th>'
+        '</tr></thead><tbody>' + "".join(rows) + '</tbody></table>'
+        '<h3 style="margin:16px 0 6px;font-size:14px">Findings by framework</h3>'
+        + "".join(details) +
         '</section>')
 
 
@@ -4530,6 +4697,7 @@ def build_html_report(state: SAPMAPState,
     cloud_lat_section_html = _html_cloud_lateral_section(state)
     cert_dest_section_html = _html_cert_auth_destinations_section(state)
     attack_coverage_html = _html_attack_coverage_section(state)
+    compliance_coverage_html = _html_compliance_coverage_section(state)
     med_info_html = _html_medium_info_findings_section(state)
     created_users_html = _html_created_users_section(state)
     impact_html = _html_impact_section(state)
@@ -4577,6 +4745,8 @@ def build_html_report(state: SAPMAPState,
                               bool(persistence_html)),
         ("sec-attack",        "🎯 MITRE ATT&CK coverage",
                               bool(attack_coverage_html)),
+        ("sec-compliance",    "⚖️ Compliance coverage",
+                              bool(compliance_coverage_html)),
         ("sec-opsec",         "🥷 OPSEC posture (evasion)",
                               bool(evasion_html)),
         ("sec-recommendations", "📋 Recommendations",    True),
@@ -4852,6 +5022,8 @@ def build_html_report(state: SAPMAPState,
   {persistence_html}
 
   {attack_coverage_html}
+
+  {compliance_coverage_html}
 
   {evasion_html}
 
