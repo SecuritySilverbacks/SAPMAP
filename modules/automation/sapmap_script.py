@@ -1035,6 +1035,32 @@ def _map_step(step: dict) -> tuple:
                 True)
 
     # -----------------------------------------------------------------
+    # Same-host co-located pivot (issue #70)
+    # -----------------------------------------------------------------
+    if action == "discover_colocated":
+        # Enumerate SAP instances that share the target's host — read-only
+        # recon over the OWNED node's OS-exec channel (the SAP process /
+        # instance list).  Populates ``node.colocated_sids`` and plots a
+        # dashed placeholder for each same-host sibling.
+        #   target: an OWNED SAP node SID (needs an OS-exec channel)
+        return ("POST", f"/api/node/{target}/discover_colocated", {}, True)
+
+    if action == "pivot_colocated":
+        # Pivot from an owned node to its same-host co-located sibling(s):
+        # try each sibling's own RFC Gateway, falling back to a same-host
+        # Secure-Store secret harvest through the owned node's OS-exec
+        # channel (issue #70).  Creates a SAPMAP user on owned siblings —
+        # DESTRUCTIVE, so it needs --confirm.  Run ``discover_colocated``
+        # first (and scan the sibling) so there is a plotted same-host
+        # target to pivot to.
+        #   target:        the OWNED source SID
+        #   colocated_sid: restrict to one sibling SID (optional; blank =
+        #                  every plotted same-host sibling)
+        return ("POST", f"/api/node/{target}/pivot_colocated", {
+            "target_sid": step.get("colocated_sid", ""),
+        }, True)
+
+    # -----------------------------------------------------------------
     # Cleanup + landscape-wide sweeps
     # -----------------------------------------------------------------
     if action == "cleanup":
@@ -1216,6 +1242,7 @@ DESTRUCTIVE_ACTIONS = {
     "import_transport",       # STMS transport import (only dry_run is safe)
     "autopwn",                # full scan → exploit → propagate loop
     "tier3_arm_death_star",   # writes 91 KB binary, ptrace-patches disp+work text
+    "pivot_colocated",        # creates a SAPMAP user on co-located siblings
 }
 
 
@@ -1365,6 +1392,9 @@ _ACTION_LABELS = {
     # SCC LPE / capabilities
     "harvest_scc_hashes_via_lpe": "Harvesting SCC hashes via LPE",
     "analyse_capabilities":       "Analysing ATT&CK capabilities",
+    # Same-host co-located pivot (issue #70)
+    "discover_colocated":         "Discovering co-located instances",
+    "pivot_colocated":            "Pivoting to co-located system(s)",
     # Cleanup + landscape-wide
     "cleanup":                    "Cleaning up SAPMAP users",
     "cleanup_all":                "Cleaning up on every node",

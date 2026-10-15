@@ -582,6 +582,77 @@ def _compliance_coverage_section(state: SAPMAPState) -> list:
     return out
 
 
+def _colocated_rows(state: SAPMAPState) -> list:
+    """Shared source of truth for the same-host co-located view (issue #70).
+
+    Returns one tuple per node that has discovered same-host siblings:
+    ``(host, src_sid, src_pwned, [sibling_sids], [compromised_sibling_sids])``.
+    A sibling counts as compromised when a plotted node with that SID is
+    pwned.  Mirrors nothing persistent about the pivot itself (that lives in
+    the findings) — this is the co-residency map derived from
+    ``node.colocated_sids``.
+    """
+    rows = []
+    for _sid, node in sorted(state.nodes.items()):
+        colo = getattr(node, "colocated_sids", None) or []
+        if not colo:
+            continue
+        host = node.ip or node.hostname or "?"
+        sibs, owned = [], []
+        for c in colo:
+            csid = (c.get("sid") if isinstance(c, dict) else str(c)) or "?"
+            if csid not in sibs:
+                sibs.append(csid)
+            try:
+                sn = state.get_node(csid)
+            except Exception:
+                sn = None
+            if sn is not None and getattr(sn, "pwned", False) \
+                    and csid not in owned:
+                owned.append(csid)
+        rows.append((host, node.sid, bool(getattr(node, "pwned", False)),
+                     sibs, owned))
+    return rows
+
+
+def _colocated_section(state: SAPMAPState) -> list:
+    """Same-host co-located SAP systems (issue #70).
+
+    Co-residency is a risk concentration: compromising one box exposes every
+    SAP system on the same host.  Omitted entirely when no node has
+    discovered same-host siblings.
+    """
+    rows = _colocated_rows(state)
+    if not rows:
+        return []
+    out = ["## Same-host co-located systems", ""]
+    out.append(
+        "When multiple SAP systems share a host, compromising one box exposes "
+        "the others — reachable through each sibling's own RFC Gateway, or "
+        "through a same-host Secure-Store secret harvest that reads the "
+        "sibling's SSFS files via the owned box's OS-exec channel (issue #70).  "
+        "During AutoPwn this pivot runs automatically after a box is owned.")
+    out.append("")
+    out.append("| Host | Discovered from | Co-located SIDs | Siblings compromised |")
+    out.append("|------|-----------------|-----------------|----------------------|")
+    for host, src, src_pwned, sibs, owned in rows:
+        src_cell = f"`{_esc(src)}`" + (" ⚡" if src_pwned else "")
+        sib_cell = ", ".join(f"`{_esc(s)}`" for s in sibs) or "—"
+        owned_cell = ", ".join(f"`{_esc(s)}`" for s in owned) if owned else "—"
+        out.append(f"| {_esc(host)} | {src_cell} | {sib_cell} | {owned_cell} |")
+    out.append("")
+    placeholders = sorted(
+        n.sid for n in state.nodes.values()
+        if getattr(n, "discovered_via_colocation", False))
+    if placeholders:
+        out.append(
+            f"_{len(placeholders)} system(s) first surfaced via co-location "
+            f"discovery (plotted as placeholders): "
+            f"{', '.join(_esc(s) for s in placeholders)}._")
+        out.append("")
+    return out
+
+
 def _trust_chains_section(state: SAPMAPState) -> list:
     """Run the chain analyser and emit ranked attack paths."""
     out = ["## Lateral movement / trust chains", ""]
@@ -2772,6 +2843,11 @@ def build_markdown_report(state: SAPMAPState,
     sections.extend(_trust_chains_section(state))
     sections.append("---")
     sections.append("")
+    colocated_section = _colocated_section(state)
+    if colocated_section:
+        sections.extend(colocated_section)
+        sections.append("---")
+        sections.append("")
     pwspray_section = _pwspray_section(state)
     if pwspray_section:
         sections.extend(pwspray_section)
@@ -3344,6 +3420,54 @@ def _html_compliance_coverage_section(state: SAPMAPState) -> str:
         '</tr></thead><tbody>' + "".join(rows) + '</tbody></table>'
         '<h3 style="margin:16px 0 6px;font-size:14px">Findings by framework</h3>'
         + "".join(details) +
+        '</section>')
+
+
+def _html_colocated_section(state: SAPMAPState) -> str:
+    """Same-host co-located SAP systems (issue #70).
+    Mirrors _colocated_section (MD).  Empty string when none discovered."""
+    rows = _colocated_rows(state)
+    if not rows:
+        return ""
+    trs = []
+    for host, src, src_pwned, sibs, owned in rows:
+        src_cell = (f'<span class="mono">{_hesc(src)}</span>'
+                    + (' ⚡' if src_pwned else ''))
+        sib_cell = ", ".join(
+            f'<span class="mono">{_hesc(s)}</span>' for s in sibs) or '—'
+        owned_cell = (", ".join(
+            f'<span class="mono">{_hesc(s)}</span>' for s in owned)
+            if owned else '—')
+        trs.append(
+            f'<tr><td class="mono">{_hesc(host)}</td>'
+            f'<td>{src_cell}</td><td>{sib_cell}</td>'
+            f'<td>{owned_cell}</td></tr>')
+    placeholders = sorted(
+        n.sid for n in state.nodes.values()
+        if getattr(n, "discovered_via_colocation", False))
+    ph_note = ""
+    if placeholders:
+        ph_note = (
+            '<p style="font-size:12px;color:#6b7280;margin:10px 0 0">'
+            f'{len(placeholders)} system(s) first surfaced via co-location '
+            'discovery (plotted as placeholders): '
+            + ", ".join(f'<span class="mono">{_hesc(s)}</span>'
+                        for s in placeholders) + '.</p>')
+    return (
+        '<section id="sec-colocated">'
+        '<h2>🏠 Same-host co-located systems</h2>'
+        '<p style="font-size:12px;color:#6b7280;margin:0 0 12px">'
+        'When multiple SAP systems share a host, compromising one box exposes '
+        'the others — through each sibling\'s own RFC Gateway, or through a '
+        'same-host Secure-Store harvest that reads the sibling\'s SSFS files '
+        'via the owned box\'s OS-exec channel (issue #70).  During AutoPwn this '
+        'pivot runs automatically after a box is owned.'
+        '</p>'
+        '<table class="grid"><thead><tr>'
+        '<th>Host</th><th>Discovered from</th><th>Co-located SIDs</th>'
+        '<th>Siblings compromised</th>'
+        '</tr></thead><tbody>' + "".join(trs) + '</tbody></table>'
+        + ph_note +
         '</section>')
 
 
@@ -4698,6 +4822,7 @@ def build_html_report(state: SAPMAPState,
     cert_dest_section_html = _html_cert_auth_destinations_section(state)
     attack_coverage_html = _html_attack_coverage_section(state)
     compliance_coverage_html = _html_compliance_coverage_section(state)
+    colocated_section_html = _html_colocated_section(state)
     med_info_html = _html_medium_info_findings_section(state)
     created_users_html = _html_created_users_section(state)
     impact_html = _html_impact_section(state)
@@ -4717,6 +4842,8 @@ def build_html_report(state: SAPMAPState,
         ("sec-critical",      "🛑 Critical findings",     True),
         ("sec-high",          "⚠️ High findings",         True),
         ("sec-chains",        "🔗 Trust chains",          True),
+        ("sec-colocated",     "🏠 Same-host co-located",
+                              bool(colocated_section_html)),
         ("sec-pwspray",       "🔓 Password spraying",
                               bool(pwspray_section_html)),
         ("sec-logon-banners", "🔍 Logon-banner secrets",
@@ -4978,6 +5105,8 @@ def build_html_report(state: SAPMAPState,
       <th>Risk</th><th>Path</th><th>Hops</th><th>PRD</th><th>Entry</th>
     </tr></thead><tbody>{chain_rows_html}</tbody></table>
   </section>
+
+  {colocated_section_html}
 
   {pwspray_section_html}
 
