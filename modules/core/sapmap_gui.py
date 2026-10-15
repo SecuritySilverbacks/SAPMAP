@@ -2703,6 +2703,18 @@ def _build_linuxlpe_shell_dispatch(prog: str, params_str: str) -> str:
 # SAPMAPApi — Backend controller
 # ===========================================================================
 
+def _mirror_snc_config(state):
+    """Push the state's SNC posture into sapmap_rfc so authenticated RFC
+    connections can negotiate SNC.  Safe no-op on any error."""
+    try:
+        sapmap_rfc.set_snc_config(
+            secudir=getattr(state, "snc_secudir", "") or "",
+            sapcryptolib=getattr(state, "snc_sapcryptolib", "") or "",
+            identity=getattr(state, "snc_identity", "") or "")
+    except Exception:
+        pass
+
+
 class SAPMAPApi:
     """Backend controller for SAPMAP operations."""
 
@@ -5796,6 +5808,11 @@ def create_app(api: SAPMAPApi) -> Bottle:
         api.state.snc_secudir = str(data.get("secudir", "") or "")
         api.state.snc_sapcryptolib = str(data.get("sapcryptolib", "") or "")
         api.state.snc_identity = str(data.get("snc_identity", "") or "")
+        # Mirror into sapmap_rfc so authenticated connections can use SNC.
+        sapmap_rfc.set_snc_config(
+            secudir=api.state.snc_secudir,
+            sapcryptolib=api.state.snc_sapcryptolib,
+            identity=api.state.snc_identity)
         return json.dumps({"ok": True})
 
     @app.route("/api/settings/local", method="POST")
@@ -7977,6 +7994,27 @@ def create_app(api: SAPMAPApi) -> Bottle:
         else:
             print(f"[*] SAProuter for {sid} removed")
         return json.dumps({"status": "ok"})
+
+    @app.route("/api/node/<sid>/set_snc_name", method="POST")
+    def node_set_snc_name(sid):
+        """Set (or clear) the SNC partner name for a node.
+
+        The value is stored on node.snc_partnername and used as the
+        snc_partnername when establishing authenticated SNC connections.
+        """
+        response.content_type = "application/json"
+        data = request.json or {}
+        node = api.state.get_node(sid)
+        if not node:
+            return json.dumps({"error": f"Node {sid} not found"})
+        new_name = (data.get("snc_partnername") or "").strip()
+        node.snc_partnername = new_name
+        if new_name:
+            print(f"[*] SNC name for {sid} set to: {new_name}")
+        else:
+            print(f"[*] SNC name for {sid} removed")
+        return json.dumps({"status": "ok",
+                            "snc_partnername": node.snc_partnername})
 
     @app.route("/api/node/<sid>/set_telnet_override", method="POST")
     def node_set_telnet_override(sid):
@@ -20525,6 +20563,7 @@ def create_app(api: SAPMAPApi) -> Bottle:
                 sapmap_findings.attach_state(api.state)
             except Exception:
                 pass
+            _mirror_snc_config(api.state)
             return json.dumps({"status": "ok"})
         except Exception as e:
             return json.dumps({"error": str(e)})
@@ -20542,6 +20581,7 @@ def create_app(api: SAPMAPApi) -> Bottle:
                 sapmap_findings.attach_state(api.state)
             except Exception:
                 pass
+            _mirror_snc_config(api.state)
             if isinstance(data, dict) and data.get("_findings"):
                 try:
                     sapmap_findings.load_snapshot(data["_findings"])

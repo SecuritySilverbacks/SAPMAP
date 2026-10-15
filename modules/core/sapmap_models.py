@@ -724,6 +724,10 @@ class SAPNode:
     impact_results: list = field(default_factory=list)   # [ImpactResult.to_dict(), ...]
     saprouter: str = ""                 # SAProuter route string prefix (e.g., "/H/router/S/3299/W/pass")
     saprouter_info: dict = field(default_factory=dict)  # SAProuter info leak results
+    # SNC partner name ( application server SNC identity, e.g.
+    # "p:CN=SID, O=Org, C=DE").  Operator-supplied; used as the
+    # snc_partnername when establishing authenticated SNC connections.
+    snc_partnername: str = ""
     # SNC (Secure Network Communications) posture — info only, no Finding.
     # Populated by modules.protocols.sap_snc (scan_snc_diag / scan_snc_router).
     # Shape: {checked, protocol, host, port, enabled, enforced, qop_use,
@@ -1119,6 +1123,7 @@ class SAPNode:
             "impact_results": self.impact_results,
             "saprouter": self.saprouter,
             "saprouter_info": self.saprouter_info,
+            "snc_partnername": self.snc_partnername,
             "snc_info": dict(self.snc_info or {}),
             "ms_info_leak": dict(self.ms_info_leak or {}),
             "scc_links": list(self.scc_links),
@@ -1265,6 +1270,7 @@ class SAPNode:
             impact_results=d.get("impact_results", []),
             saprouter=d.get("saprouter", ""),
             saprouter_info=d.get("saprouter_info", {}),
+            snc_partnername=d.get("snc_partnername", ""),
             snc_info=dict(d.get("snc_info", {})),
             ms_info_leak=dict(d.get("ms_info_leak", {})),
             scc_links=list(d.get("scc_links", [])),

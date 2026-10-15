@@ -1596,6 +1596,7 @@ body {
       <div class="ctx-item" data-action="set_os_type">&#9881; Set OS Type</div>
       <div class="ctx-item" data-action="set_instance_nr">&#9881; Set Instance Number</div>
       <div class="ctx-item" data-action="set_saprouter">&#128268; Set SAProuter</div>
+      <div class="ctx-item" data-action="set_snc_name">&#128272; Add SNC Name</div>
       <div class="ctx-item" data-action="set_telnet_override">&#128279; Set Telnet Endpoint (SSH tunnel)</div>
     </div>
   </div>
@@ -2741,6 +2742,23 @@ body {
     <div class="form-actions">
       <button class="btn btn-primary" onclick="saveSaprouter()">Save</button>
       <button class="btn" onclick="closeModal('saprouter-modal')">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<!-- Add SNC Name Modal -->
+<div class="modal-overlay" id="snc-name-modal">
+  <div class="modal" onkeydown="if(event.key==='Enter'){event.preventDefault();saveSncName();}">
+    <h3>&#128272; Add SNC Name</h3>
+    <div id="snc-name-system-info" style="font-size:12px;color:#8b949e;margin-bottom:12px"></div>
+    <div class="form-row">
+      <label>SNC Partner Name</label>
+      <input type="text" id="snc-name-input" placeholder="p:CN=SID, O=Org, C=DE" style="width:100%">
+      <span style="font-size:10px;color:#484f58;margin-top:2px;display:block">Application server SNC identity (snc_partnername). Leave empty to remove.</span>
+    </div>
+    <div class="form-actions">
+      <button class="btn btn-primary" onclick="saveSncName()">Save</button>
+      <button class="btn" onclick="closeModal('snc-name-modal')">Cancel</button>
     </div>
   </div>
 </div>
@@ -7234,6 +7252,7 @@ function showCtxMenu(e, sid) {
     'check_ms_info_leak': !isSaprouter,             // MS HTTP dump probe; SAProuters have no MS
     'router_scan':      true,                       // always (probes via SAProuter, no creds)
     'set_saprouter':    true,                       // always available
+    'set_snc_name':     true,                       // always available
     'set_telnet_override': isJavaStack,              // only meaningful for Java stacks
     'delete_system':    true,                       // always available
   };
@@ -10197,6 +10216,7 @@ async function ctxAction(action) {
       showPwsprayModal({ single_sid: sid });
       break;
     case 'set_saprouter': showSaprouterModal(sid); break;
+    case 'set_snc_name': showSncNameModal(sid); break;
     case 'harvest_scc': {
       const nh = (mapState.nodes || {})[sid];
       const canHarvest = nh && (nh.gw_vulnerable || nh.cve_2025_31324_vulnerable);
@@ -11323,6 +11343,7 @@ function showDetails(sid, opts) {
             : 'Not checked'
       }</span></div>` : ''}
       ${n.saprouter ? `<div class="detail-row"><span class="detail-key">SAProuter</span><span class="detail-val" style="color:#d29922">${escHtml(n.saprouter)}</span></div>` : ''}
+      ${n.snc_partnername ? `<div class="detail-row"><span class="detail-key">SNC Name</span><span class="detail-val" style="color:#d29922">${escHtml(n.snc_partnername)}</span></div>` : ''}
       ${n.java_secstore_checked ? `
       <div class="detail-row"><span class="detail-key">Java Secure Store</span><span class="detail-val">${
         (() => {
@@ -15408,6 +15429,15 @@ function showSaprouterModal(sid) {
   document.getElementById('saprouter-input').focus();
 }
 
+function showSncNameModal(sid) {
+  const n = (mapState.nodes || {})[sid];
+  document.getElementById('snc-name-system-info').textContent =
+    sid + (n && n.snc_partnername ? ' (current: ' + n.snc_partnername + ')' : ' (no SNC name set)');
+  document.getElementById('snc-name-input').value = (n && n.snc_partnername) || '';
+  document.getElementById('snc-name-modal').classList.add('visible');
+  document.getElementById('snc-name-input').focus();
+}
+
 // =====================================================================
 //  MYSAPSSO2 ticket-forgery workflow — UI handlers
 // =====================================================================
@@ -15806,6 +15836,12 @@ async function saveSaprouter() {
   const val = document.getElementById('saprouter-input').value.trim();
   await api('POST', `node/${selectedNodeSid}/set_saprouter`, { saprouter: val });
   closeModal('saprouter-modal');
+  startPolling();
+}
+async function saveSncName() {
+  const val = document.getElementById('snc-name-input').value.trim();
+  await api('POST', `node/${selectedNodeSid}/set_snc_name`, { snc_partnername: val });
+  closeModal('snc-name-modal');
   startPolling();
 }
 
