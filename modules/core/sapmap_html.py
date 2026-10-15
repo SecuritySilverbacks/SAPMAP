@@ -1460,7 +1460,7 @@ body {
       <div class="ctx-sep"></div>
       <div class="ctx-item" data-action="propagate">&#128640; Propagate (exploit next hop)</div>
       <div class="ctx-item" data-action="discover_colocated">&#128269; Discover Co-located SAP Instances (/usr/sap)</div>
-      <div class="ctx-item" data-action="pivot_colocated">&#128640; Pivot to Co-located via Gateway</div>
+      <div class="ctx-item" data-action="pivot_colocated">&#128640; Pivot to Co-located (Gateway, then OS Secure-Store harvest)</div>
       <div class="ctx-item" data-action="harvest_btp_creds">&#9729; Harvest BTP Credentials (lateral to cloud)</div>
       <div class="ctx-item" data-action="verify_pp_impersonation">&#127919; Verify PP Impersonation (Live Probe)</div>
     </div>
@@ -10845,9 +10845,12 @@ async function pivotColocated(sid) {
           + 'SAP Instances" first, and make sure the other system is scanned.');
     return;
   }
-  if (!confirm('Pivot to co-located system(s) on this host via their RFC '
-               + 'Gateway: ' + cands.join(', ') + '?\n\nThis reuses the Gateway '
-               + 'user-creation primitive against each.')) return;
+  if (!confirm('Pivot to co-located system(s) on this host: ' + cands.join(', ')
+               + '?\n\nTries each sibling\'s RFC Gateway first; when that is '
+               + 'rejected (the sibling trusts only localhost / internal_hosts), '
+               + 'falls back to reading its Secure Store off /usr/sap through '
+               + 'THIS node\'s OS-exec channel to recover its DB-connect '
+               + 'credentials.')) return;
   flashActivity('SAP ' + sid + ': pivoting to co-located instances', 15000);
   try {
     const r = await fetch('/api/node/' + encodeURIComponent(sid) + '/pivot_colocated',
