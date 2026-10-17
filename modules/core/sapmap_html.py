@@ -130,6 +130,10 @@ body {
   display: inline-flex; align-items: center; gap: 4px;
 }
 .btn:hover { background: #30363d; border-color: #8b949e; }
+.btn:disabled, .btn:disabled:hover {
+  opacity: 0.45; cursor: not-allowed;
+  background: #21262d; border-color: #30363d;
+}
 .btn-primary { background: #238636; border-color: #2ea043; color: #fff; }
 .btn-primary:hover { background: #2ea043; }
 .btn-danger { background: #da3633; border-color: #f85149; color: #fff; }
@@ -1111,6 +1115,7 @@ body {
       <div class="dd-item" onclick="clearCreatedDestinations()">&#128465; Clear TCP/IP Destinations List</div>
       <div class="dd-sep"></div>
       <div class="dd-header">Add / configure</div>
+      <div class="dd-item" onclick="showConfigureSncModal()">&#128274; Configure SNC</div>
       <div class="dd-item" onclick="showAddSystemModal()">&#10133; Add System Manually</div>
       <div class="dd-item" onclick="showSetPasswordModal()">&#128273; Set Default Password</div>
       <div class="dd-item" onclick="showHashesApiKeyModal()">&#128273; Set hashes.com API Key</div>
@@ -1602,6 +1607,7 @@ body {
       <div class="ctx-item" data-action="set_os_type">&#9881; Set OS Type</div>
       <div class="ctx-item" data-action="set_instance_nr">&#9881; Set Instance Number</div>
       <div class="ctx-item" data-action="set_saprouter">&#128268; Set SAProuter</div>
+      <div class="ctx-item" data-action="set_snc_name">&#128272; Add SNC Name</div>
       <div class="ctx-item" data-action="set_telnet_override">&#128279; Set Telnet Endpoint (SSH tunnel)</div>
     </div>
   </div>
@@ -2356,6 +2362,43 @@ body {
   </div>
 </div>
 
+<!-- Configure SNC Modal -->
+<div class="modal-overlay" id="snc-config-modal">
+  <div class="modal" style="max-width:560px">
+    <h3>&#128274; Configure SNC</h3>
+    <div style="font-size:12px;color:#8b949e;margin-bottom:12px;line-height:1.5">
+      Secure Network Communications (SNC) requires the SAP Cryptographic
+      Library and a configured <code>SECUDIR</code>.  The checks below reflect
+      the environment of the running SAPMAP process.
+    </div>
+    <div class="form-row">
+      <label>SECUDIR</label>
+      <div id="snc-secudir" style="font-family:monospace;font-size:12px;color:#c9d1d9;word-break:break-all;overflow-wrap:anywhere">&mdash;</div>
+    </div>
+    <div class="form-row">
+      <label>sapcryptolib</label>
+      <div id="snc-sapcryptolib" style="font-family:monospace;font-size:12px;color:#c9d1d9">&mdash;</div>
+    </div>
+    <div class="form-row">
+      <label>SNC Identity</label>
+      <input type="text" id="snc-identity" readonly placeholder="(run Test SNC Configuration)" autocomplete="off" style="background:#0d1117;color:#c9d1d9;cursor:default">
+    </div>
+    <div class="form-row">
+      <label>Status</label>
+      <div id="snc-status" style="font-size:12px;font-weight:600;color:#c9d1d9">&mdash;</div>
+    </div>
+    <div class="form-row" id="snc-output-row" style="display:none">
+      <label>Output</label>
+      <textarea id="snc-output" readonly rows="8" style="width:100%;font-family:monospace;font-size:11px;background:#0d1117;color:#c9d1d9;border:1px solid #30363d;border-radius:4px;padding:8px;resize:vertical;white-space:pre;overflow:auto"></textarea>
+    </div>
+    <div class="form-actions">
+      <button class="btn btn-primary" id="snc-test-btn" onclick="testSncConfiguration()">Test SNC Configuration</button>
+      <button class="btn btn-primary" id="snc-save-btn" onclick="saveSncConfig()">Save</button>
+      <button class="btn" onclick="closeModal('snc-config-modal')">Close</button>
+    </div>
+  </div>
+</div>
+
 <!-- SAPology Path Modal (Deep Scan) -->
 <div class="modal-overlay" id="sapology-path-modal">
   <div class="modal" style="max-width:560px">
@@ -2696,6 +2739,24 @@ body {
     </div>
   </div>
 </div>
+
+<!-- Add SNC Name Modal -->
+<div class="modal-overlay" id="snc-name-modal">
+  <div class="modal" onkeydown="if(event.key==='Enter'){event.preventDefault();saveSncName();}">
+    <h3>&#128272; Add SNC Name</h3>
+    <div id="snc-name-system-info" style="font-size:12px;color:#8b949e;margin-bottom:12px"></div>
+    <div class="form-row">
+      <label>SNC Partner Name</label>
+      <input type="text" id="snc-name-input" placeholder="p:CN=SID, O=Org, C=DE" style="width:100%">
+      <span style="font-size:10px;color:#484f58;margin-top:2px;display:block">Application server SNC identity (snc_partnername). Leave empty to remove.</span>
+    </div>
+    <div class="form-actions">
+      <button class="btn btn-primary" onclick="saveSncName()">Save</button>
+      <button class="btn" onclick="closeModal('snc-name-modal')">Cancel</button>
+    </div>
+  </div>
+</div>
+
 
 <!-- Set SAProuter Modal -->
 <div class="modal-overlay" id="saprouter-modal">
@@ -7234,6 +7295,7 @@ function showCtxMenu(e, sid) {
     'check_ms_info_leak': !isSaprouter,             // MS HTTP dump probe; SAProuters have no MS
     'router_scan':      true,                       // always (probes via SAProuter, no creds)
     'set_saprouter':    true,                       // always available
+    'set_snc_name':     true,                       // always available
     'set_telnet_override': isJavaStack,              // only meaningful for Java stacks
     'delete_system':    true,                       // always available
   };
@@ -10199,6 +10261,7 @@ async function ctxAction(action) {
       showPwsprayModal({ single_sid: sid });
       break;
     case 'set_saprouter': showSaprouterModal(sid); break;
+    case 'set_snc_name': showSncNameModal(sid); break;
     case 'harvest_scc': {
       const nh = (mapState.nodes || {})[sid];
       const canHarvest = nh && (nh.gw_vulnerable || nh.cve_2025_31324_vulnerable);
@@ -11368,6 +11431,8 @@ function showDetails(sid, opts) {
             : 'Not checked'
       }</span></div>` : ''}
       ${n.saprouter ? `<div class="detail-row"><span class="detail-key">SAProuter</span><span class="detail-val" style="color:#d29922">${escHtml(n.saprouter)}</span></div>` : ''}
+      ${n.snc_partnername ? `<div class="detail-row"><span class="detail-key">SNC Name</span><span class="detail-val" style="color:#d29922">${escHtml(n.snc_partnername)}</span></div>` : ''}
+
       ${n.java_secstore_checked ? `
       <div class="detail-row"><span class="detail-key">Java Secure Store</span><span class="detail-val">${
         (() => {
@@ -14318,6 +14383,144 @@ async function saveSdkPath() {
   }
 }
 
+// Last /api/snc/status payload — lets Save persist the real values
+// (incl. the resolved libsapcrypto.so path) without re-parsing the
+// modal's display text.
+let _sncStatus = null;
+
+async function showConfigureSncModal() {
+  // Pull the live SNC prerequisites (SECUDIR + libsapcrypto.so presence)
+  // from the backend and render them.  Status reads "ok" only when both
+  // conditions hold; otherwise "SNC Configuration not ok!".
+  const secEl = document.getElementById('snc-secudir');
+  const libEl = document.getElementById('snc-sapcryptolib');
+  const statEl = document.getElementById('snc-status');
+  const testBtn = document.getElementById('snc-test-btn');
+  const outRow = document.getElementById('snc-output-row');
+  const outEl = document.getElementById('snc-output');
+  const identEl = document.getElementById('snc-identity');
+  if (secEl) secEl.textContent = '…';
+  if (libEl) libEl.textContent = '…';
+  if (statEl) { statEl.textContent = '…'; statEl.style.color = '#c9d1d9'; }
+  // Reset any prior test output when re-opening the modal.
+  if (outRow) outRow.style.display = 'none';
+  if (outEl) outEl.value = '';
+  if (identEl) identEl.value = '';
+  // Keep the Test button disabled until we confirm the config is ok —
+  // a failed/incomplete config has nothing to test.
+  if (testBtn) testBtn.disabled = true;
+  try {
+    const d = await fetch('/api/snc/status').then(r => r.json());
+    _sncStatus = d;
+    if (secEl) secEl.textContent = d.secudir || '(not set)';
+    if (libEl) libEl.textContent = d.sapcryptolib
+      ? (d.sapcryptolib_path || '(found)')
+      : '❌ libsapcrypto.so not found';
+    if (statEl) {
+      if (d.ok) {
+        statEl.textContent = 'SNC Configuration ok';
+        statEl.style.color = '#3fb950';
+      } else {
+        statEl.textContent = 'SNC Configuration not ok!';
+        statEl.style.color = '#f85149';
+      }
+    }
+    if (identEl) identEl.value = d.snc_identity || '';
+    if (testBtn) testBtn.disabled = !d.ok;
+  } catch(e) {
+    _sncStatus = null;
+    if (secEl) secEl.textContent = '(error)';
+    if (libEl) libEl.textContent = '(error)';
+    if (statEl) {
+      statEl.textContent = 'SNC Configuration not ok!';
+      statEl.style.color = '#f85149';
+    }
+    if (testBtn) testBtn.disabled = true;
+  }
+  document.getElementById('snc-config-modal').classList.add('visible');
+}
+
+async function testSncConfiguration() {
+  // Run `sapgenpse get_my_name` in $SECUDIR on the backend and show the
+  // raw OS output.  Status flips to OK only when the child process exits
+  // with return code 0; any failure (including a missing sapgenpse
+  // executable) sets "SNC Configuration not ok".
+  const statEl = document.getElementById('snc-status');
+  const outRow = document.getElementById('snc-output-row');
+  const outEl = document.getElementById('snc-output');
+  const identEl = document.getElementById('snc-identity');
+  const testBtn = document.getElementById('snc-test-btn');
+  if (testBtn) testBtn.disabled = true;
+  if (outRow) outRow.style.display = '';
+  if (outEl) outEl.value = 'Running sapgenpse get_my_name …';
+  try {
+    const d = await fetch('/api/snc/test', {method: 'POST'}).then(r => r.json());
+    if (outEl) outEl.value = d.output || '(no output)';
+    if (statEl) {
+      if (d.ok) {
+        statEl.textContent = 'OK';
+        statEl.style.color = '#3fb950';
+        // On success, lift the PSE's own distinguished name out of the
+        // `sapgenpse get_my_name` output and mirror it into the
+        // read-only SNC Identity field.  sapgenpse prints a line like
+        //   Subject : CN=SID, O=SOMEORG
+        const subj = parseSncSubject(d.output || '');
+        if (identEl && subj) identEl.value = 'p:' + subj;
+      } else {
+        statEl.textContent = 'SNC Configuration not ok!';
+        statEl.style.color = '#f85149';
+      }
+    }
+  } catch(e) {
+    if (outEl) outEl.value = 'Request failed: ' + e;
+    if (statEl) {
+      statEl.textContent = 'SNC Configuration not ok!';
+      statEl.style.color = '#f85149';
+    }
+  } finally {
+    if (testBtn) testBtn.disabled = false;
+  }
+}
+
+function parseSncSubject(output) {
+  // Pull the distinguished name out of a `sapgenpse get_my_name` dump.
+  // The tool prints a line such as:
+  //   Subject : CN=SID, O=SOMEORG
+  // Tolerate optional whitespace around the colon and surrounding quotes.
+  const m = /^\s*Subject\s*:\s*(.+?)\s*$/im.exec(output || '');
+  if (!m) return '';
+  return m[1].replace(/^["']|["']$/g, '').trim();
+}
+
+async function saveSncConfig() {
+  // Persist SECUDIR, sapcryptolib and SNC Identity into the engagement
+  // state (top-level globals, siblings of `nodes`).  Reads the values
+  // straight off the modal's current display.
+  const identEl = document.getElementById('snc-identity');
+  const payload = {
+    secudir: (_sncStatus && _sncStatus.secudir) || '',
+    // Persist the resolved libsapcrypto.so path (empty when absent).
+    sapcryptolib: (_sncStatus && _sncStatus.sapcryptolib)
+      ? (_sncStatus.sapcryptolib_path || '') : '',
+    snc_identity: identEl ? (identEl.value || '').trim() : '',
+  };
+  try {
+    const d = await fetch('/api/snc/save', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(payload),
+    }).then(r => r.json());
+    if (d.ok) {
+      showToast('SNC configuration saved to state.', 'success');
+    } else {
+      showToast('Failed to save SNC configuration: ' + (d.error || '?'), 'error');
+    }
+  } catch(e) {
+    showToast('Failed to save SNC configuration: ' + e, 'error');
+  }
+}
+
+
 async function showSapologyPathModal() {
   // Populates the current value + status line for the SAPology path.
   // Mirrors showSdkPathModal but keeps the flow simple — SAPology is
@@ -15319,6 +15522,15 @@ function showSaprouterModal(sid) {
   document.getElementById('saprouter-input').focus();
 }
 
+function showSncNameModal(sid) {
+  const n = (mapState.nodes || {})[sid];
+  document.getElementById('snc-name-system-info').textContent =
+    sid + (n && n.snc_partnername ? ' (current: ' + n.snc_partnername + ')' : ' (no SNC name set)');
+  document.getElementById('snc-name-input').value = (n && n.snc_partnername) || '';
+  document.getElementById('snc-name-modal').classList.add('visible');
+  document.getElementById('snc-name-input').focus();
+}
+
 // =====================================================================
 //  MYSAPSSO2 ticket-forgery workflow — UI handlers
 // =====================================================================
@@ -15719,6 +15931,14 @@ async function saveSaprouter() {
   closeModal('saprouter-modal');
   startPolling();
 }
+
+async function saveSncName() {
+  const val = document.getElementById('snc-name-input').value.trim();
+  await api('POST', `node/${selectedNodeSid}/set_snc_name`, { snc_partnername: val });
+  closeModal('snc-name-modal');
+  startPolling();
+}
+
 
 // ---------------------------------------------------------------------
 // Issue #68 — DIAG logon-banner secret scan.
