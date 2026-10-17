@@ -197,8 +197,21 @@ def _get_connection(node: SAPNode, creds: Credentials = None,
     if creds is None:
         raise ValueError(f"No credentials available for {node.sid}")
 
-    host = host_override.strip() if host_override else (
-        node.ip or node.hostname)
+    if host_override:
+        host = host_override.strip()
+    else:
+        # Pick the host of the instance matching the credentials'
+        # instance number — a node can carry several instances on
+        # different hosts, and node.ip/node.hostname is not
+        # necessarily the one we're authenticating against.
+        want_nr = (creds.instance_nr or "").strip().zfill(2)
+        host = ""
+        for inst in (node.instances or []):
+            if (inst.instance_nr or "").strip().zfill(2) == want_nr:
+                host = inst.ip
+                break
+        if not host:
+            host = node.ip or node.hostname
     params = {
         "ashost": host,
         "sysnr": creds.instance_nr,
