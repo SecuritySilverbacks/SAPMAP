@@ -1625,6 +1625,7 @@ Now SAPMAP is capable of speaking RFC over SNC. SAPMAP chooses to speak SNC to a
 * Only supported in combination with `libsapnwrfc`.
 * No coexistance of SNC and non-SNC for an individual system. Either SNC exclusive or plain RFC.
 * Only Linux OS is currently supported.
+* When establishing the connection, the flag `snc_sso=0` is set. This means that SNC only cryptographically secures the transport layer. Client authentication is left to application layer. I.e. you still need to have valid credentialy to connect to the target.
 
 ## SAP Secure Store (RSECTAB) Decryption
 
