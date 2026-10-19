@@ -266,7 +266,7 @@ def _get_connection(node: SAPNode, creds: Credentials = None,
         if not node_snc_name:
             missing.append("node.snc_partnername")
         #print(f"[*] {node.sid}: SNC params NOT added to connection "
-              f"(missing: {', '.join(missing)})")
+        #      f"(missing: {', '.join(missing)})")
 
     return RFCConnection(sdk_path=_sdk_path, **params)
 
