@@ -119,6 +119,31 @@ def set_pure_rfc(enabled: bool):
     global _use_pure_rfc
     _use_pure_rfc = enabled
 
+# SNC configuration mirrored from the global SAPMAPState (snc_secudir,
+# snc_sapcryptolib, snc_identity).  Kept here as a module global — same
+# pattern as _sdk_path — because _get_connection() has no handle to the
+# live state.  Callers (GUI SNC-save route, state load) push the current
+# values via set_snc_config() so authenticated connections can negotiate
+# SNC when the operator has configured an identity.
+_snc_config = {"secudir": "", "sapcryptolib": "", "identity": ""}
+
+
+def set_snc_config(secudir: str = "", sapcryptolib: str = "",
+                   identity: str = ""):
+    """Mirror the global state's SNC posture into this module.
+
+    Pass the SAPMAPState.snc_secudir / snc_sapcryptolib / snc_identity
+    values.  Empty strings clear a field.
+    """
+    global _snc_config
+    _snc_config = {
+        "secudir": (secudir or "").strip(),
+        "sapcryptolib": (sapcryptolib or "").strip(),
+        "identity": (identity or "").strip(),
+    }
+
+
+
 
 _logged_auto_fallback = False
 
@@ -240,7 +265,7 @@ def _get_connection(node: SAPNode, creds: Credentials = None,
             missing.append("state.snc_identity")
         if not node_snc_name:
             missing.append("node.snc_partnername")
-        print(f"[*] {node.sid}: SNC params NOT added to connection "
+        #print(f"[*] {node.sid}: SNC params NOT added to connection "
               f"(missing: {', '.join(missing)})")
 
     return RFCConnection(sdk_path=_sdk_path, **params)
