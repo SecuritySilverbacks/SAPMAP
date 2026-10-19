@@ -212,6 +212,37 @@ def _get_connection(node: SAPNode, creds: Credentials = None,
     if node.saprouter:
         params["saprouter"] = node.saprouter
 
+    # SNC (Secure Network Communications): only negotiate SNC when the
+    # operator has fully configured the global SNC posture (SECUDIR,
+    # sapcryptolib and our own SNC identity) AND this node has an SNC
+    # partner name set (node.snc_partnername, from "Add SNC Name").
+    snc_secudir = _snc_config.get("secudir", "")
+    snc_sapcryptolib = _snc_config.get("sapcryptolib", "")
+    snc_identity = _snc_config.get("identity", "")
+    node_snc_name = (getattr(node, "snc_partnername", "") or "").strip()
+    if snc_secudir and snc_sapcryptolib and snc_identity and node_snc_name:
+        params["snc_sso"] = "0"
+        params["snc_myname"] = snc_identity
+        params["snc_partnername"] = node_snc_name
+        params["snc_lib"] = snc_sapcryptolib
+        print(f"[*] {node.sid}: SNC params added to connection "
+              f"(snc_myname={snc_identity!r}, "
+              f"snc_partnername={node_snc_name!r}, "
+              f"snc_lib={snc_sapcryptolib!r})")
+
+    else:
+        missing = []
+        if not snc_secudir:
+            missing.append("state.snc_secudir")
+        if not snc_sapcryptolib:
+            missing.append("state.snc_sapcryptolib")
+        if not snc_identity:
+            missing.append("state.snc_identity")
+        if not node_snc_name:
+            missing.append("node.snc_partnername")
+        print(f"[*] {node.sid}: SNC params NOT added to connection "
+              f"(missing: {', '.join(missing)})")
+
     return RFCConnection(sdk_path=_sdk_path, **params)
 
 
