@@ -58,6 +58,7 @@ SAPMAP discovers SAP systems on a network, maps RFC connections between them, ex
 - [SOAP-RFC over HTTP](#soap-rfc-over-http-firewalled-targets)
 - [Propagation](#propagation)
 - [SAProuter Support](#saprouter-support)
+- [SNC Support](#snc-support)
 - [SAP Secure Store Decryption](#sap-secure-store-rsectab-decryption)
 - [SAP Cloud Connector (SCC)](#sap-cloud-connector-scc)
 - [File Browser](#file-browser)
@@ -187,6 +188,11 @@ The OA2C reader uses a three-tier resilience chain: `DDIF_FIELDINFO_GET` for col
 - **Per-system configuration** — Set SAProuter string per system via right-click menu or manual add dialog
 - **Automatic inheritance** — Target systems discovered via RFC connections inherit the source's SAProuter
 - **RFC SDK integration** — NW RFC SDK's native `saprouter` parameter used for authenticated connections
+
+### SNC Support
+- **Installation** — SAPCRYPTOLIB package, SECUDIR configuration and PSE file. Configuration of SNC names.
+- **Usage** — How to use it while working with SAPMAP
+- **Constraints** — There are some
 
 ### Data Extraction
 - **Password hash download (5-method fallback chain)** — (1) SXPG database CLI for full BCODE/PASSCODE/PWDSALTEDHASH via `sqlplus` / `hdbsql` / `sqlcmd` — (2) wide RFC_READ_TABLE on USR02 with all fields — (3) RAW-less retry (PWDSALTEDHASH only — the modern iSSHA-1 hash, hashcat mode 10300) — (4) **legacy USR02** (BCODE + PASSCODE without PWDSALTEDHASH for pre-6.40 SAP_BASIS Oracle landscapes) — (5) bare user inventory.  Existing TCP/IP destination reuse to sidestep the FL046 / S_RFC_ADM dest-creation restriction
@@ -1596,6 +1602,30 @@ When a system has a SAProuter string configured, **all operations** route throug
 When propagating from system A (with SAProuter) to system B (discovered via RFC connections), system B automatically inherits A's SAProuter string. This ensures newly discovered systems behind the router are also reachable.
 
 ---
+
+## SNC Support
+
+SAPMAP can leverage SNC for RFC connections. In order to do that, you need a key pair in form of a PSE file and the SAPCRYPTOLIB package from me.sap.com. When SNC for server-to-server RFC connections is configured on the target, you need a key pair that is trusted by the target. The safest way to get one is to steal `SAPSNCS.pse` from a pwned application server. Currently, only linux is supported.
+
+### Installation
+
+1. Create a directory on the box that runs sapmap. Unpack the SAPCRYPTOLIB.SAR into that directory. Globally set the `SECUDIR` environment variable to that directory.
+2. Copy your PSE file into `$SECUDIR`. In case you stole a `cred_v2`, use pysap (https://github.com/OWASP/pysap/blob/master/pysap/SAPCredv2.py) to extract the PIN. Then change the PIN to the empty PIN. (`sapgenpse seclogin -r`).
+3. In SAPMAP, choose the menu item *Actions* ──► *SNC Configuration*. Please note that SAPMAP must also access the environment variable `SECUDIR`.
+4. If the dialog that opens says "SNC Configuration not ok" you need to check steps 1 and 2. In that case, the OS process running SAPMAP cannot see `SECUDIR` and thus not access the shared object and the PSE. Otherwise continue to 5.
+5. Click on "Test SNC Configuration". SAPMAP will start a subprocess running `sapgenpse seclogin`. It will determine the SNC name used by SAPMAP which appears in the text field "SNC Identity".
+
+### SNC communication to targets
+
+Now SAPMAP is capable of speaking RFC over SNC. SAPMAP chooses to speak SNC to a target as soon as you maintain the "SNC name" on the target. That can be done throught the context menu on server nodes. Whenever SAPMAP tries to establish an SNC connection to a target, it will automatically determine the target port for RFC based on the SNC configuration. This means: Is SAPMAP correctly SNC configured and target has an SNC name? RFC port is 4800 + sysnr. Is one of the two conditions not met? RFC port is 3300 + sysnr.
+
+### Constraints
+
+* Valid targets are only ABAP application servers.
+* Only supported in combination with `libsapnwrfc`.
+* No coexistance of SNC and non-SNC for an individual system. Either SNC exclusive or plain RFC.
+* Only Linux OS is currently supported.
+* When establishing the connection, the flag `snc_sso=0` is set. This means that SNC only cryptographically secures the transport layer. Client authentication is left to application layer. I.e. you still need to have valid credentialy to connect to the target.
 
 ## SAP Secure Store (RSECTAB) Decryption
 

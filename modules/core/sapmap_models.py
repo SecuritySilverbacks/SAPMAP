@@ -737,6 +737,10 @@ class SAPNode:
     #         qop_max, qop_min, qop_flag, mech_id, mech_label, cryptolib,
     #         error}.  Empty dict = never probed.
     snc_info: dict = field(default_factory=dict)
+    # Operator-supplied SNC partner name (my_name) used when establishing
+    # authenticated SNC connections to this node.  Set via the GUI
+    # (/api/node/<sid>/set_snc_name); empty string = not configured.
+    snc_partnername: str = ""
     # MS text/dump info-disclosure results (issue #48).  Populated by
     # sapmap_scanner.check_ms_info_disclosure — the Message Server HTTP
     # port (81NN) exposes /msgserver/text/dump?<section>=1 to any
@@ -1136,6 +1140,7 @@ class SAPNode:
             "saprouter": self.saprouter,
             "saprouter_info": self.saprouter_info,
             "snc_info": dict(self.snc_info or {}),
+            "snc_partnername": self.snc_partnername,
             "ms_info_leak": dict(self.ms_info_leak or {}),
             "scc_links": list(self.scc_links),
             "rfcsysacl_entries": list(self.rfcsysacl_entries),
@@ -1284,6 +1289,7 @@ class SAPNode:
             saprouter=d.get("saprouter", ""),
             saprouter_info=d.get("saprouter_info", {}),
             snc_info=dict(d.get("snc_info", {})),
+            snc_partnername=d.get("snc_partnername", ""),
             ms_info_leak=dict(d.get("ms_info_leak", {})),
             scc_links=list(d.get("scc_links", [])),
             rfcsysacl_entries=list(d.get("rfcsysacl_entries", [])),
@@ -2239,6 +2245,14 @@ class SAPMAPState:
     # (so the GUI side-panel keeps rendering) + on the on-disk loot
     # bundle at ``loot/logon_banners/<run_id>/``.
     logon_banner_runs: list = field(default_factory=list)
+    # Landscape-wide SNC (Secure Network Communications) client config,
+    # set via the GUI (/api/snc/save) and mirrored into sapmap_rfc so
+    # authenticated connections can negotiate SNC.  Top-level globals
+    # (siblings of ``nodes``) that round-trip with the .sapmap file.
+    # Empty string = not configured.
+    snc_secudir: str = ""           # SECUDIR (PSE/cred_v2 directory)
+    snc_sapcryptolib: str = ""      # path to libsapcrypto.so / sapcrypto.dll
+    snc_identity: str = ""          # SNC identity (my_name, e.g. "p:CN=...")
     timestamp: str = ""
     version: str = "1.0"
 
@@ -3420,6 +3434,9 @@ class SAPMAPState:
             "pwspray_locked_users": dict(self.pwspray_locked_users or {}),
             "spray_runs": list(self.spray_runs or []),
             "logon_banner_runs": list(self.logon_banner_runs or []),
+            "snc_secudir": self.snc_secudir,
+            "snc_sapcryptolib": self.snc_sapcryptolib,
+            "snc_identity": self.snc_identity,
         }
 
     @classmethod
@@ -3457,6 +3474,9 @@ class SAPMAPState:
             d.get("pwspray_locked_users", {}))
         state.spray_runs = list(d.get("spray_runs", []))
         state.logon_banner_runs = list(d.get("logon_banner_runs", []))
+        state.snc_secudir = str(d.get("snc_secudir", "") or "")
+        state.snc_sapcryptolib = str(d.get("snc_sapcryptolib", "") or "")
+        state.snc_identity = str(d.get("snc_identity", "") or "")
         # One-shot dedup pass: fold FQDN-keyed placeholder BTP nodes
         # (from earlier materialise_type_g_target runs) into any
         # real-UUID node that shares the same subdomain.  Handles

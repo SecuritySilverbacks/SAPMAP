@@ -13,6 +13,7 @@ import sys
 import threading
 import time
 from datetime import datetime
+import subprocess
 
 from bottle import Bottle, BaseRequest, request, response, static_file
 
@@ -2697,6 +2698,16 @@ def _build_linuxlpe_shell_dispatch(prog: str, params_str: str) -> str:
     inner_b64 = _b64s.b64encode(inner_payload.encode()).decode()
     return f"echo {inner_b64} | base64 -d | sh"
 
+def _mirror_snc_config(state):
+    """Push the state's SNC posture into sapmap_rfc so authenticated RFC
+    connections can negotiate SNC.  Safe no-op on any error."""
+    try:
+        sapmap_rfc.set_snc_config(
+            secudir=getattr(state, "snc_secudir", "") or "",
+            sapcryptolib=getattr(state, "snc_sapcryptolib", "") or "",
+            identity=getattr(state, "snc_identity", "") or "")
+    except Exception:
+        pass
 
 # ===========================================================================
 # SAPMAPApi — Backend controller
@@ -5703,6 +5714,106 @@ def create_app(api: SAPMAPApi) -> Bottle:
             "host_sdk_path": os.environ.get("SAPMAP_HOST_SDK_PATH", ""),
         })
 
+    @app.route("/api/snc/status", method="GET")
+    def get_snc_status():
+        """Report SNC prerequisites so the Configure SNC modal can show them.
+
+        Two checks, both read-only:
+          * SECUDIR   — value of the SECUDIR environment variable.
+          * sapcryptolib — whether $SECUDIR/libsapcrypto.so exists.
+        SNC is considered "ok" only when SECUDIR is set AND the crypto
+        library is present in it."""
+        response.content_type = "application/json"
+        secudir = os.environ.get("SECUDIR", "")
+        lib_exists = False
+        lib_path = ""
+        if secudir:
+            try:
+                candidate = os.path.join(secudir, "libsapcrypto.so")
+                lib_exists = os.path.isfile(candidate)
+                if lib_exists:
+                    lib_path = candidate
+            except Exception:
+                lib_exists = False
+        return json.dumps({
+            "secudir": secudir,
+            "sapcryptolib": lib_exists,
+            "sapcryptolib_path": lib_path,
+            "ok": bool(secudir) and lib_exists,
+            # Previously-saved SNC Identity (if any) so the modal can
+            # prefill the read-only field on re-open.
+            "snc_identity": getattr(api.state, "snc_identity", "") or "",
+        })
+
+    @app.route("/api/snc/test", method="POST")
+    def test_snc_config():
+        """Run `sapgenpse get_my_name` inside $SECUDIR and report the result.
+
+        The OS output (stdout + stderr) is returned verbatim for display in
+        the modal's textarea.  "ok" is true only when the child process
+        exits with return code 0.  If the executable itself is missing
+        (sapgenpse not on PATH) we surface the OS error text the same way,
+        with ok=false."""
+        response.content_type = "application/json" 
+        secudir = os.environ.get("SECUDIR", "")
+        if not secudir:
+            return json.dumps({
+                "ok": False,
+                "returncode": None,
+                "output": "SECUDIR is not set — cannot run sapgenpse.",
+            })
+        try:
+            proc = subprocess.run(
+                ["./sapgenpse", "get_my_name"],
+                cwd=secudir,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            output = (proc.stdout or "") + (proc.stderr or "")
+            return json.dumps({
+                "ok": proc.returncode == 0,
+                "returncode": proc.returncode,
+                "output": output or "(no output)",
+            })
+        except FileNotFoundError as e:
+            # sapgenpse executable not found on PATH.
+            return json.dumps({
+                "ok": False,
+                "returncode": None,
+                "output": "sapgenpse executable not found: " + str(e),
+            })
+        except subprocess.TimeoutExpired:
+            return json.dumps({
+                "ok": False,
+                "returncode": None,
+                "output": "sapgenpse get_my_name timed out after 30s.",
+            })
+        except Exception as e:
+            return json.dumps({
+                "ok": False,
+                "returncode": None,
+                "output": "Error running sapgenpse: " + str(e),
+            })
+
+    @app.route("/api/snc/save", method="POST")
+    def save_snc_config():
+        """Persist the SNC posture (SECUDIR, sapcryptolib, SNC Identity)
+        into the live state as top-level globals (siblings of ``nodes``).
+        They round-trip with the .sapmap file on the next save/exit."""
+        response.content_type = "application/json"
+        data = request.json or {}
+        api.state.snc_secudir = str(data.get("secudir", "") or "")
+        api.state.snc_sapcryptolib = str(data.get("sapcryptolib", "") or "")
+        api.state.snc_identity = str(data.get("snc_identity", "") or "")
+        # Mirror into sapmap_rfc so authenticated connections can use SNC.
+        sapmap_rfc.set_snc_config(
+            secudir=api.state.snc_secudir,
+            sapcryptolib=api.state.snc_sapcryptolib,
+            identity=api.state.snc_identity)
+        return json.dumps({"ok": True})        
+
+
     @app.route("/api/settings/local", method="POST")
     def save_local_settings():
         """Save local settings to settings.local.json (gitignored)."""
@@ -7882,6 +7993,27 @@ def create_app(api: SAPMAPApi) -> Bottle:
         else:
             print(f"[*] SAProuter for {sid} removed")
         return json.dumps({"status": "ok"})
+
+    @app.route("/api/node/<sid>/set_snc_name", method="POST")
+    def node_set_snc_name(sid):
+        """Set (or clear) the SNC partner name for a node.
+
+        The value is stored on node.snc_partnername and used as the
+        snc_partnername when establishing authenticated SNC connections.
+        """
+        response.content_type = "application/json"
+        data = request.json or {}
+        node = api.state.get_node(sid)
+        if not node:
+            return json.dumps({"error": f"Node {sid} not found"})
+        new_name = (data.get("snc_partnername") or "").strip()
+        node.snc_partnername = new_name
+        if new_name:
+            print(f"[*] SNC name for {sid} set to: {new_name}")
+        else:
+            print(f"[*] SNC name for {sid} removed")
+        return json.dumps({"status": "ok",
+                            "snc_partnername": node.snc_partnername})      
 
     @app.route("/api/node/<sid>/set_telnet_override", method="POST")
     def node_set_telnet_override(sid):
@@ -20493,6 +20625,7 @@ def create_app(api: SAPMAPApi) -> Bottle:
                 sapmap_findings.attach_state(api.state)
             except Exception:
                 pass
+            _mirror_snc_config(api.state)
             return json.dumps({"status": "ok"})
         except Exception as e:
             return json.dumps({"error": str(e)})
@@ -20510,6 +20643,7 @@ def create_app(api: SAPMAPApi) -> Bottle:
                 sapmap_findings.attach_state(api.state)
             except Exception:
                 pass
+            _mirror_snc_config(api.state)
             if isinstance(data, dict) and data.get("_findings"):
                 try:
                     sapmap_findings.load_snapshot(data["_findings"])
