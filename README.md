@@ -1619,6 +1619,8 @@ SAPMAP can leverage SNC for RFC connections. In order to do that, you need a key
 
 Now SAPMAP is capable of speaking RFC over SNC. SAPMAP chooses to speak SNC to a target as soon as you maintain the "SNC name" on the target. That can be done throught the context menu on server nodes. Whenever SAPMAP tries to establish an SNC connection to a target, it will automatically determine the target port for RFC based on the SNC configuration. This means: Is SAPMAP correctly SNC configured and target has an SNC name? RFC port is 4800 + sysnr. Is one of the two conditions not met? RFC port is 3300 + sysnr.
 
+The SNC name can also be set without typing it: a SAP UI landscape XML import picks up the `sncname` attribute on each `<Service>` entry and stores it on the node automatically (issue #163). Re-importing over an already-known system fills in a missing SNC name without overwriting anything else.
+
 The same SNC gate applies to the password-spray **RFC fallback** (issue #106) that validates SYSTEM / COMMUNICATION / SERVICE users (`USTYP B/S/C`) which DIAG cannot confirm: when a target carries an SNC name and the global SNC posture is configured, the name is threaded through the spray engine into the credential check, so those service-user candidates can be validated against SNC-only targets as well (issue #168).
 
 ### Constraints
