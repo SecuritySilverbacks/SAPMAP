@@ -90,10 +90,12 @@ class _FakeRfcCheck:
         self.calls = []
 
     def __call__(self, host, sysnr, client, user, password, *,
-                 saprouter="", timeout=None):
+                 saprouter="", snc_partnername="", timeout=None):
         self.calls.append({"host": host, "sysnr": sysnr, "client": client,
                            "user": (user or "").upper(), "password": password,
-                           "saprouter": saprouter, "timeout": timeout})
+                           "saprouter": saprouter,
+                           "snc_partnername": snc_partnername,
+                           "timeout": timeout})
         return self.verdicts.get(
             ((user or "").upper(), password, client), self.default)
 
@@ -323,6 +325,23 @@ def test_rfc_fallback_threads_saprouter():
     assert rfc.calls[0]["saprouter"] == "/H/router/S/3299/H/"
 
 
+def test_rfc_fallback_threads_snc_partnername():
+    """node.snc_partnername must reach the RFC check so an SNC-only target
+    can be validated over the RFC fallback (issue #168)."""
+    pool = [pw.SprayCandidate(username="SAPJSF", password="x")]
+    diag = _FakeTryLogin(nodialog_on=[("SAPJSF", "001")])
+    rfc = _FakeRfcCheck()
+
+    pw.check_sprayed_credentials(
+        "10.0.0.1", 3200, ["001"], pool,
+        cap_per_user=1, inter_attempt_sleep_range=(0, 0),
+        snc_partnername="p:CN=NPL, O=Lab, C=DE",
+        try_login_fn=diag, rfc_check_fn=rfc,
+        rfc_fallback_for_service_users=True, skip_users=set())
+
+    assert rfc.calls[0]["snc_partnername"] == "p:CN=NPL, O=Lab, C=DE"
+
+
 def test_rfc_fallback_timeout_default_is_unreachable_miss():
     """If the RFC check watchdog times out, the default
     (CONNECT_FAILED) applies → unreachable miss, not a false hit."""
@@ -331,7 +350,7 @@ def test_rfc_fallback_timeout_default_is_unreachable_miss():
     diag = _FakeTryLogin(nodialog_on=[("SAPJSF", "001")])
 
     def _slow_rfc(host, sysnr, client, user, password, *,
-                  saprouter="", timeout=None):
+                  saprouter="", snc_partnername="", timeout=None):
         _t.sleep(2)   # exceeds the 0.2s watchdog below
         return ("SUCCESS", "should never be used")
 
@@ -455,6 +474,96 @@ def test_rfc_check_credentials_returns_error_when_no_backend(monkeypatch):
         "10.0.0.1", "00", "001", "SAPJSF", "x")
     assert code == "ERROR"
     assert "backend unavailable" in detail
+
+
+# ===========================================================================
+# SNC support for rfc_check_credentials (issue #168)
+# ===========================================================================
+
+class _CaptureConn:
+    """Fake RFC backend capturing the params passed to the connection
+    constructor, so SNC-param wiring can be asserted without a real SDK.
+    A clean __enter__ + a truthy ping_verbose() means 'logon succeeded'."""
+    last_params = None
+
+    def __init__(self, sdk_path=None, **params):
+        type(self).last_params = dict(params)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def ping_verbose(self):
+        return (True, "", "")
+
+
+@pytest.fixture
+def _snc_reset():
+    """Save/restore the module-global SNC posture around a test so the
+    set_snc_config() calls here don't leak into other tests."""
+    saved = dict(sapmap_rfc._snc_config)
+    try:
+        yield
+    finally:
+        sapmap_rfc.set_snc_config(**saved)
+
+
+def _run_check(monkeypatch, **kwargs):
+    _CaptureConn.last_params = None
+    monkeypatch.setattr(sapmap_rfc, "_get_rfc_backend", lambda: _CaptureConn)
+    code, _detail = sapmap_rfc.rfc_check_credentials(
+        "10.0.0.1", "00", "001", "SAPJSF", "secret", **kwargs)
+    return code, _CaptureConn.last_params
+
+
+def test_snc_params_for_requires_full_config_and_name(_snc_reset):
+    """_snc_params_for gates on the full global posture AND a name."""
+    sapmap_rfc.set_snc_config(secudir="/sec", sapcryptolib="/lib.so",
+                              identity="p:CN=Me")
+    assert sapmap_rfc._snc_params_for("p:CN=Target") == {
+        "snc_sso": "0",
+        "snc_myname": "p:CN=Me",
+        "snc_partnername": "p:CN=Target",
+        "snc_lib": "/lib.so",
+    }
+    # empty / whitespace name → off
+    assert sapmap_rfc._snc_params_for("") == {}
+    assert sapmap_rfc._snc_params_for("   ") == {}
+    # incomplete global posture → off even with a name
+    sapmap_rfc.set_snc_config(secudir="/sec", sapcryptolib="",
+                              identity="p:CN=Me")
+    assert sapmap_rfc._snc_params_for("p:CN=Target") == {}
+
+
+def test_rfc_check_credentials_adds_snc_when_configured(monkeypatch,
+                                                        _snc_reset):
+    """With the global posture set + an snc_partnername, the RFC logon
+    carries the SNC connection params (issue #168)."""
+    sapmap_rfc.set_snc_config(secudir="/sec", sapcryptolib="/lib.so",
+                              identity="p:CN=Me")
+    code, params = _run_check(monkeypatch, snc_partnername="p:CN=Target")
+    assert code == "SUCCESS"
+    assert params["snc_myname"] == "p:CN=Me"
+    assert params["snc_partnername"] == "p:CN=Target"
+    assert params["snc_lib"] == "/lib.so"
+    assert params["snc_sso"] == "0"
+
+
+def test_rfc_check_credentials_no_snc_without_name_or_config(monkeypatch,
+                                                             _snc_reset):
+    """No snc_partnername, or an incomplete global posture, leaves the
+    logon plain — no snc_* params leak in."""
+    # full config but no name
+    sapmap_rfc.set_snc_config(secudir="/sec", sapcryptolib="/lib.so",
+                              identity="p:CN=Me")
+    _code, params = _run_check(monkeypatch)
+    assert not any(k.startswith("snc_") for k in params)
+    # name but incomplete config
+    sapmap_rfc.set_snc_config(secudir="", sapcryptolib="", identity="")
+    _code, params = _run_check(monkeypatch, snc_partnername="p:CN=Target")
+    assert not any(k.startswith("snc_") for k in params)
 
 
 # ===========================================================================

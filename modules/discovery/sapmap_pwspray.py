@@ -193,6 +193,7 @@ class SprayTarget:
     dispatcher_port: int
     clients: List[str] = field(default_factory=list)
     saprouter: str = ""
+    snc_partnername: str = ""       # node.snc_partnername, for SNC-only targets (#168)
     system_type: str = ""
 
 
@@ -581,6 +582,7 @@ def build_target_matrix(state, scope_filter: Optional[dict] = None) -> dict:
             sid=sid, host=host, dispatcher_port=port,
             clients=clients,
             saprouter=(getattr(node, "saprouter", "") or ""),
+            snc_partnername=(getattr(node, "snc_partnername", "") or ""),
             system_type=stype))
     return {"eligible": eligible, "ineligible": ineligible}
 
@@ -748,6 +750,7 @@ def check_sprayed_credentials(
     *,
     cap_per_user: int = UNKNOWN_POLICY_CAP,
     saprouter: str = "",
+    snc_partnername: str = "",
     terminal: str = "sapscanner",
     pre_known_locked_users: Optional[Set[str]] = None,
     skip_users: Optional[Set[str]] = None,
@@ -1020,6 +1023,7 @@ def check_sprayed_credentials(
                         default=(_RFC_CONNECT_FAILED,
                                  "rfc check timed out"),
                         saprouter=saprouter,
+                        snc_partnername=snc_partnername,
                         timeout=rfc_attempt_timeout_s)
                     row["channel"] = "rfc"
                     row["result"] = rfc_code
@@ -1752,6 +1756,7 @@ def spray_landscape(
             target.host, target.dispatcher_port, target.clients, pool,
             cap_per_user=cap_for_this_target,
             saprouter=target.saprouter,
+            snc_partnername=target.snc_partnername,
             terminal=config.effective_terminal(),
             pre_known_locked_users=pre_locked,
             skip_users=skip_users,

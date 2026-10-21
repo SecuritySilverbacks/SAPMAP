@@ -143,6 +143,32 @@ def set_snc_config(secudir: str = "", sapcryptolib: str = "",
     }
 
 
+def _snc_params_for(snc_partnername: str) -> dict:
+    """Return the SNC connection params to merge into an RFC logon, or {}.
+
+    Single source of truth for the SNC gating rule: SNC is negotiated only
+    when the operator has fully configured the global posture (SECUDIR,
+    sapcryptolib and our own SNC identity, via set_snc_config()) AND a
+    partner name is supplied.  Shared by _get_connection (which reads
+    node.snc_partnername) and rfc_check_credentials (which takes the name
+    as an explicit argument, since it has no SAPNode) so both negotiate
+    SNC identically.
+
+    snc_sso="0" means SNC secures the transport layer only — the
+    credentials still authenticate at the application layer.
+    """
+    secudir = _snc_config.get("secudir", "")
+    sapcryptolib = _snc_config.get("sapcryptolib", "")
+    identity = _snc_config.get("identity", "")
+    name = (snc_partnername or "").strip()
+    if secudir and sapcryptolib and identity and name:
+        return {
+            "snc_sso": "0",
+            "snc_myname": identity,
+            "snc_partnername": name,
+            "snc_lib": sapcryptolib,
+        }
+    return {}
 
 
 _logged_auto_fallback = False
@@ -250,31 +276,26 @@ def _get_connection(node: SAPNode, creds: Credentials = None,
     if node.saprouter:
         params["saprouter"] = node.saprouter
 
-    # SNC (Secure Network Communications): only negotiate SNC when the
-    # operator has fully configured the global SNC posture (SECUDIR,
-    # sapcryptolib and our own SNC identity) AND this node has an SNC
-    # partner name set (node.snc_partnername, from "Add SNC Name").
-    snc_secudir = _snc_config.get("secudir", "")
-    snc_sapcryptolib = _snc_config.get("sapcryptolib", "")
-    snc_identity = _snc_config.get("identity", "")
+    # SNC (Secure Network Communications): negotiate SNC when the operator
+    # has fully configured the global posture (SECUDIR, sapcryptolib and
+    # our own SNC identity) AND this node has an SNC partner name set
+    # (node.snc_partnername, from "Add SNC Name").  _snc_params_for() owns
+    # the gating rule so rfc_check_credentials stays in lockstep (#168).
     node_snc_name = (getattr(node, "snc_partnername", "") or "").strip()
-    if snc_secudir and snc_sapcryptolib and snc_identity and node_snc_name:
-        params["snc_sso"] = "0"
-        params["snc_myname"] = snc_identity
-        params["snc_partnername"] = node_snc_name
-        params["snc_lib"] = snc_sapcryptolib
+    snc_params = _snc_params_for(node_snc_name)
+    if snc_params:
+        params.update(snc_params)
         print(f"[*] {node.sid}: SNC params added to connection "
-              f"(snc_myname={snc_identity!r}, "
-              f"snc_partnername={node_snc_name!r}, "
-              f"snc_lib={snc_sapcryptolib!r})")
-
+              f"(snc_myname={snc_params['snc_myname']!r}, "
+              f"snc_partnername={snc_params['snc_partnername']!r}, "
+              f"snc_lib={snc_params['snc_lib']!r})")
     else:
         missing = []
-        if not snc_secudir:
+        if not _snc_config.get("secudir"):
             missing.append("state.snc_secudir")
-        if not snc_sapcryptolib:
+        if not _snc_config.get("sapcryptolib"):
             missing.append("state.snc_sapcryptolib")
-        if not snc_identity:
+        if not _snc_config.get("identity"):
             missing.append("state.snc_identity")
         if not node_snc_name:
             missing.append("node.snc_partnername")
@@ -487,7 +508,8 @@ def _classify_rfc_logon_exception(exc) -> tuple:
 
 def rfc_check_credentials(host: str, sysnr: str, client: str,
                           user: str, password: str, *,
-                          saprouter: str = "", timeout=None) -> tuple:
+                          saprouter: str = "", snc_partnername: str = "",
+                          timeout=None) -> tuple:
     """Validate a single credential via an RFC logon and return a
     structured ``(code, detail)`` in the RFC_CHECK_* vocabulary.
 
@@ -504,6 +526,13 @@ def rfc_check_credentials(host: str, sysnr: str, client: str,
     inject a fake with the same signature.  ``timeout`` is accepted
     for watchdog-wrapper call compatibility; the hard wall-clock
     bound is the caller's ``_run_with_watchdog(timeout_s=...)``.
+
+    ``snc_partnername`` (issue #168): unlike ``_get_connection`` this has
+    no SAPNode to read ``node.snc_partnername`` from, so the SNC partner
+    name is passed explicitly.  When set — and the global SNC posture is
+    configured via ``set_snc_config()`` — SNC is negotiated for this
+    logon via the shared ``_snc_params_for()`` gate, so an SNC-only
+    target can be validated.  Empty (the default) leaves the logon plain.
 
     Opening the connection performs the RFC logon (both backends call
     the SDK's open in ``__enter__``), so a clean ``__enter__`` means
@@ -530,6 +559,10 @@ def rfc_check_credentials(host: str, sysnr: str, client: str,
     }
     if saprouter:
         params["saprouter"] = saprouter
+
+    # SNC (issue #168): same gating rule as _get_connection, but the
+    # partner name comes in as an argument since there is no SAPNode here.
+    params.update(_snc_params_for(snc_partnername))
 
     try:
         with RFCConnection(sdk_path=_sdk_path, **params) as conn:
