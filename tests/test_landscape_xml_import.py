@@ -308,3 +308,83 @@ def test_empty_messageserver_host_does_not_crash():
     # The sibling direct-connect still works.
     assert len(summary["added"]) == 1
     assert summary["added"][0].startswith("XML_FIN")
+
+
+# ---------------------------------------------------------------------------
+# SNC name import (issue #163)
+# ---------------------------------------------------------------------------
+
+_SNC = "p:CN=SDA, OU=SAP system, O=Demo Comp"
+
+
+def test_sncname_imported_on_real_sid_service():
+    """<Service sncname="…"/> must land on node.snc_partnername so the
+    SNC posture configured on the target is carried into SAPMAP (#163)."""
+    xml = f"""<?xml version='1.0' encoding='UTF-8'?>
+<Landscape version='1'>
+  <Services>
+    <Service name='SDA direct' type='SAPGUI' uuid='s1'
+             systemid='SDA' server='10.0.0.50:3200' sncname='{_SNC}'/>
+  </Services>
+</Landscape>"""
+    state, summary = _import(xml)
+    assert "SDA" in summary["added"]
+    assert state.get_node("SDA").snc_partnername == _SNC
+
+
+def test_sncname_imported_on_placeholder_service():
+    """A direct-connect entry with no real systemid still carries its
+    sncname onto the synthesized placeholder node."""
+    xml = f"""<?xml version='1.0' encoding='UTF-8'?>
+<Landscape version='1'>
+  <Services>
+    <Service name='Demo box' type='SAPGUI' uuid='p1'
+             server='10.0.0.60:3200' sncname='{_SNC}'/>
+  </Services>
+</Landscape>"""
+    state, _summary = _import(xml)
+    placeholders = [n for n in state.nodes.values() if n.discovered_via_xml]
+    assert len(placeholders) == 1
+    assert placeholders[0].snc_partnername == _SNC
+
+
+def test_absent_sncname_leaves_empty():
+    """No sncname attribute → node.snc_partnername stays empty (no crash,
+    no phantom value)."""
+    xml = """<?xml version='1.0' encoding='UTF-8'?>
+<Landscape version='1'>
+  <Services>
+    <Service name='No SNC' type='SAPGUI' uuid='n1'
+             systemid='NSC' server='10.0.0.70:3200'/>
+  </Services>
+</Landscape>"""
+    state, _summary = _import(xml)
+    assert state.get_node("NSC").snc_partnername == ""
+
+
+def test_sncname_enriches_existing_node_without_clobber():
+    """Re-importing over a pre-existing node is skip-if-present, but a
+    missing SNC name is filled in from the XML — and a name already set
+    is never overwritten."""
+    state = SAPMAPState()
+    # Pre-existing node with NO snc name — should get enriched.
+    state.add_node(SAPNode(sid="SDA", ip="10.0.0.50", hostname="10.0.0.50"))
+    # Pre-existing node WITH an snc name — must not be clobbered.
+    state.add_node(SAPNode(sid="SDB", ip="10.0.0.51", hostname="10.0.0.51",
+                           snc_partnername="p:CN=KEEPME"))
+    xml = f"""<?xml version='1.0' encoding='UTF-8'?>
+<Landscape version='1'>
+  <Services>
+    <Service name='SDA' type='SAPGUI' uuid='e1'
+             systemid='SDA' server='10.0.0.50:3200' sncname='{_SNC}'/>
+    <Service name='SDB' type='SAPGUI' uuid='e2'
+             systemid='SDB' server='10.0.0.51:3200' sncname='p:CN=OTHER'/>
+  </Services>
+</Landscape>"""
+    _state, summary = _import(xml, state=state)
+    # Both are skip-if-present (already in state), not re-added.
+    assert "SDA" in summary["skipped"] and "SDB" in summary["skipped"]
+    # SDA had no name → enriched from the XML.
+    assert state.get_node("SDA").snc_partnername == _SNC
+    # SDB already had one → left untouched.
+    assert state.get_node("SDB").snc_partnername == "p:CN=KEEPME"

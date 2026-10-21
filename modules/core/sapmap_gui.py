@@ -3177,6 +3177,11 @@ def parse_landscape_xml_into_state(state, xml_text,
         svc_msid = (svc.get("msid") or "").strip()
         svc_srv = (svc.get("server") or "").strip()
         svc_type = (svc.get("type") or "").strip().upper()
+        # SNC name of the target, when the landscape entry carries one
+        # (issue #163) — e.g. sncname="p:CN=SDA, OU=SAP system, O=Demo".
+        # Threaded onto node.snc_partnername so authenticated RFC can
+        # negotiate SNC without the operator re-typing "Add SNC Name".
+        svc_snc = (svc.get("sncname") or "").strip()
 
         ms = ms_by_uuid.get(svc_msid) if svc_msid else None
         host = ""
@@ -3254,7 +3259,17 @@ def parse_landscape_xml_into_state(state, xml_text,
             # enriched; we do not want to clobber it with the thin
             # landscape-file guess.
             sid = svc_sid
-            if state.get_node(sid):
+            existing = state.get_node(sid)
+            if existing:
+                # Strict skip-if-present — don't clobber a scanned/enriched
+                # node with the thin landscape-file guess.  But DO fill in
+                # the SNC name from the XML when the node lacks one (#163):
+                # scanning can't recover it, so this is pure enrichment and
+                # nothing existing is overwritten.
+                if svc_snc and not getattr(existing, "snc_partnername", ""):
+                    existing.snc_partnername = svc_snc
+                    print(f"[+] {sid}: imported SNC name from landscape XML "
+                          f"({svc_snc!r})")
                 skipped.append(sid)
                 continue
 
@@ -3283,6 +3298,8 @@ def parse_landscape_xml_into_state(state, xml_text,
             # SAPControl's stack detection disagrees (handled in
             # landscape_post_import_discover).
             system_type="ABAP",
+            # SNC name from the landscape XML, when present (#163).
+            snc_partnername=svc_snc,
             sapology_data={
                 "description": svc_name,
                 "xml_service_name": svc_name,
