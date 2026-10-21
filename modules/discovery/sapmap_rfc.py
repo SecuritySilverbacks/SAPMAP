@@ -228,6 +228,22 @@ def _get_rfc_backend():
         )
 
 
+def _instance_field(inst, key):
+    """Read a field from an instance that may be an InstanceInfo dataclass
+    OR a plain dict (landscape-import / legacy state shapes)."""
+    if isinstance(inst, dict):
+        return inst.get(key)
+    return getattr(inst, key, None)
+
+
+def _norm_instance_nr(value) -> str:
+    """Normalise an instance number (str / int / None) to a 2-char
+    zero-padded string ('' when absent)."""
+    if value is None:
+        return ""
+    return str(value).strip().zfill(2)
+
+
 def _get_connection(node: SAPNode, creds: Credentials = None,
                      host_override: str = ""):
     """Create an RFC connection to a node using credentials.
@@ -255,12 +271,18 @@ def _get_connection(node: SAPNode, creds: Credentials = None,
         # instance number — a node can carry several instances on
         # different hosts, and node.ip/node.hostname is not
         # necessarily the one we're authenticating against.
-        want_nr = (creds.instance_nr or "").strip().zfill(2)
+        want_nr = _norm_instance_nr(creds.instance_nr)
         host = ""
-        for inst in (node.instances or []):
-            if (inst.instance_nr or "").strip().zfill(2) == want_nr:
-                host = inst.ip
-                break
+        if want_nr:
+            for inst in (node.instances or []):
+                # Instances may be InstanceInfo dataclasses OR plain dicts
+                # (landscape import / legacy state), and instance_nr may be
+                # an int — read both shapes defensively (issue #166: the
+                # attribute-only access crashed on dict-shaped instances).
+                if _norm_instance_nr(
+                        _instance_field(inst, "instance_nr")) == want_nr:
+                    host = _instance_field(inst, "ip") or ""
+                    break
         if not host:
             host = node.ip or node.hostname
     params = {

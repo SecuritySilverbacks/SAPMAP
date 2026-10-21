@@ -251,3 +251,50 @@ def test_get_connection_still_passes_sdk_path_through(monkeypatch):
     assert captured.get("sdk_path") == "/opt/nwrfcsdk/lib", (
         f"_get_connection must pass sdk_path through to RFCConnection; "
         f"captured kwargs: {captured!r}")
+
+
+def test_get_connection_picks_instance_host_across_shapes(monkeypatch):
+    """#166 regression: _get_connection picks the host of the instance
+    matching creds.instance_nr, and must tolerate instances shaped as
+    plain dicts (landscape import) or carrying an int instance_nr — not
+    only InstanceInfo dataclasses (which crashed with AttributeError)."""
+    srfc = _reload_sapmap_rfc()
+    import sap_rfc_ctypes as _ctypes_mod
+
+    monkeypatch.setattr(_ctypes_mod, "is_sdk_loadable",
+                        lambda sdk_path="": True)
+    monkeypatch.setattr(srfc, "_use_pure_rfc", False)
+    srfc.set_sdk_path("/opt/nwrfcsdk/lib")
+
+    captured = {}
+
+    class _FakeConn:
+        def __init__(self, **kwargs):
+            captured.clear()
+            captured.update(kwargs)
+        def __enter__(self):
+            return self
+        def __exit__(self, *a):
+            return False
+
+    monkeypatch.setattr(_ctypes_mod, "RFCConnection", _FakeConn)
+
+    from sapmap_models import SAPNode, Credentials, InstanceInfo
+
+    # (A) InstanceInfo instances on different hosts → pick the matching nr.
+    node = SAPNode(sid="S4H", ip="10.0.0.1",
+                   instances=[InstanceInfo(instance_nr="00", ip="10.0.0.10"),
+                              InstanceInfo(instance_nr="01", ip="10.0.0.11")])
+    creds = Credentials(username="u", password="x", client="001",
+                        instance_nr="01")
+    srfc._get_connection(node, creds)
+    assert captured["ashost"] == "10.0.0.11"
+
+    # (B) dict-shaped instance with an int nr and no ip → no crash, and
+    # host falls back to node.ip.
+    node2 = SAPNode(sid="NPL", ip="10.0.0.2",
+                    instances=[{"instance_nr": 0}])
+    creds2 = Credentials(username="u", password="x", client="001",
+                         instance_nr="00")
+    srfc._get_connection(node2, creds2)
+    assert captured["ashost"] == "10.0.0.2"
