@@ -179,3 +179,24 @@ def test_build_target_matrix_source_uses_list_not_set():
     # And single_sid should still be a one-element list (not a one-
     # element set) for the same reason.
     assert "sids = [scope_filter[\"single_sid\"]]" in src
+
+
+# ---------------------------------------------------------------------------
+# SNC partner name reaches the target (issue #168)
+# ---------------------------------------------------------------------------
+
+def test_build_target_matrix_populates_snc_partnername():
+    """A node's snc_partnername must reach its SprayTarget so the spray
+    engine can thread it into the RFC fallback for SNC-only hosts (#168)."""
+    from sapmap_models import SAPMAPState
+    from sapmap_pwspray import build_target_matrix
+
+    state = SAPMAPState()
+    n = _make_abap_node("NPL")
+    n.snc_partnername = "p:CN=NPL, O=Lab, C=DE"
+    state.nodes["NPL"] = n
+
+    tm = build_target_matrix(state)
+    targets = {t.sid: t for t in tm["eligible"]}
+    assert "NPL" in targets, "SNC-named node should still be eligible"
+    assert targets["NPL"].snc_partnername == "p:CN=NPL, O=Lab, C=DE"
