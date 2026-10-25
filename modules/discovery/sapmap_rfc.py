@@ -6208,6 +6208,62 @@ def update_node_production_status(node: SAPNode, creds: Credentials = None):
 # TCP/IP destination creation (sapxpg remote test)
 # ---------------------------------------------------------------------------
 
+def _resolve_gateway_service(node, snc=None) -> str:
+    """Pick the gateway service port for a registered-program (sapxpg)
+    TCP/IP destination on ``node`` — SNC-aware (issue #172).
+
+    An SNC landscape exposes the gateway on gw/snc_port (4800+NN) and
+    typically firewalls the plain gateway (3300+NN).  The pre-#172 port
+    selection only matched ``gateway`` / 33NN, so on an SNC system the
+    sapxpg destination pointed at a dead / non-SNC port — the mysterious
+    connects to the non-SNC port reported in the issue.
+
+    Prefers the SNC gateway (``gateway_snc`` / 4800+NN) when SNC applies —
+    the global SNC posture is configured AND ``node.snc_partnername`` is
+    set (same gate as ``_snc_params_for``), or when ONLY an SNC gateway is
+    open — otherwise the plain gateway (3300+NN).  Falls back to a port
+    derived from the instance number when no gateway port was scanned.
+    Pass ``snc=True/False`` to force the decision (tests / callers that
+    already know the posture).
+    """
+    if snc is None:
+        snc = bool(_snc_params_for(getattr(node, "snc_partnername", "")))
+    plain = ""
+    snc_port = ""
+    for inst in (getattr(node, "instances", None) or []):
+        ports = _instance_field(inst, "ports") or {}
+        try:
+            items = list(ports.items())
+        except AttributeError:
+            items = []
+        for port, svc in items:
+            try:
+                pint = int(port)
+            except (TypeError, ValueError):
+                pint = -1
+            if svc == "gateway_snc" or (4800 <= pint <= 4899):
+                snc_port = snc_port or str(port)
+            elif svc == "gateway" or (3300 <= pint <= 3399):
+                plain = plain or str(port)
+    if snc and snc_port:
+        return snc_port
+    if snc_port and not plain:          # only the SNC gateway is open
+        return snc_port
+    if plain:
+        return plain
+    # No gateway port scanned — derive from the instance number.
+    nr = ""
+    for inst in (getattr(node, "instances", None) or []):
+        nr = _norm_instance_nr(_instance_field(inst, "instance_nr"))
+        if nr:
+            break
+    base = 4800 if snc else 3300
+    try:
+        return str(base + int(nr)) if nr else str(base)
+    except ValueError:
+        return str(base)
+
+
 def create_tcpip_destination(node: SAPNode, target_host: str,
                              target_sid: str = "",
                              target_gw_port: str = "",
@@ -6483,17 +6539,12 @@ def execute_local_command(node: SAPNode, command: str, params: str,
             result["error"] = "No IP/hostname for node"
             return result
 
-        # Find own gateway port
-        gw_port = None
-        for inst in node.instances:
-            for port, svc in inst.ports.items():
-                if svc == "gateway" or (3300 <= port <= 3399):
-                    gw_port = str(port)
-                    break
-            if gw_port:
-                break
-        if not gw_port:
-            gw_port = "3300"
+        # Pick the gateway port SNC-aware (#172): an SNC system exposes the
+        # gateway on gw/snc_port (4800+NN) and firewalls the plain 33NN
+        # gateway, so a self-referencing sapxpg dest must target the SNC
+        # port — otherwise the registered-program connection lands on a
+        # dead non-SNC port.
+        gw_port = _resolve_gateway_service(node)
 
         create_result = create_tcpip_destination(
             node, target_host=host, target_sid=node.sid,
