@@ -902,9 +902,13 @@ def test_peek_hana_table_where_clause_appends_correctly(monkeypatch):
     assert r["ok"] is True and len(r["rows"]) == 1
 
 
-def test_peek_hana_table_where_strips_leading_keyword():
+def test_peek_hana_table_where_strips_leading_keyword(monkeypatch):
     # Operator convenience: peek accepts "WHERE X = Y" (bare) OR
     # just "X = Y" — the leading WHERE keyword is stripped.
+    # The write-family screen runs before any DB round-trip, so a
+    # present-but-unused driver lets us exercise it without real hdbcli
+    # installed (keeps this security check covered on a bare env).
+    monkeypatch.setattr(dbcon, "_import_hdbcli", lambda: (object(), None))
     e = DBCONConnection(source_sid="S4H", con_name="X", dbms="HDB",
                           reachable=True)
     # Just verify the write-family screen; we can't easily test SQL
@@ -913,7 +917,10 @@ def test_peek_hana_table_where_strips_leading_keyword():
     assert r["ok"] is False and "write-family" in r["error"]
 
 
-def test_peek_hana_table_where_blocks_write_family():
+def test_peek_hana_table_where_blocks_write_family(monkeypatch):
+    # Present-but-unused driver: the write-family screen rejects before
+    # any connect, so no real hdbcli is needed (see note above).
+    monkeypatch.setattr(dbcon, "_import_hdbcli", lambda: (object(), None))
     e = DBCONConnection(source_sid="S4H", con_name="X", dbms="HDB",
                           reachable=True)
     for w in ("BNAME='X'; DELETE FROM USR02",
