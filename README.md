@@ -774,6 +774,43 @@ python3 sapmap.py --read-only --script scripts/scan_only.yaml # refuses if scrip
   `get_system_detail`, `business_impact`, `export_report`, `save_state`,
   `add_system`)
 
+### Authentication (`--auth`)
+
+By default SAPMAP runs its GUI server with **no authentication**, bound to `127.0.0.1` — fine for the local pywebview window or an SSH tunnel.  When you serve SAPMAP to others over the network (the server-side scenario in [issue #40](https://github.com/SecuritySilverbacks/SAPMAP/issues/40)), pass `--auth` to gate the HTTP GUI behind **HTTP Basic authentication**.  `--auth` is strictly opt-in — without it nothing changes.
+
+**Backends** (`SAPMAP_AUTH_BACKEND = pam | static | auto`, default `auto`):
+
+- **`pam`** — authenticate against Linux / Active-Directory accounts through PAM (the *domain-joined access only* path).  Needs `python-pam` (`pip install python-pam six`) and a PAM stack that includes the domain modules (SSSD).  Access is an explicit **allowlist** of logins (no AD group required); PAM's account phase enforces SSSD host-access control and account expiry.  Nothing here stores passwords — AD remains the authority.
+- **`static`** — a single `SAPMAP_USER` / `SAPMAP_PASSWORD` (a random password is generated and printed if unset).
+- **`auto`** — `pam` if `python-pam` is importable, else `static`.
+
+**Who is allowed in (pam):** set `SAPMAP_AUTH_USERS` (comma-separated logins; `*` = any account PAM accepts), or edit `ALLOWED_USERS` in `modules/core/sapmap_auth.py`.  An empty allowlist refuses to start rather than expose every domain account.  Names match case-insensitively and accept `DOMAIN\user` / `user@domain` forms.
+
+| Environment variable | Default | Purpose |
+|----------------------|---------|---------|
+| `SAPMAP_AUTH_USERS` | — | Comma-separated allowlist (replaces `ALLOWED_USERS`; `*` = any) |
+| `SAPMAP_AUTH_MAX_FAILURES` | 5 | Failed attempts per user before a **local** lockout.  Keep **below** the AD lockout threshold so the local `429` trips first and shields the domain account |
+| `SAPMAP_AUTH_LOCKOUT` | 300 | Local lockout seconds |
+| `SAPMAP_AUTH_CACHE_TTL` | 300 | Seconds to cache a successful login (0 = a PAM round-trip per request) |
+| `SAPMAP_AUTH_EXCLUDE` | — | Comma-separated URL path prefixes left open (e.g. `/health`) |
+| `SAPMAP_AUTH_REALM` | `SAPMAP` | Browser prompt realm |
+| `SAPMAP_AUTH_PAM_SERVICE` | `sapmap`/`login` | PAM service name |
+| `SAPMAP_AUTH_DISABLE` | — | Truthy → bypass auth entirely (even with `--auth`) |
+| `SAPMAP_AUTH_DEBUG` | — | Truthy → log denial reasons + PAM codes |
+
+**Caveats:**
+
+- Pair `--auth` with **`--browser`** (or a reverse proxy).  The embedded pywebview window cannot answer a Basic-auth prompt, so auth is for the browser / served-to-others scenario.
+- HTTP Basic is **cleartext** (base64, not encrypted).  Put **TLS** in front (reverse proxy) or keep the server on loopback / behind an SSH tunnel — otherwise a domain password is readable on the wire, and a scanner feeding failed logins into AD can lock out a colleague's account (the local lockout mitigates this; keep it below the AD threshold).
+- `--no-gui` (CLI scans) and the MCP stdio server are unaffected — `--auth` only wraps the HTTP GUI.
+
+```bash
+# Domain-joined Linux host, served to the team over an SSH tunnel
+export SAPMAP_AUTH_USERS="alice,bob@corp.example"
+python3 sapmap.py --auth --browser --host 127.0.0.1
+# colleagues: ssh -L 8080:127.0.0.1:<port> host, then browse http://localhost:8080
+```
+
 ### Enforcement layers
 
 - **Backend** — a Bottle `before_request` hook in `sapmap_gui.py`

@@ -55,6 +55,16 @@ saprfclib >= 0.1.5 ; python_version >= "3.12"
 #
 # hdbcli>=2.19       # SAP HANA Python client (pip install hdbcli)
 
+# --- Optional: server-side authentication (issue #40, --auth) ---
+# python-pam enables the PAM backend used for "domain-joined access only"
+# (Linux/AD via SSSD).  Only needed when you run SAPMAP with --auth AND
+# SAPMAP_AUTH_BACKEND=pam/auto; without it, --auth falls back to a single
+# static account.  python-pam 2.0.2 imports `six` without declaring it, so
+# install both.  Linux only (PAM is not meaningful on macOS/Windows).
+#
+# python-pam>=2.0 ; sys_platform == "linux"
+# six             ; sys_platform == "linux"
+
 # --- Optional platform GUI extras ---
 # pyobjc-framework-Cocoa ; sys_platform == "darwin"   # macOS dock icon
 # pygobject         ; sys_platform == "linux"         # Linux GTK/WebKit2 native window

@@ -156,6 +156,15 @@ def main():
                              "section of README.md.  Binding to 0.0.0.0 on "
                              "a bare host exposes SAPMAP to the LAN and is "
                              "NOT recommended.")
+    parser.add_argument("--auth", action="store_true",
+                        help="Require HTTP Basic authentication on the GUI "
+                             "server (issue #40). OFF by default — without it "
+                             "the server runs exactly as before. Backends: PAM "
+                             "(Linux/AD domain-joined, needs python-pam) or a "
+                             "static account; configure via SAPMAP_AUTH_* env "
+                             "vars (see README 'Authentication'). Pair with "
+                             "--browser + TLS/SSH tunnel; the embedded pywebview "
+                             "window cannot answer a Basic prompt.")
     parser.add_argument("--browser", action="store_true",
                         help="Force browser mode (skip pywebview)")
     parser.add_argument("--no-gui", action="store_true",
@@ -384,19 +393,39 @@ def main():
 
     print(f"[*] Starting SAPMAP server on {url}")
 
+    # Exposure / auth notice (issue #40).  Binding beyond loopback without
+    # --auth serves the full SAPMAP control surface to the network in
+    # cleartext, so warn loudly; --auth confirms the gate but is still
+    # cleartext Basic, so remind about TLS/tunnels.
+    _loopback = args.host in ("127.0.0.1", "localhost", "::1", "")
+    if args.auth:
+        print("[*] Server-side authentication ENABLED (--auth). HTTP Basic is "
+              "cleartext — put TLS in front or keep to loopback / an SSH "
+              "tunnel.")
+    elif not _loopback:
+        print(f"[!] SECURITY: --host {args.host} exposes SAPMAP to the network "
+              f"with NO authentication.")
+        print("[!]           Add --auth (see README 'Authentication'), or keep "
+              "--host 127.0.0.1 and reach it over an SSH tunnel.")
+
     # Start Bottle server in background thread (threaded so stop/poll don't block)
     from socketserver import ThreadingMixIn
     from wsgiref.simple_server import WSGIServer
     class ThreadedWSGIServer(ThreadingMixIn, WSGIServer):
         daemon_threads = True
 
-    server_thread = threading.Thread(
-        target=lambda: app.run(
-            host=args.host, port=port, quiet=True,
-            server_class=ThreadedWSGIServer,
-        ),
-        daemon=True,
-    )
+    def _serve():
+        run_kwargs = dict(host=args.host, port=port, quiet=True,
+                          server_class=ThreadedWSGIServer)
+        if args.auth:
+            # Opt-in auth: wrap the WSGI app in Basic auth.  All run kwargs
+            # (server_class, quiet, ...) are forwarded unchanged.
+            from sapmap_auth import run_protected
+            run_protected(app, **run_kwargs)
+        else:
+            app.run(**run_kwargs)
+
+    server_thread = threading.Thread(target=_serve, daemon=True)
     server_thread.start()
 
     # Give server a moment to start
