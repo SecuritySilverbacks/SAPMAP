@@ -344,7 +344,8 @@ def build_dest_rfc_tcpip_create(name: str, server_name: str,
                                  program: str = "sapxpg",
                                  description: str = "",
                                  method: str = "E",
-                                 cpic_timeout: str = "20") -> str:
+                                 cpic_timeout: str = "20",
+                                 snc_partnername: str = "") -> str:
     """DEST_RFC_TCPIP_CREATE — create a Type-T (TCP/IP) RFC destination.
 
     Same FM SAPMAP already uses via pyrfc (sapmap_rfc.
@@ -361,8 +362,28 @@ def build_dest_rfc_tcpip_create(name: str, server_name: str,
       METHOD          — 'E' = start program at registration time
       CPIC_TIMEOUT    — connection timeout in seconds
 
+    Optional SNC fields (part 2 of #172):
+      snc_partnername — when the target gateway enforces SNC, the
+                        destination the operator creates has to be
+                        SNC-secured itself.  Setting this flips
+                        SNC_ACTIVE=X and emits a nested
+                        SNC_PARAMETER structure (SNC_QOP=8 = max,
+                        SNC_PNAME=<partner>).  Field shape confirmed
+                        against a live lab by @supersache.
+                        Empty / omitted = non-SNC destination (the
+                        existing behaviour; wire-compatible).
+
     Returns RETURN BAPIRET2 — caller checks for E/A/X.
     """
+    snc_block = ""
+    if snc_partnername:
+        snc_block = (
+            '<SNC_ACTIVE>X</SNC_ACTIVE>'
+            '<SNC_PARAMETER>'
+            '<SNC_QOP>8</SNC_QOP>'
+            f'<SNC_PNAME>{escape(snc_partnername)}</SNC_PNAME>'
+            '</SNC_PARAMETER>'
+        )
     body = (
         '<urn:DEST_RFC_TCPIP_CREATE>'
         f'<NAME>{escape(name)}</NAME>'
@@ -373,6 +394,7 @@ def build_dest_rfc_tcpip_create(name: str, server_name: str,
         f'<METHOD>{escape(method)}</METHOD>'
         f'<PROGRAM>{escape(program)}</PROGRAM>'
         f'<CPIC_TIMEOUT>{escape(cpic_timeout)}</CPIC_TIMEOUT>'
+        f'{snc_block}'
         '<RETURN/>'
         '</urn:DEST_RFC_TCPIP_CREATE>'
     )

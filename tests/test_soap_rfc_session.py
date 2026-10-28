@@ -840,6 +840,61 @@ def test_dest_rfc_tcpip_create_surfaces_auth_error():
         mock.stop()
 
 
+def test_dest_rfc_tcpip_create_forwards_snc_partnername_into_envelope():
+    """Part 2 of #172: when the GUI firewall-fallback path calls the
+    SOAP session method with snc_partnername set, the posted envelope
+    must carry the SNC_ACTIVE + SNC_PARAMETER block.  Guards against a
+    silent drop of the new kwarg inside dest_rfc_tcpip_create() — the
+    envelope builder has its own tests, this one covers the forwarding
+    through the session method.
+    """
+    mock = _MockSAP(_make_responder({
+        "DEST_RFC_TCPIP_CREATE": (200, _TCPIP_CREATE_OK),
+    }))
+    try:
+        sess = SOAPRFCSession(
+            host="127.0.0.1", port=mock.port, client="000",
+            user="u", password="p")
+        r = sess.dest_rfc_tcpip_create(
+            name="SAPMAP_N2A_X", server_name="sapn2a",
+            gateway_host="sapn2a", gateway_service="4800",
+            snc_partnername="p/cstb:CN=sapn2a, O=Kerby")
+        assert r["success"] is True
+        body = mock.requests[-1]["body"]
+        assert "<SNC_ACTIVE>X</SNC_ACTIVE>" in body
+        assert "<SNC_PARAMETER>" in body
+        assert "<SNC_QOP>8</SNC_QOP>" in body
+        assert ("<SNC_PNAME>p/cstb:CN=sapn2a, O=Kerby</SNC_PNAME>"
+                in body)
+    finally:
+        mock.stop()
+
+
+def test_dest_rfc_tcpip_create_no_snc_fields_when_partnername_omitted():
+    """Backward-compat negative case: without snc_partnername the posted
+    envelope stays byte-wire-identical to pre-#172 (no SNC fields
+    anywhere).  Guards against a leaky default flipping plain-landscape
+    destinations to SNC."""
+    mock = _MockSAP(_make_responder({
+        "DEST_RFC_TCPIP_CREATE": (200, _TCPIP_CREATE_OK),
+    }))
+    try:
+        sess = SOAPRFCSession(
+            host="127.0.0.1", port=mock.port, client="000",
+            user="u", password="p")
+        r = sess.dest_rfc_tcpip_create(
+            name="SAPMAP_W74_X", server_name="winwas740",
+            gateway_host="winwas740", gateway_service="3340")
+        assert r["success"] is True
+        body = mock.requests[-1]["body"]
+        assert "<SNC_ACTIVE>" not in body
+        assert "<SNC_PARAMETER>" not in body
+        assert "<SNC_QOP>" not in body
+        assert "<SNC_PNAME>" not in body
+    finally:
+        mock.stop()
+
+
 _DEST_CHECK_OK = (
     '<?xml version="1.0"?><SOAP-ENV:Envelope '
     'xmlns:SOAP-ENV="http://schemas.xmlsoap.org/soap/envelope/">'

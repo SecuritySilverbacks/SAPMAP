@@ -6267,7 +6267,9 @@ def _resolve_gateway_service(node, snc=None) -> str:
 def create_tcpip_destination(node: SAPNode, target_host: str,
                              target_sid: str = "",
                              target_gw_port: str = "",
-                             creds: Credentials = None) -> dict:
+                             creds: Credentials = None,
+                             *,
+                             snc_partnername: str = "") -> dict:
     """Create a TCP/IP destination for remote sapxpg execution.
 
     Args:
@@ -6276,6 +6278,27 @@ def create_tcpip_destination(node: SAPNode, target_host: str,
         target_sid: SID of the target (used in dest name)
         target_gw_port: gateway port of the target (e.g. "3300")
         creds: credentials to use on the source system
+        snc_partnername: when the target gateway enforces SNC, the
+            registered-program connection the destination will make
+            has to be SNC-secured itself — otherwise the gateway
+            refuses it even on the right port (part 2 of #172, the
+            SDEST E 017 symptom).  Pass the target's SNC partner name
+            (``node.snc_partnername``) and this routine adds
+            ``SNC_ACTIVE=X`` plus a nested ``SNC_PARAMETER`` struct
+            (``SNC_QOP=8`` / ``SNC_PNAME``) to the create call.
+            Empty / omitted = non-SNC destination (the pre-#172
+            behaviour; wire-compatible).  The gate is intentionally
+            just ``if snc_partnername:`` — the SM59 record's SNC
+            fields describe the server→target leg (how the server's
+            gateway secures its registered-program connection), which
+            is independent of SAPMAP's OWN logon-level SNC posture
+            (``_snc_params_for``).  Both are legitimate on a mixed
+            landscape: pyrfc creds for the source, SNC for the
+            target.  The SOAP envelope path uses the same simple
+            gate, so both transports produce identical SM59 records
+            for identical operator input.
+            Field shape confirmed by @supersache against a live
+            lab (SNC_PARAMETER sub-struct, SNC_QOP=8 = max).
 
     Returns dict with: success, message, dest_name
     """
@@ -6284,6 +6307,20 @@ def create_tcpip_destination(node: SAPNode, target_host: str,
     gw_service = target_gw_port or "3300"
 
     result = {"success": False, "message": "", "dest_name": dest_name}
+
+    # Simple gate: driven only by the target's partner name — the
+    # destination record's SNC fields describe the server→target leg,
+    # independent of how SAPMAP itself talks to the source.  Matches
+    # the SOAP envelope builder so both transports stay in lockstep.
+    snc_kwargs = {}
+    if snc_partnername:
+        snc_kwargs = {
+            "SNC_ACTIVE": "X",
+            "SNC_PARAMETER": {
+                "SNC_QOP": "8",         # max QoP (privacy + integrity + auth)
+                "SNC_PNAME": snc_partnername,
+            },
+        }
 
     try:
         with _get_connection(node, creds) as conn:
@@ -6297,6 +6334,7 @@ def create_tcpip_destination(node: SAPNode, target_host: str,
                 METHOD="E",
                 PROGRAM="sapxpg",
                 CPIC_TIMEOUT="20",
+                **snc_kwargs,
             )
             # Check result
             ret = create_result.get("RETURN", {})
@@ -6305,8 +6343,9 @@ def create_tcpip_destination(node: SAPNode, target_host: str,
             else:
                 result["success"] = True
                 result["message"] = f"TCP/IP destination {dest_name} created"
+                snc_tag = " SNC" if snc_kwargs else ""
                 print(f"[+] {node.sid}: Created TCP/IP dest {dest_name} → "
-                      f"{target_host} (gw={gw_service})")
+                      f"{target_host} (gw={gw_service}{snc_tag})")
     except Exception as e:
         result["message"] = format_rfc_exception(e)
         print(f"[-] {node.sid}: TCP/IP dest creation error: {format_rfc_exception(e)}")
@@ -6549,6 +6588,11 @@ def execute_local_command(node: SAPNode, command: str, params: str,
         create_result = create_tcpip_destination(
             node, target_host=host, target_sid=node.sid,
             target_gw_port=gw_port, creds=creds,
+            # Part 2 of #172: when the gateway enforces SNC, the
+            # registered-program connection has to be SNC-secured
+            # itself (SDEST E 017 at use if not).  Pass the node's
+            # own partner name — the gate inside the helper decides.
+            snc_partnername=getattr(node, "snc_partnername", "") or "",
         )
         if not create_result["success"]:
             result["error"] = f"Could not create TCP/IP dest: {create_result['message']}"
