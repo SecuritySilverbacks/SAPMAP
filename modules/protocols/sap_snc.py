@@ -435,6 +435,34 @@ def _result_from_frame(base: dict, frame: dict) -> dict:
     return base
 
 
+def _diag_snc_error(blob: bytes) -> bool:
+    """Positive SNC detection from a DIAG reply that carries NO SAPSNCFrame.
+
+    A server with SNC enabled rejects the plain DIAG-wrapped probe at the SNC
+    layer *before* any SNCFrame is exchanged and answers with a DIAG error
+    text ``Security Network Layer (SNC) error`` (SAP GUI encodes DIAG message
+    text as UTF-16LE).  That message is positive proof SNC is enabled — a
+    server with SNC off answers with a login screen, not an SNC error.
+
+    Observed on a CSTB-mechanism target whose SNC layer refused our canned
+    Kerberos INIT token and returned this error instead of a SNCFrame, which
+    the SNCFrame-only check misread as "not enabled".
+
+    Matched against the specific phrases (not a bare "SNC") so an ordinary
+    negative reply such as "SNC not enabled" is NOT misread as enabled.
+    """
+    if not blob:
+        return False
+    for enc in ("utf-16-le", "latin-1"):
+        try:
+            text = blob.decode(enc, "replace").lower()
+        except Exception:
+            continue
+        if "security network layer" in text or "(snc)" in text:
+            return True
+    return False
+
+
 # ---------------------------------------------------------------------------
 # Public probes
 # ---------------------------------------------------------------------------
@@ -474,11 +502,18 @@ def scan_snc_diag(host: str, port: int, timeout: float = 8.0,
     frame = _parse_snc_frame(reply)
     if frame:
         _result_from_frame(result, frame)
+        # Any SAPSNCFrame means the SNC layer is engaged — a server with SNC
+        # off never speaks SNCFrame.  ACCEPT (0x04) completes the handshake
+        # with full mech/QoP; a REJECTED (0x0c) / other frame still proves
+        # SNC is enabled, so don't report those as "not enabled".
+        result["enabled"] = True
+    elif _diag_snc_error(reply):
+        # No SNCFrame, but the server returned a "Security Network Layer
+        # (SNC) error" — it rejected the plain probe at the SNC layer, which
+        # only happens when SNC is enabled (a CSTB / non-Kerberos target that
+        # refused our Kerberos INIT token).  Was a false "not enabled".
+        result["enabled"] = True
     else:
-        # No SNCFrame in response → SNC disabled.  We could look for the
-        # literal "SNC" substring in the DIAG info field as additional
-        # negative-confirmation, but its absence does not change the
-        # verdict — keep it simple.
         result["enabled"] = False
 
     if not result["enabled"]:
@@ -546,6 +581,7 @@ def scan_snc_router(host: str, port: int = 3299, timeout: float = 8.0,
     frame = _parse_snc_frame(reply)
     if frame:
         _result_from_frame(result, frame)
+        result["enabled"] = True       # any SNCFrame = SNC layer engaged
     else:
         result["enabled"] = False
     return result
@@ -566,10 +602,15 @@ def format_summary(info: dict) -> str:
     parts = []
     if info.get("mech_label"):
         parts.append(info["mech_label"])
-    parts.append(
-        f"QoP {info.get('qop_use', 0)}/"
-        f"{info.get('qop_max', 0)}/{info.get('qop_min', 0)}"
-    )
+    # QoP only when a handshake actually negotiated it — an SNC-enforced
+    # server that rejected our probe reports SNC enabled with no QoP (0/0/0).
+    if any((info.get("qop_use"), info.get("qop_max"), info.get("qop_min"))):
+        parts.append(
+            f"QoP {info.get('qop_use', 0)}/"
+            f"{info.get('qop_max', 0)}/{info.get('qop_min', 0)}"
+        )
     if info.get("protocol") == "diag":
         parts.append("enforced" if info.get("enforced") else "not enforced")
+    if not parts:
+        return "SNC: enabled"
     return "SNC: enabled (" + ", ".join(parts) + ")"

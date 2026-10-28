@@ -297,3 +297,46 @@ def test_sapnode_snc_info_roundtrips():
     revived = SAPNode.from_dict(serialised)
     assert revived.snc_info["enabled"] is True
     assert revived.snc_info["mech_id"] == 2
+
+
+# ---------------------------------------------------------------------------
+# SNC enabled detected from the DIAG "Security Network Layer (SNC) error"
+# reply (no SAPSNCFrame) — the false-negative on CSTB / non-Kerberos targets.
+# ---------------------------------------------------------------------------
+
+def test_diag_snc_error_helper_is_specific():
+    msg = "Security Network Layer (SNC) error".encode("utf-16-le")
+    assert sap_snc._diag_snc_error(b"\x00\x02\x00\x01\x00\x01\x00\x00" + msg)
+    assert sap_snc._diag_snc_error(b"something (SNC) error")
+    # A plain negative reply must NOT be treated as enabled.
+    assert not sap_snc._diag_snc_error(
+        b"\x00\x02\x00\x01\x00\x00\x00\x00SNC not enabled\x0c")
+    assert not sap_snc._diag_snc_error(b"")
+
+
+def test_scan_snc_diag_enabled_via_snc_error_reply(monkeypatch):
+    """Field capture against an SNC-enforced CSTB target: the server rejects
+    the plain probe and returns a DIAG 'Security Network Layer (SNC) error'
+    (UTF-16LE) with NO SAPSNCFrame.  Pre-fix this read as 'SNC: not enabled'."""
+    msg = "Security Network Layer (SNC) error".encode("utf-16-le")
+    body = b"\x00\x02\x00\x01\x00\x01\x00\x00" + msg
+    reply = struct.pack("!I", len(body)) + body
+    fake = _FakeSocket(reply)
+    monkeypatch.setattr(socket, "socket", lambda *a, **kw: fake)
+
+    result = sap_snc.scan_snc_diag("1.2.3.4", 3200, timeout=1.0)
+    assert result["checked"]
+    assert result["enabled"] is True, "SNC-error reply must be detected enabled"
+    assert "enabled" in sap_snc.format_summary(result)
+
+
+def test_scan_snc_diag_rejected_frame_is_enabled(monkeypatch):
+    """A REJECTED (0x0c) SNCFrame still means SNC is enabled, not disabled."""
+    rej = sap_snc._build_snc_frame(
+        flags=0x00, ext_fields=b"",
+        frame_type=sap_snc.SNC_FRAME_REJECTED, mech_id=0)
+    fake = _FakeSocket(_wrap_diag_response(rej))
+    monkeypatch.setattr(socket, "socket", lambda *a, **kw: fake)
+
+    result = sap_snc.scan_snc_diag("1.2.3.4", 3200, timeout=1.0)
+    assert result["enabled"] is True
