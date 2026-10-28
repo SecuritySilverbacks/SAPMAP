@@ -110,3 +110,6 @@ sapcrypto*.dll
 # (or rewritten) elsewhere in the tree.
 research/
 docs/research/
+
+# Ignore Python venv
+*venv/
