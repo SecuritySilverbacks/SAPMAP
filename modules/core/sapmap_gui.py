@@ -19351,6 +19351,58 @@ def create_app(api: SAPMAPApi) -> Bottle:
             except Exception as e:
                 logger.debug(f"{sid}: CVE-58240 check failed: {e}")
 
+            # Auto-detect SNC posture so a manually-added system shows its SNC
+            # status in System Details without a separate "Check SNC Posture"
+            # run.  Mirrors the network-scan path (sapmap_scanner) and the
+            # per-node action: DIAG SNC fingerprint on the dispatcher (32NN),
+            # or the SAProuter port for a router node, stored on node.snc_info.
+            print(f"[*] {sid}: Checking SNC posture...")
+            try:
+                from sap_snc import (scan_snc_diag, scan_snc_router,
+                                     format_summary as _snc_summary)
+                _is_router = "SAPROUTER" in (node.system_type or "").upper()
+                _snc_port = 0
+                if _is_router:
+                    for _inst in node.instances:
+                        for _p, _svc in (_inst.ports or {}).items():
+                            if _svc == "saprouter":
+                                _snc_port = _p
+                                break
+                        if _snc_port:
+                            break
+                    if not _snc_port:
+                        _snc_port = 3299
+                else:
+                    for _inst in node.instances:
+                        for _p, _svc in (_inst.ports or {}).items():
+                            if _svc == "dispatcher" or 3200 <= _p <= 3299:
+                                _snc_port = _p
+                                break
+                        if _snc_port:
+                            break
+                if _snc_port:
+                    if _is_router:
+                        node.snc_info = scan_snc_router(
+                            host, _snc_port, timeout=8, saprouter=saprouter)
+                    else:
+                        node.snc_info = scan_snc_diag(
+                            host, _snc_port, timeout=8, saprouter=saprouter)
+                    print(f"[+] {sid}: {_snc_summary(node.snc_info)}")
+                    try:
+                        if (node.snc_info.get("checked")
+                                and node.snc_info.get("enabled")):
+                            emit_finding(
+                                "INFO", sid,
+                                f"SNC posture: {_snc_summary(node.snc_info)}",
+                                ref="snc.posture",
+                                attack_capability="recon.snc_posture")
+                    except Exception:
+                        pass
+                else:
+                    print(f"[*] {sid}: no dispatcher/router port for SNC probe")
+            except Exception as e:
+                logger.debug(f"{sid}: SNC posture check failed: {e}")
+
         _bg(f"{sid}:enrich", "Enriching via RFC_SYSTEM_INFO", _enrich)
 
         return json.dumps({"status": "ok"})
