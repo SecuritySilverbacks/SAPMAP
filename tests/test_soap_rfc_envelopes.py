@@ -573,6 +573,62 @@ def test_dest_rfc_tcpip_create_envelope_carries_all_required_fields():
     assert "<RETURN/>" in env
 
 
+def test_dest_rfc_tcpip_create_envelope_no_snc_when_name_empty():
+    """Default (no snc_partnername) must emit NO SNC fields — the
+    envelope has to stay wire-compatible with plain non-SNC targets.
+    This is the pre-#172 behaviour; part 2 adds SNC only when asked."""
+    env = build_dest_rfc_tcpip_create(
+        name="SAPMAP_W74_20260630",
+        server_name="winwas740",
+        gateway_host="winwas740",
+        gateway_service="3340")
+    assert "<SNC_ACTIVE>" not in env
+    assert "<SNC_PARAMETER>" not in env
+    assert "<SNC_QOP>" not in env
+    assert "<SNC_PNAME>" not in env
+
+
+def test_dest_rfc_tcpip_create_envelope_adds_snc_when_partnername_given():
+    """Part 2 of #172: when the caller passes snc_partnername, the
+    envelope carries SNC_ACTIVE=X and a nested SNC_PARAMETER structure
+    (SNC_QOP=8 = max, SNC_PNAME=<partner>).  Shape confirmed in a live
+    lab by @supersache."""
+    env = build_dest_rfc_tcpip_create(
+        name="SAPMAP_N2A_20260630",
+        server_name="sapn2a",
+        gateway_host="sapn2a",
+        gateway_service="4800",
+        snc_partnername="p/cstb:CN=sapn2a, O=Kerby")
+    assert "<SNC_ACTIVE>X</SNC_ACTIVE>" in env
+    # The structure is a nested element with two sub-fields in order.
+    assert "<SNC_PARAMETER>" in env
+    assert "<SNC_QOP>8</SNC_QOP>" in env
+    assert ("<SNC_PNAME>p/cstb:CN=sapn2a, O=Kerby</SNC_PNAME>"
+            in env)
+    assert "</SNC_PARAMETER>" in env
+    # And a well-formed SNC_PARAMETER block (SNC_QOP + SNC_PNAME
+    # enclosed, not loose children).
+    import re
+    m = re.search(r"<SNC_PARAMETER>(.*?)</SNC_PARAMETER>", env, re.S)
+    assert m is not None
+    assert "<SNC_QOP>8</SNC_QOP>" in m.group(1)
+    assert "<SNC_PNAME>" in m.group(1)
+
+
+def test_dest_rfc_tcpip_create_envelope_escapes_snc_partnername():
+    """A partner DN can contain commas, '=' and (in theory) XML special
+    chars; escape them so the envelope stays well-formed."""
+    env = build_dest_rfc_tcpip_create(
+        name="SAPMAP_X_20260630",
+        server_name="x",
+        gateway_host="x",
+        gateway_service="4800",
+        snc_partnername='p/cstb:CN=weird<&>, O="x"')
+    assert "<SNC_PNAME>" in env
+    assert "&lt;" in env and "&amp;" in env and "&gt;" in env
+    assert "&quot;" in env
+
+
 def test_dest_check_connection_envelope():
     """Single NAME parameter naming the SM59 destination to ping."""
     env = build_dest_check_connection("S4H_SVC")
