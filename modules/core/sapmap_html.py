@@ -11431,6 +11431,13 @@ function showDetails(sid, opts) {
             : 'Not checked'
       }</span></div>` : ''}
       ${n.saprouter ? `<div class="detail-row"><span class="detail-key">SAProuter</span><span class="detail-val" style="color:#d29922">${escHtml(n.saprouter)}</span></div>` : ''}
+      ${n.snc_info && n.snc_info.checked ? `<div class="detail-row"><span class="detail-key">SNC</span><span class="detail-val">${
+        n.snc_info.enabled
+          ? `<span style="color:#3fb950">Enabled</span>` + (n.snc_info.enforced
+              ? ` &middot; <span style="color:#f85149">Enforced</span>`
+              : ` &middot; <span style="color:#d29922">Not enforced</span>`)
+          : `<span style="color:#8b949e">Not enabled</span>`
+      }${(n.snc_info.qop_use || n.snc_info.qop_max) ? ` <span style="font-size:11px;color:#8b949e">&middot; QoP ${escHtml(String(n.snc_info.qop_use || 0))}/${escHtml(String(n.snc_info.qop_max || 0))}</span>` : ''}${n.snc_info.mech_label ? ` <span style="font-size:11px;color:#8b949e">&middot; ${escHtml(n.snc_info.mech_label)}</span>` : ''}${n.snc_info.protocol ? ` <span style="font-size:11px;color:#8b949e">&middot; via ${escHtml(n.snc_info.protocol)}${n.snc_info.port ? ':' + escHtml(String(n.snc_info.port)) : ''}</span>` : ''}${n.snc_info.error ? ` <span style="font-size:11px;color:#8b949e">&middot; ${escHtml(n.snc_info.error)}</span>` : ''}</span></div>` : ''}
       ${n.snc_partnername ? `<div class="detail-row"><span class="detail-key">SNC Name</span><span class="detail-val" style="color:#d29922">${escHtml(n.snc_partnername)}</span></div>` : ''}
 
       ${n.java_secstore_checked ? `
