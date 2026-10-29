@@ -231,6 +231,25 @@ class RFCConnection:
                 filtered['sysnr'] = int(filtered['sysnr'])
             except (ValueError, TypeError):
                 pass
+        # saprfclib expects native types for the SNC knobs, but SAPMAP's
+        # sapmap_rfc._snc_params_for() (and the C-SDK-shaped callers) pass
+        # strings: snc_sso="0"/"1" and snc_qop="9".  Left as strings,
+        # saprfclib evaluates `if snc_sso:` on the string "0" — which is
+        # truthy — and wrongly enters the SSO2 path (NotImplementedError
+        # "SNC SSO2 extension headers are not reverse-engineered (D-23)"),
+        # breaking EVERY SNC connection on the pure backend.  Coerce
+        # explicitly (issue #167).
+        if 'snc_sso' in filtered:
+            v = filtered['snc_sso']
+            if isinstance(v, str):
+                filtered['snc_sso'] = v.strip().lower() in ('1', 'true', 'yes', 'on')
+            else:
+                filtered['snc_sso'] = bool(v)
+        if 'snc_qop' in filtered:
+            try:
+                filtered['snc_qop'] = int(filtered['snc_qop'])
+            except (ValueError, TypeError):
+                pass
         try:
             self._conn = _lib.connect(**filtered)
         except _lib.SapRfcError as e:

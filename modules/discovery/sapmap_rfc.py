@@ -307,6 +307,17 @@ def _get_connection(node: SAPNode, creds: Credentials = None,
     snc_params = _snc_params_for(node_snc_name)
     if snc_params:
         params.update(snc_params)
+        # CommonCryptoLib locates the client PSE + cred_v2 via the SECUDIR
+        # environment variable — the GSS provider reads it, the RFC params
+        # don't carry it.  _snc_params_for only returns params when the
+        # posture (incl. secudir) is fully configured, so mirror the
+        # configured SECUDIR into the environment here; otherwise the
+        # handshake fails with GSS_S_FAILURE (0x00070000) acquiring the
+        # client credential (issue #167, confirmed live).
+        import os as _os
+        _secudir = _snc_config.get("secudir", "")
+        if _secudir:
+            _os.environ["SECUDIR"] = _secudir
         print(f"[*] {node.sid}: SNC params added to connection "
               f"(snc_myname={snc_params['snc_myname']!r}, "
               f"snc_partnername={snc_params['snc_partnername']!r}, "
@@ -412,6 +423,65 @@ def test_connection(node: SAPNode, creds: Credentials = None,
         elif "library" in err.lower() or "sdk" in err.lower() or "load" in err.lower():
             print(f"    SAP NW RFC SDK not found — set the SDK path in settings")
         return False
+
+
+# ---------------------------------------------------------------------------
+# Authenticated RFC_SYSTEM_INFO (issue #167 — SNC-aware system info)
+# ---------------------------------------------------------------------------
+
+def get_rfc_system_info(node: SAPNode, creds: Credentials = None,
+                        host_override: str = "") -> dict:
+    """Fetch RFC_SYSTEM_INFO over an AUTHENTICATED RFC logon.
+
+    This is the SNC-capable counterpart to the anonymous Stage-0 /
+    legacy raw-NI probes in ``sap_rfc_sysinfo_probe`` / ``sap_rfc_system_info``
+    (issue #167).  It goes through :func:`_get_connection`, which injects the
+    SNC parameters (``snc_lib`` / ``snc_myname`` / ``snc_partnername``) whenever
+    the global SNC posture is configured (``set_snc_config``) *and* this node
+    carries an SNC partner name.  With ``snc_lib`` set, the active backend
+    connects on the SNC gateway port (saprfclib: ``4800 + sysnr``), so the
+    call traverses the SNC layer transparently.
+
+    A truly anonymous RFC_SYSTEM_INFO is not possible over SNC — the SNC
+    transport comes up but the application-layer logon still runs, so valid
+    credentials (or an SNC-SSO cert mapped to a user) are required.  Hence
+    this is the authenticated path; discovery classifies SNC-only systems
+    separately when no credentials are available.
+
+    Returns a normalized dict:
+      ``{sid, hostname, ip, os_type, db_type, kernel, sap_release,
+         snc (bool), source, error}``
+    where ``source`` is ``"rfcsi_snc_auth"`` when SNC was negotiated, else
+    ``"rfcsi_auth"``; ``error`` is non-empty on failure (all other fields
+    blank).
+    """
+    out = {"sid": "", "hostname": "", "ip": "", "os_type": "", "db_type": "",
+           "kernel": "", "sap_release": "", "snc": False, "source": "",
+           "error": ""}
+    node_snc_name = (getattr(node, "snc_partnername", "") or "").strip()
+    snc_on = bool(_snc_params_for(node_snc_name))
+    out["snc"] = snc_on
+    try:
+        with _get_connection(node, creds, host_override=host_override) as conn:
+            info = conn.call("RFC_SYSTEM_INFO")
+            exp = info.get("RFCSI_EXPORT", info) if isinstance(info, dict) else {}
+            if not isinstance(exp, dict):
+                exp = {}
+
+            def _g(k):
+                return (exp.get(k, "") or "").strip()
+
+            out["sid"] = _g("RFCSYSID")
+            out["hostname"] = _g("RFCHOST2") or _g("RFCHOST")
+            out["os_type"] = _g("RFCOPSYS")
+            out["db_type"] = _g("RFCDBSYS")
+            out["kernel"] = _g("RFCKERNRL")
+            out["sap_release"] = _g("RFCSAPRL")
+            out["ip"] = _g("RFCIPV6ADDR") or _g("RFCIPADDR")
+            out["source"] = "rfcsi_snc_auth" if snc_on else "rfcsi_auth"
+    except Exception as e:
+        out["error"] = format_rfc_exception(e)
+    return out
 
 
 # ---------------------------------------------------------------------------

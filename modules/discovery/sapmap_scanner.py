@@ -3170,6 +3170,48 @@ def enrich_system_info(host: str, gw_port: int, timeout: float = 10,
             result = {"status": "error", "methods_tried": [], "methods_success": []}
             status = "error"
 
+    # --- Issue #167: SNC-secured systems can't be probed anonymously ---
+    # When the anonymous RFC probes returned no system info AND the SNC
+    # gateway port (48XX) is open, the gateway is SNC-secured: the raw-NI
+    # RFC_SYSTEM_INFO on 33XX can't traverse the SNC layer, and SNC
+    # transport still requires an application-layer logon (verified live —
+    # SNC comes up, but an anonymous logon is rejected).  Classify cleanly
+    # instead of leaving a silent blank, and point the operator at the
+    # authenticated SNC path (sapmap_rfc.get_rfc_system_info, which runs
+    # once SNC is configured and credentials exist).  Discovery stays
+    # unauthenticated — this only probes the SNC port and labels the node.
+    if (not info.get("sid") and not saprouter
+            and 3300 <= gw_port <= 3399):
+        snc_gw_port = 4800 + (gw_port - 3300)
+        snc_open = False
+        try:
+            import socket as _snc_sock
+            _s = _snc_sock.socket(_snc_sock.AF_INET, _snc_sock.SOCK_STREAM)
+            _s.settimeout(min(timeout, 4))
+            _s.connect((host, snc_gw_port))
+            _s.close()
+            snc_open = True
+        except Exception:
+            snc_open = False
+        if snc_open:
+            info["snc_required"] = True
+            if not info.get("sysinfo_source"):
+                info["sysinfo_source"] = "snc_required"
+            print(f"[!] {tag}: RFC_SYSTEM_INFO not reachable anonymously — SNC "
+                  f"gateway open on {host}:{snc_gw_port}; system is SNC-secured. "
+                  f"An authenticated SNC probe is required (configure SNC + "
+                  f"credentials; see 'SNC Configuration').")
+            try:
+                emit_finding(
+                    "INFO", tag,
+                    f"RFC_SYSTEM_INFO not reachable anonymously — {host} is "
+                    f"SNC-secured (SNC gateway open on :{snc_gw_port}); "
+                    f"authenticated SNC RFC is required to read system info.",
+                    ref="rfc.system_info.snc_required",
+                    attack_capability="recon.rfc_system_info_leak")
+            except Exception:
+                pass
+
     # Build ordered instance number list for SAPControl queries
     _seen = set()
     ordered_nrs = []

@@ -8287,6 +8287,42 @@ def create_app(api: SAPMAPApi) -> Bottle:
                 if not node.db_type:
                     print(f"[*] No database ports detected on {host}")
 
+            # Issue #167: when this node has working credentials AND an SNC
+            # name is set, additionally read RFC_SYSTEM_INFO over the
+            # AUTHENTICATED SNC path (sapmap_rfc.get_rfc_system_info →
+            # saprfclib → 48XX).  The anonymous enrich above cannot traverse
+            # SNC, so on an SNC-secured system this authenticated read is the
+            # only way the "RFC System Info" refresh yields data.  Its result
+            # is authoritative, so it takes precedence over the anon fields.
+            try:
+                _creds = node.best_credentials()
+            except Exception:
+                _creds = None
+            _snc_name = (getattr(node, "snc_partnername", "") or "").strip()
+            if _creds and _snc_name:
+                print(f"[*] {node.sid}: trying authenticated SNC "
+                      f"RFC_SYSTEM_INFO (48XX)...")
+                si = sapmap_rfc.get_rfc_system_info(node, _creds)
+                if si.get("error"):
+                    print(f"[*] {node.sid}: authenticated SNC system info "
+                          f"unavailable: {si['error']}")
+                else:
+                    if si.get("sid") and node.sid.startswith("UNK"):
+                        node.sid = si["sid"]
+                    node.hostname = si.get("hostname") or node.hostname
+                    node.os_type = si.get("os_type") or node.os_type
+                    node.db_type = si.get("db_type") or node.db_type
+                    node.kernel = si.get("kernel") or node.kernel
+                    node.sap_release = si.get("sap_release") or node.sap_release
+                    if si.get("ip"):
+                        node.ip = si["ip"]
+                    if si.get("source"):
+                        node.sysinfo_source = si["source"]
+                    print(f"[+] {node.sid}: RFC_SYSTEM_INFO over SNC "
+                          f"(authenticated) — SID={node.sid}, "
+                          f"kernel={node.kernel or '?'}, "
+                          f"host={node.hostname or '?'}")
+
         _bg(f"{sid}:rfc_system_info", "RFC System Info", _run)
         return json.dumps({"status": "started"})
 
