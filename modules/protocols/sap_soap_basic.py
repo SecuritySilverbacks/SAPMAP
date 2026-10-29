@@ -334,13 +334,19 @@ class SOAPRFCSession:
                               program: str = "sapxpg",
                               description: str = "",
                               method: str = "E",
-                              cpic_timeout: str = "20") -> dict:
+                              cpic_timeout: str = "20",
+                              snc_partnername: str = "") -> dict:
         """Create a Type-T (TCP/IP) RFC destination.
 
         Returns a dict shaped to match
         sapmap_rfc.create_tcpip_destination's contract:
           {"success": bool, "message": str, "dest_name": str}
         — so the GUI handler can dispatch to either transport.
+
+        ``snc_partnername`` (part 2 of #172): when the target gateway
+        enforces SNC, the destination has to be SNC-secured itself —
+        set this to add SNC_ACTIVE + SNC_PARAMETER to the envelope.
+        Empty / omitted = non-SNC (wire-compatible default).
         """
         result = {"success": False, "message": "", "dest_name": name}
         try:
@@ -349,7 +355,8 @@ class SOAPRFCSession:
                 gateway_host=gateway_host,
                 gateway_service=gateway_service,
                 program=program, description=description,
-                method=method, cpic_timeout=cpic_timeout)
+                method=method, cpic_timeout=cpic_timeout,
+                snc_partnername=snc_partnername)
             response_xml = self._post_soap(body)
         except SOAPRFCError as e:
             result["message"] = f"transport: {e}"

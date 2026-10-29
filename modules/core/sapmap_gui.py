@@ -17700,18 +17700,10 @@ def create_app(api: SAPMAPApi) -> Bottle:
                 print(f"[-] No credentials available for {sid}")
                 return
             tgt_host = tgt_node.ip or tgt_node.hostname
-            # Find gateway port on target
-            gw_port = ""
-            for inst in tgt_node.instances:
-                for port, svc in inst.ports.items():
-                    if svc == "gateway" or (3300 <= port <= 3399):
-                        gw_port = str(port)
-                        break
-                if gw_port:
-                    break
-            if not gw_port:
-                nrs = tgt_node.instance_nrs()
-                gw_port = f"33{nrs[0]}" if nrs else "3300"
+            # Pick the target's gateway port SNC-aware (#172): an SNC
+            # system's registered-program gateway is gw/snc_port (4800+NN),
+            # not the plain 33NN which is typically firewalled.
+            gw_port = sapmap_rfc._resolve_gateway_service(tgt_node)
             print(f"[*] Creating TCP/IP dest from {sid} → "
                   f"{target_sid} ({tgt_host}, gw={gw_port})...")
             # Phase 3b: when the SOURCE node's gateway is firewalled,
@@ -17721,6 +17713,13 @@ def create_app(api: SAPMAPApi) -> Bottle:
             # path (SAPMAP_<sid>_<timestamp>).
             _td_sess, _ = resolve_soap_session_for_node(
                 api.state, node)
+            # Part 2 of #172: if the target gateway enforces SNC, the
+            # registered-program connection the destination will make
+            # must itself be SNC-secured — otherwise SDEST E 017 at
+            # use, even when pointed at 4800+NN.  Thread the target's
+            # own partner name; the gate inside each helper decides
+            # whether to actually add SNC_ACTIVE / SNC_PARAMETER.
+            _tgt_snc_name = getattr(tgt_node, "snc_partnername", "") or ""
             if _td_sess is not None:
                 from datetime import datetime as _dt
                 _ts = _dt.now().strftime("%Y%m%d%H%M%S")
@@ -17735,11 +17734,21 @@ def create_app(api: SAPMAPApi) -> Bottle:
                     gateway_host=tgt_host,
                     gateway_service=gw_port,
                     description=(f"TCP/IP CONNECTION TO "
-                                 f"{target_sid or tgt_host}"))
+                                 f"{target_sid or tgt_host}"),
+                    snc_partnername=_tgt_snc_name)
+                # Mirror the pyrfc path's SNC-aware print so the
+                # operator can see from the console whether SNC was
+                # threaded into the SM59 record on this branch too.
+                if result.get("success"):
+                    _snc_tag = " SNC" if _tgt_snc_name else ""
+                    print(f"[+] {sid}: Created TCP/IP dest "
+                          f"{dest_name_guess} → {tgt_host} "
+                          f"(gw={gw_port}{_snc_tag}) via SOAP-RFC")
             else:
                 result = sapmap_rfc.create_tcpip_destination(
                     node, tgt_host, target_sid=target_sid,
-                    target_gw_port=gw_port, creds=creds
+                    target_gw_port=gw_port, creds=creds,
+                    snc_partnername=_tgt_snc_name,
                 )
             if not result["success"]:
                 print(f"[-] Failed: {result['message']}")
