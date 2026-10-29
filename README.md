@@ -1660,6 +1660,8 @@ The SNC name can also be set without typing it: a SAP UI landscape XML import pi
 
 The same SNC gate applies to the password-spray **RFC fallback** (issue #106) that validates SYSTEM / COMMUNICATION / SERVICE users (`USTYP B/S/C`) which DIAG cannot confirm: when a target carries an SNC name and the global SNC posture is configured, the name is threaded through the spray engine into the credential check, so those service-user candidates can be validated against SNC-only targets as well (issue #168).
 
+It also drives **system-info enrichment** (issue #167). The anonymous `RFC_SYSTEM_INFO` discovery probe speaks plain NI to 33XX and cannot traverse SNC — and because SNC transport still performs an application-layer logon, a *truly anonymous* `RFC_SYSTEM_INFO` over SNC is not possible (the SNC handshake comes up, but the anonymous logon is rejected). SAPMAP therefore (a) during discovery, when the anonymous probe returns nothing and the SNC gateway (48XX) is open, classifies the system as **SNC-secured — authenticated probe needed** instead of leaving a silent blank, and (b) once credentials exist and the target carries an SNC name, reads `RFC_SYSTEM_INFO` over the authenticated SNC path (saprfclib connects on 4800 + sysnr) to fill the node's SID / host / kernel / DB — automatically after user creation, and on demand via the node's *RFC System Info* action.
+
 ### Constraints
 
 * Valid targets are only ABAP application servers.
