@@ -1074,8 +1074,6 @@ body {
   <div class="menu-item">Scan
     <div class="menu-dropdown">
       <div class="dd-item" onclick="toggleToolbar()">&#128295; Toggle Scan Panel</div>
-      <div class="dd-sep"></div>
-      <div class="dd-item" onclick="checkAllSnc()" title="Re-probe the SNC posture (enabled / enforced / QoP) of every system via the DIAG or SAProuter SNC fingerprint — the landscape-wide equivalent of each node's 'Re-probe SNC' button.">&#128274; Re-probe SNC Posture (all systems)</div>
     </div>
   </div>
   <div class="menu-item">Actions
@@ -1407,6 +1405,7 @@ body {
       <div class="ctx-item" data-action="standard_scan">&#128270; Standard Scan (fingerprint host)</div>
       <div class="ctx-item write-op" data-action="analyse_capabilities">&#128201; Analyse User Capabilities</div>
       <div class="ctx-item" data-action="rfc_system_info">&#128225; RFC System Info</div>
+      <div class="ctx-item" data-action="check_snc" title="Re-probe this system's SNC posture (enabled / enforced / QoP) via the DIAG or SAProuter SNC fingerprint. Same as the 'Re-probe SNC' button in System Details.">&#128274; Re-probe SNC Posture</div>
       <div class="ctx-item" data-action="check_gw">&#128270; Check GW Vulnerability</div>
       <div class="ctx-item" data-action="check_ms">&#128270; Check MS Betrusted &mdash; 10KBlaze (CVE-2020-6207)</div>
       <div class="ctx-item" data-action="check_cve_58240">&#128270; Check CVE-2026-58240 (MS ASCS_GW rogue reg.)</div>
