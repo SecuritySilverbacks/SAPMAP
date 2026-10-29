@@ -1074,6 +1074,8 @@ body {
   <div class="menu-item">Scan
     <div class="menu-dropdown">
       <div class="dd-item" onclick="toggleToolbar()">&#128295; Toggle Scan Panel</div>
+      <div class="dd-sep"></div>
+      <div class="dd-item" onclick="checkAllSnc()" title="Re-probe the SNC posture (enabled / enforced / QoP) of every system via the DIAG or SAProuter SNC fingerprint — the landscape-wide equivalent of each node's 'Re-probe SNC' button.">&#128274; Re-probe SNC Posture (all systems)</div>
     </div>
   </div>
   <div class="menu-item">Actions
