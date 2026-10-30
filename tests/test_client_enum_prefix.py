@@ -33,8 +33,11 @@ def offline(monkeypatch):
     monkeypatch.setattr(sap_client_enum, "ni_send", lambda *a, **k: None)
     monkeypatch.setattr(sap_client_enum, "ni_recv", lambda *a, **k: b"\x00" * 60)
     monkeypatch.setattr(sap_client_enum, "build_diag_init", lambda *a, **k: b"")
+    # 4-tuple: (is_redirecting, default_client, init_resp, calib_succeeded).
+    # calib_succeeded=5 (all calibration logons answered) so enumerate_clients
+    # runs the probe loop rather than failing fast (issue #193 early-abort).
     monkeypatch.setattr(sap_client_enum, "_check_client_redirection",
-                        lambda *a, **k: (False, None, None))
+                        lambda *a, **k: (False, None, None, 5))
 
 
 def _run(sid_hint, result_tuple):

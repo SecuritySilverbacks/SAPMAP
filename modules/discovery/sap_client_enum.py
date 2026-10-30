@@ -37,7 +37,34 @@ import time
 import random
 import string
 import argparse
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
+
+
+# Human-readable hints for the dominant per-probe failure code, surfaced when
+# an enumeration errors out on (nearly) every client instead of ever getting a
+# definitive answer (issue #193).  Keyed by the ``detail`` string that
+# ``probe_client`` already returns.
+_ENUM_FAILURE_HINTS = {
+    "no_login_response": (
+        "the server accepted the DIAG init but dropped/ignored the login "
+        "packet — typical of an SNC-enforced GUI logon "
+        "(snc/only_encrypted_gui=1), a kernel that requires DIAG compression, "
+        "or a message-server/logon-group redirect"),
+    "no_init_response": (
+        "the per-probe DIAG init got no usable response — the dispatcher "
+        "likely refused the parallel connects; retry with fewer threads"),
+    "inconclusive": (
+        "the server returned small, unrecognized replies to the login packet "
+        "— possible non-standard kernel response or a partial SNC handshake"),
+    "timeout": (
+        "login probes timed out — the dispatcher may be overloaded / high-"
+        "latency, or a firewall/IPS is dropping the DIAG logon; retry with "
+        "fewer threads and a higher timeout"),
+    "connection_refused": (
+        "the probe connections were refused — the dispatcher port may be "
+        "firewalled against rapid connects"),
+}
 
 
 def _diag_connect(host, port, timeout, saprouter=""):
@@ -433,7 +460,11 @@ def _check_client_redirection(host, port, timeout=5, saprouter=""):
     probes succeeded, the system is redirecting. Failed probes (connection
     errors, timeouts) are tolerated — they do not abort the check.
 
-    Returns: (is_redirecting, default_client_str_or_None, init_resp_bytes)
+    Returns: (is_redirecting, default_client_str_or_None, init_resp_bytes,
+              calibration_succeeded)
+        calibration_succeeded: how many of the 5 calibration logons got ANY
+        response back.  0 means the dispatcher answered the init but dropped
+        every login submit — the caller uses this to fail fast (issue #193).
     """
     test_clients = [990, 991, 992, 993, 994]
     init_resp = None
@@ -481,16 +512,16 @@ def _check_client_redirection(host, port, timeout=5, saprouter=""):
                     pass
 
     if client_validated:
-        return (False, None, init_resp)
+        return (False, None, init_resp, succeeded)
 
     # If at least 3 probes succeeded and none returned "client not available",
     # the system is very likely redirecting
     if succeeded >= 3:
         default_client = _extract_default_client(init_resp) if init_resp else None
-        return (True, default_client, init_resp)
+        return (True, default_client, init_resp, succeeded)
 
     # Too few successful probes to determine — assume no redirection
-    return (False, None, init_resp)
+    return (False, None, init_resp, succeeded)
 
 
 # ============================================================================
@@ -662,7 +693,8 @@ def enumerate_clients(host, port, timeout=5, max_workers=20,
     # Detect client redirection (S/4HANA systems with login/system_client)
     # Some systems redirect all logins to a default client, making per-client
     # enumeration impossible. Detect this before wasting 1000 probes.
-    is_redirecting, default_client, _ = _check_client_redirection(host, port, timeout, saprouter=saprouter)
+    is_redirecting, default_client, _, calib_succeeded = _check_client_redirection(
+        host, port, timeout, saprouter=saprouter)
     if is_redirecting:
         print("  [!] %sClient redirection/hardening detected — server never returns" % tag)
         print("      'Client not available', making per-client enumeration impossible.")
@@ -677,8 +709,31 @@ def enumerate_clients(host, port, timeout=5, max_workers=20,
         result["probed"] = 5  # calibration probes
         return result
 
+    # Fail fast (issue #193): the DIAG init handshake worked (we're past the
+    # verification above), but if NONE of the 5 calibration logons got any
+    # response, the dispatcher is accepting the plaintext login screen yet
+    # silently dropping every logon packet.  Probing all 1000 clients would
+    # only produce errors=1000 with no explanation — abort now, surface the
+    # likely cause, and let the caller fall back to the guaranteed client 000.
+    if calib_succeeded == 0:
+        result["status"] = "error"
+        result["error"] = (
+            f"DIAG client enumeration not possible on {host}:{port} — the "
+            f"initial DIAG init succeeded, but 0/5 calibration logons "
+            f"completed a full init+logon round-trip. Most likely the server "
+            f"serves the plaintext DIAG login screen yet drops the logon "
+            f"packet: an SNC-enforced GUI logon (snc/only_encrypted_gui=1), a "
+            f"kernel that requires DIAG compression, or a message-server/"
+            f"logon-group redirect; a transient dispatcher overload or "
+            f"firewall drop can also do this. Re-run verbose at low "
+            f"concurrency to see the raw per-probe outcome: "
+            f"sap_client_enum.py -t {host}:{port} --range 0-5 -v --threads 2")
+        result["probed"] = 5  # calibration probes only
+        return result
+
     # Probe all clients in parallel
     found = []
+    error_reasons = Counter()
     clients_range = range(start_client, end_client + 1)
 
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -703,11 +758,13 @@ def enumerate_clients(host, port, timeout=5, max_workers=20,
                               (tag, client_str))
                 elif available is None:
                     result["errors"] += 1
+                    error_reasons[detail or "unknown"] += 1
                     if verbose:
                         print("  [!] %sClient %s: error (%s)" %
                               (tag, client_str, detail))
-            except Exception:
+            except Exception as e:
                 result["errors"] += 1
+                error_reasons["exception: %s" % type(e).__name__] += 1
 
     # Sanity check: if an implausible number of clients were found (>100),
     # the redirection check likely failed and the server is actually redirecting
@@ -736,6 +793,34 @@ def enumerate_clients(host, port, timeout=5, max_workers=20,
             clients.add(default_client)
         result["clients"] = sorted(clients)
         result["redirected"] = True
+        return result
+
+    # Record the per-probe failure breakdown so the operator (and the scanner
+    # summary) can see WHY probes failed, not just how many (issue #193).
+    if error_reasons:
+        result["error_reasons"] = dict(error_reasons)
+
+    # Backstop for the calibration check: if nothing was found AND essentially
+    # every probe errored (no client ever returned a definitive "not
+    # available"), the enumeration failed rather than genuinely finding an
+    # empty landscape.  Surface the dominant reason and mark status=error so
+    # the caller falls back to client 000.  The 0.95 threshold tolerates a
+    # handful of stray non-error outcomes while still catching the all-failed
+    # case (errors==probed) the reporter hit.
+    if (not found and result["probed"] > 0
+            and result["errors"] >= result["probed"] * 0.95):
+        top_code, top_n = error_reasons.most_common(1)[0]
+        hint = _ENUM_FAILURE_HINTS.get(
+            top_code, "re-run verbose at low concurrency for the raw detail")
+        result["status"] = "error"
+        result["error"] = (
+            f"client enumeration failed on {host}:{port} — "
+            f"{result['errors']}/{result['probed']} probes errored and no "
+            f"client was identified. Dominant reason: {top_code} (×{top_n}) — "
+            f"{hint}. Re-run verbose at low concurrency for the raw per-probe "
+            f"outcome: sap_client_enum.py -t {host}:{port} --range 0-5 -v "
+            f"--threads 2")
+        result["clients"] = []
         return result
 
     result["clients"] = sorted(found)
