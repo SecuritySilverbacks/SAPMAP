@@ -429,13 +429,23 @@ def _correct_node_from_http(target_node, http_info: dict):
             target_node.instances[0].ports = new_p
             print(f"[*] {target_node.sid}: corrected "
                   f"instance {old_i}→{probed}")
-    if http_info.get("ip") and not target_node.ip:
-        target_node.ip = http_info["ip"]
+    _reach_ip = http_info.get("ip")
+    _rep_ip = http_info.get("reported_ip")
+    if _reach_ip and not target_node.ip:
+        target_node.ip = _reach_ip
+    elif (_reach_ip and _rep_ip and _reach_ip != _rep_ip
+            and target_node.ip == _rep_ip):
+        # A pre-fix run stored the target's self-reported (internal/NAT)
+        # address as the node IP.  We now know the reachable address, so
+        # promote it and demote the internal one to reported_ip — otherwise
+        # reloading that saved state keeps pointing at an unroutable IP.
+        print(f"[*] {target_node.sid}: repaired node IP "
+              f"{target_node.ip}→{_reach_ip} (was self-reported internal)")
+        target_node.ip = _reach_ip
     # The target's self-reported (often internal/NAT) IP — kept for recon,
     # shown only when it differs from the reachable node IP.
-    if (http_info.get("reported_ip")
-            and http_info["reported_ip"] != target_node.ip):
-        target_node.reported_ip = http_info["reported_ip"]
+    if _rep_ip and _rep_ip != target_node.ip:
+        target_node.reported_ip = _rep_ip
     if http_info.get("hostname") and not target_node.hostname:
         target_node.hostname = http_info["hostname"]
     icm_port = http_info.get("icm_port")
