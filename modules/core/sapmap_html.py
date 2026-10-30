@@ -1283,6 +1283,7 @@ body {
     </span>
     <span style="flex:1"></span>
     <label style="cursor:pointer;display:flex;align-items:center;gap:6px;padding:2px 10px;border:1px solid #30363d;border-radius:4px;background:#161b22;color:#c9d1d9;font-size:11px"><input type="checkbox" id="show-unknown" style="accent-color:#f0883e;width:14px;height:14px" onchange="updateMap()"> Show unknown targets</label>
+    <label title="Hide the DBCON database cylinders and STMS transport trucks to de-clutter the map" style="cursor:pointer;display:flex;align-items:center;gap:6px;padding:2px 10px;border:1px solid #30363d;border-radius:4px;background:#161b22;color:#c9d1d9;font-size:11px"><input type="checkbox" id="hide-satellites" style="accent-color:#f0883e;width:14px;height:14px" onchange="updateMap()"> Hide STMS &amp; DB</label>
   </div>
 
   <!-- Legend — full modal.  Groups every edge/node style into sections
@@ -4613,6 +4614,10 @@ function updateMap() {
 
   // Collect unknown targets when checkbox is on
   const showUnknown = document.getElementById('show-unknown') && document.getElementById('show-unknown').checked;
+  // Issue #191: operator de-clutter toggle — hides every DBCON cylinder
+  // and TMS truck (and their connecting edges + host-zone contribution).
+  const hideSatellites = !!(document.getElementById('hide-satellites')
+                            && document.getElementById('hide-satellites').checked);
   const unknownTargets = {};  // host -> { _x, _y, label }
   if (showUnknown) {
     let unkIdx = 0;
@@ -4757,21 +4762,25 @@ function updateMap() {
       // the zone excludes it; next render picks it up (positions
       // are computed + persisted during the DBCON drawing loop
       // further down in this render, and the next poll re-enters
-      // this block).
-      for (const edge of (n.dbcon_edges || [])) {
-        const pk = sid + '|' + edge.con_name;
-        const p = dbconPositions[pk];
-        if (p) addToZone(k, p._x, p._y,
-                          _DB_ACCESSORY_W, _DB_ACCESSORY_H,
-                          `dbcon:${edge.con_name}`, 'dbcon');
-      }
-      // TMS trucks — same story.
-      for (const dest of (n.tms_destinations || [])) {
-        const pk = 'tms:' + sid + '|' + dest.target_sid + '|' + dest.domain;
-        const p = tmsPositions[pk];
-        if (p) addToZone(k, p._x, p._y,
-                          _TMS_ACCESSORY_W, _TMS_ACCESSORY_H,
-                          `tms:${dest.target_sid}`, 'tms');
+      // this block).  Skipped when the operator has hidden the
+      // accessories (#191) so the host zone doesn't balloon around
+      // the empty space they would have occupied.
+      if (!hideSatellites) {
+        for (const edge of (n.dbcon_edges || [])) {
+          const pk = sid + '|' + edge.con_name;
+          const p = dbconPositions[pk];
+          if (p) addToZone(k, p._x, p._y,
+                            _DB_ACCESSORY_W, _DB_ACCESSORY_H,
+                            `dbcon:${edge.con_name}`, 'dbcon');
+        }
+        // TMS trucks — same story.
+        for (const dest of (n.tms_destinations || [])) {
+          const pk = 'tms:' + sid + '|' + dest.target_sid + '|' + dest.domain;
+          const p = tmsPositions[pk];
+          if (p) addToZone(k, p._x, p._y,
+                            _TMS_ACCESSORY_W, _TMS_ACCESSORY_H,
+                            `tms:${dest.target_sid}`, 'tms');
+        }
       }
     });
     Object.entries(sccNodes).forEach(([host, sn]) => {
@@ -5920,6 +5929,7 @@ function updateMap() {
   // user on the target via direct SQL.
   const DB_BOX_W = 150, DB_BOX_H = 100;
   Object.values(nodes).forEach(src => {
+    if (hideSatellites) return;        // #191: operator hid DB/STMS accessories
     const edges = src.dbcon_edges || [];
     if (!edges.length) return;
     // Stack DBCON nodes vertically BELOW the source.  Prior versions
@@ -6187,6 +6197,7 @@ function updateMap() {
   // ===================================================================
   const TMS_BOX_W = 160, TMS_BOX_H = 100;
   Object.values(nodes).forEach(src => {
+    if (hideSatellites) return;        // #191: operator hid DB/STMS accessories
     const dests = src.tms_destinations || [];
     if (!dests.length) return;
     // Stack TMS trucks vertically BELOW the source, in a column
@@ -20556,6 +20567,7 @@ function _sccHostForNode(n) {
 }
 function resetLayout() {
   flashActivity('Rearranging: Reset');
+  _loReanchorSatellites();
   viewBoxUserControlled = false;
   viewBox.x = 0; viewBox.y = 0; viewBox._nodeCount = 0;
   Object.values(mapState.nodes || {}).forEach(n => { n._x = null; n._y = null; });
@@ -20594,6 +20606,20 @@ function _loSortedNodeKeys() {
   return Object.keys(nodes).sort();
 }
 
+// Re-anchor the DBCON cylinder / TMS truck accessories to their source.
+// These live in their source SAP box's zone but are cached by ABSOLUTE
+// coords in dbconPositions / tmsPositions, which the layout functions
+// never move — so after a re-layout the source box jumps elsewhere and
+// the accessories stay stranded at their old spot (issue #191).  An
+// explicit Layout command is a GLOBAL re-arrange, so we drop ALL cached
+// accessory positions (pinned manual drags included); the next render
+// re-walks each one fresh, below/right of its source's new position.
+// Called by every layout entry point before its fitMap()/updateMap().
+function _loReanchorSatellites() {
+  dbconPositions = {};
+  tmsPositions = {};
+}
+
 // Place BTP subaccount nodes in a horizontal strip starting at
 // (xStart, yStart) and return the vertical space they consumed
 // (0 when there are none).  Every alternative layout calls this
@@ -20630,6 +20656,7 @@ function layoutCircle() {
   ].filter(x => x.obj);
   if (allItems.length === 0) return;
   flashActivity('Rearranging: Circle');
+  _loReanchorSatellites();
   // Radius scales with total node count so boxes never overlap on the ring.
   const total = allItems.length;
   const circ = total * (_LO_BOX_W + _LO_MARGIN);
@@ -20650,6 +20677,7 @@ function layoutStar() {
   const sccHosts = Object.keys(mapState.scc_nodes || {}).sort();
   if (sids.length === 0 && sccHosts.length === 0) return;
   flashActivity('Rearranging: Star');
+  _loReanchorSatellites();
   const nodes = mapState.nodes || {};
   const conns = mapState.connections || [];
   const deg = {};
@@ -20692,6 +20720,7 @@ function layoutHierarchy() {
   const sids = _loSortedNodeKeys();
   if (sids.length === 0) return;
   flashActivity('Rearranging: Hierarchy');
+  _loReanchorSatellites();
   const nodes = mapState.nodes;
   const conns = mapState.connections || [];
   // Build incoming edge map (target -> [source])
@@ -20858,6 +20887,7 @@ function layoutByStack() {
   const sccHosts = Object.keys(mapState.scc_nodes || {}).sort();
   if (sids.length === 0 && sccHosts.length === 0) return;
   flashActivity('Rearranging: Group by Stack');
+  _loReanchorSatellites();
   const nodes = mapState.nodes;
 
   function bucketOf(n) {
@@ -20916,6 +20946,7 @@ function layoutFitCanvas() {
   const N = items.length;
   if (N === 0) return;
   flashActivity('Rearranging: Fit Canvas');
+  _loReanchorSatellites();
   const svg = document.getElementById('map-svg');
   const vpW = (svg && svg.clientWidth)  || 1200;
   const vpH = (svg && svg.clientHeight) || 800;
@@ -20970,6 +21001,7 @@ function layoutFixedColumns() {
   cols = Math.min(cols, N);
   _fixedColsPref = cols;
   flashActivity('Rearranging: ' + cols + ' per row');
+  _loReanchorSatellites();
   const cellW = _LO_BOX_W + _LO_MARGIN;
   const cellH = _LO_BOX_H + _LO_MARGIN;
   items.forEach((obj, i) => {
