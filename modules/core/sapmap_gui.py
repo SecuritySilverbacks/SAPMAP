@@ -431,6 +431,11 @@ def _correct_node_from_http(target_node, http_info: dict):
                   f"instance {old_i}→{probed}")
     if http_info.get("ip") and not target_node.ip:
         target_node.ip = http_info["ip"]
+    # The target's self-reported (often internal/NAT) IP — kept for recon,
+    # shown only when it differs from the reachable node IP.
+    if (http_info.get("reported_ip")
+            and http_info["reported_ip"] != target_node.ip):
+        target_node.reported_ip = http_info["reported_ip"]
     if http_info.get("hostname") and not target_node.hostname:
         target_node.hostname = http_info["hostname"]
     icm_port = http_info.get("icm_port")
@@ -12386,14 +12391,32 @@ def create_app(api: SAPMAPApi) -> Bottle:
                     remote_host = (
                         ping.get("remote_hostname", "").strip()
                         or conn.target_host or host)
-                    # If target_host was a hostname (not IP), use the
-                    # IP returned by RFC_SYSTEM_INFO on the SAP system
+                    # RFC_SYSTEM_INFO reports the target's OWN view of its IP
+                    # (RFCIPADDR).  Only adopt it as the node IP when `host`
+                    # was a HOSTNAME we couldn't otherwise resolve — the
+                    # original intent.  When `host` is already a reachable IP,
+                    # keep it: RFCIPADDR is frequently an internal/NAT address
+                    # (e.g. 172.17.x Docker) that isn't routable from here, so
+                    # replacing the reachable IP with it would break
+                    # reachability.  Record the self-reported one as
+                    # reported_ip instead (surfaced in the UI only when != ip).
+                    import re as _re_rip
+                    _host_is_ip = bool(_re_rip.match(
+                        r'^\d{1,3}(?:\.\d{1,3}){3}$', host)) or (':' in host)
+                    reported_ip = ""
                     if remote_ip and remote_ip != host:
-                        print(f"[*] Resolved {host} → {remote_ip} "
-                              f"(via RFC_SYSTEM_INFO)")
-                        conn.target_ip = remote_ip
-                        host = remote_ip
-                        key = (host.lower(), inst)  # update dedup key
+                        if not _host_is_ip:
+                            print(f"[*] Resolved {host} → {remote_ip} "
+                                  f"(via RFC_SYSTEM_INFO)")
+                            conn.target_ip = remote_ip
+                            host = remote_ip
+                            key = (host.lower(), inst)  # update dedup key
+                        else:
+                            reported_ip = remote_ip
+                            conn.reported_ip = remote_ip
+                            print(f"[*] {conn.destination_name}: system "
+                                  f"self-reports {remote_ip} (internal) — "
+                                  f"keeping reachable {host}")
                     print(f"[+] {conn.destination_name}: alive"
                           f"{f' (SID={dest_sid})' if dest_sid else ''}"
                           f" ({ping['ping_message'][:60]})")
@@ -12413,8 +12436,13 @@ def create_app(api: SAPMAPApi) -> Bottle:
                     _http_info = {}
                     if ping_inst:
                         _http_info["instance_nr"] = ping_inst
-                    if remote_ip:
-                        _http_info["ip"] = remote_ip
+                    # Node IP = the REACHABLE address, not the self-reported
+                    # internal one.  `host` is what we reached (updated above
+                    # only when it was a hostname resolved via RFCIPADDR).
+                    if host and (_host_is_ip or host == remote_ip):
+                        _http_info["ip"] = host
+                    if reported_ip:
+                        _http_info["reported_ip"] = reported_ip
                     if remote_host:
                         _http_info["hostname"] = remote_host
 
