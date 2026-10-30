@@ -5897,7 +5897,13 @@ def _build_nodes_from_fast_scan(scan_result: dict, timeout: float = 10,
             sid=sid,
             system_type=system_type,
             hostname=sys_info.get("hostname", ""),
-            ip=host,
+            ip=host,                       # the REACHABLE IP we scanned
+            # RFC_SYSTEM_INFO's self-reported IP (RFCIPADDR), kept only when it
+            # differs from the reachable one — it's often an internal/NAT
+            # address (e.g. Docker 172.17.x) that isn't routable from here.
+            reported_ip=(sys_info.get("ip", "")
+                         if sys_info.get("ip", "")
+                         and sys_info.get("ip", "") != host else ""),
             instances=instances,
             os_type=sys_info.get("os_type", ""),
             db_type=db_type or sys_info.get("db_type", ""),

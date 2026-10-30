@@ -10607,6 +10607,7 @@ function showConnInfo(e, connIdx) {
     <h3>${connLabel} Connection Details</h3>
     <div class="info-row"><span class="info-label">Source:</span><span class="info-val">${escHtml(conn.source_sid)} (${escHtml(conn.source_host)})</span></div>
     <div class="info-row"><span class="info-label">Target:</span><span class="info-val">${escHtml(conn.target_sid || '?')} (${escHtml(conn.target_host || '?')})</span></div>
+    ${conn.reported_ip && conn.reported_ip !== conn.target_host && conn.reported_ip !== conn.target_ip ? `<div class="info-row"><span class="info-label">Internal IP:</span><span class="info-val" style="color:#8b949e" title="The target's self-reported IP (RFC_SYSTEM_INFO RFCIPADDR) — internal / NAT, not routable from here.">${escHtml(conn.reported_ip)} <span style="font-size:10px">(not routable)</span></span></div>` : ''}
     <div class="info-row"><span class="info-label">Destination:</span><span class="info-val">${escHtml(conn.destination_name)} (Type ${connType})</span></div>
     ${isHttp ? `
       <div class="info-row"><span class="info-label">URL:</span><span class="info-val" style="word-break:break-all">${escHtml(conn.http_url || '?')}</span></div>
@@ -11375,6 +11376,7 @@ function showDetails(sid, opts) {
       <div class="detail-row"><span class="detail-key">Type</span><span class="detail-val">${escHtml(n.system_type)}</span></div>
       <div class="detail-row"><span class="detail-key">Hostname</span><span class="detail-val">${escHtml(n.hostname)}</span></div>
       <div class="detail-row"><span class="detail-key">IP</span><span class="detail-val">${escHtml(n.ip)}</span></div>
+      ${n.reported_ip && n.reported_ip !== n.ip ? `<div class="detail-row"><span class="detail-key">Reported IP</span><span class="detail-val" style="color:#8b949e" title="The system's own view of its IP (RFC_SYSTEM_INFO RFCIPADDR). Often an internal / NAT address (e.g. Docker 172.17.x) — may not be routable from here. SAPMAP connects via the IP above.">${escHtml(n.reported_ip)} <span style="font-size:10px;color:#6e7681">(internal)</span></span></div>` : ''}
       <div class="detail-row"><span class="detail-key">OS</span><span class="detail-val">${escHtml(n.os_type)}</span></div>
       <div class="detail-row"><span class="detail-key">Database</span><span class="detail-val">${escHtml(n.db_type)}</span></div>
       <div class="detail-row"><span class="detail-key">Kernel</span><span class="detail-val">${escHtml(n.kernel)}</span></div>

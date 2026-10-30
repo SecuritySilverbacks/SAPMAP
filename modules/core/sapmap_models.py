@@ -573,7 +573,11 @@ class SAPNode:
     sid: str
     system_type: str = ""               # ABAP, JAVA, ABAP+JAVA, BUSINESSOBJECTS, etc.
     hostname: str = ""
-    ip: str = ""
+    ip: str = ""                        # the REACHABLE IP (how SAPMAP connected)
+    reported_ip: str = ""               # system's self-reported IP (RFC_SYSTEM_INFO
+                                        # RFCIPADDR); often internal/NAT and not
+                                        # routable — informational, never used to
+                                        # connect.  Surfaced only when != ip.
     instances: list = field(default_factory=list)   # [InstanceInfo, ...]
     os_type: str = ""
     db_type: str = ""                   # HDB, ORA, MSS, ADA, DB6
@@ -1072,6 +1076,7 @@ class SAPNode:
             "system_type": self.system_type,
             "hostname": self.hostname,
             "ip": self.ip,
+            "reported_ip": self.reported_ip,
             "instances": [i.to_dict() for i in self.instances],
             "os_type": self.os_type,
             "db_type": self.db_type,
@@ -1220,6 +1225,7 @@ class SAPNode:
             system_type=d.get("system_type", ""),
             hostname=d.get("hostname", ""),
             ip=d.get("ip", ""),
+            reported_ip=d.get("reported_ip", ""),
             instances=[InstanceInfo.from_dict(i) for i in d.get("instances", [])],
             os_type=d.get("os_type", ""),
             db_type=d.get("db_type", ""),
@@ -1536,6 +1542,8 @@ class RFCConnection:
     target_sid: str = ""
     target_host: str = ""
     target_ip: str = ""
+    reported_ip: str = ""       # target's self-reported IP (RFCIPADDR) when it
+                                # differs from the reachable target_host/target_ip
     target_instance_nr: str = ""
     destination_name: str = ""
     rfc_user: str = ""
@@ -1686,6 +1694,7 @@ class RFCConnection:
             "target_sid": self.target_sid,
             "target_host": self.target_host,
             "target_ip": self.target_ip,
+            "reported_ip": self.reported_ip,
             "target_instance_nr": self.target_instance_nr,
             "destination_name": self.destination_name,
             "rfc_user": self.rfc_user,
