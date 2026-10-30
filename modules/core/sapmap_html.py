@@ -1302,7 +1302,7 @@ body {
           <div class="legend-row"><span class="swatch-cell"><span class="legend-swatch" style="background:#4a1a1a;border:1px solid #8b0000;width:22px;height:14px"></span></span><span class="label"><b>PRD system</b> — red-tinted box, treat any finding as blocking</span></div>
           <div class="legend-row"><span class="swatch-cell"><span class="legend-swatch" style="background:#4a3a1a;border:1px solid #e67e22;width:22px;height:14px"></span></span><span class="label"><b>Non-PRD system</b> — dev / QA / test tier</span></div>
           <div class="legend-row"><span class="swatch-cell"><span class="legend-swatch" style="background:transparent;border:2px solid #8b0000;width:22px;height:14px"></span></span><span class="label"><b>Critical finding</b> — thick red border on any node</span></div>
-          <div class="legend-row"><span class="swatch-cell" style="font-size:16px">&#9889;</span><span class="label"><b>Pwned</b> — SAPMAP has created a user or captured shell</span></div>
+          <div class="legend-row"><span class="swatch-cell"><span style="display:inline-block;background:#8b0000;color:#fff;font-size:8px;font-weight:bold;letter-spacing:0.5px;padding:1px 4px;border-radius:3px;border:1px solid #0d1117">POWNED</span></span><span class="label"><b>Pwned</b> — SAPMAP has created a user or captured shell</span></div>
           <div class="legend-row"><span class="swatch-cell"><span class="legend-swatch" style="background:#046c7a;width:22px;height:14px;clip-path:polygon(15% 0,85% 0,100% 50%,85% 100%,15% 100%,0 50%)"></span></span><span class="label"><b>SAP Cloud Connector</b> — hexagonal teal node</span></div>
           <div class="legend-row"><span class="swatch-cell"><span class="legend-swatch" style="background:#4d9eb6;width:22px;height:14px"></span></span><span class="label"><b>Web Dispatcher</b> — cyan node with backend fan-out</span></div>
           <div class="legend-row"><span class="swatch-cell"><span style="color:#a371f7;font-size:16px">&#9729;</span></span><span class="label"><b>BTP subaccount</b> — cloud shape, one per subaccount</span></div>
@@ -5523,14 +5523,10 @@ function updateMap() {
       }
     }
 
-    // Lightning bolt for pwned — sits in the top-right corner, partly
+    // POWNED tag for pwned — hangs off the top-right corner, partly
     // outside the box (mirror of the finding badge in the top-left).
     if (n.pwned) {
-      const lx = x + BOX_W + 2, ly = y - 2;
-      html += `<text x="${lx}" y="${ly}" font-size="28" fill="#f0883e"`
-        + ` stroke="#0d1117" stroke-width="2.5" paint-order="stroke"`
-        + ` text-anchor="middle" dominant-baseline="middle"`
-        + ` font-weight="bold" pointer-events="none">&#9889;</text>`;
+      html += pwnedTagSvg(x + BOX_W + 8, y);
     }
     // Root badge — shown when ANY of the Linux LPE techniques
     // (Copy Fail / pedit-COW / Dirty Frag) has obtained root.
@@ -5768,13 +5764,9 @@ function updateMap() {
     // Title — "SCC" label only (host moves into body like SAP nodes)
     html += `<text x="${x+cut+4}" y="${y+18}" fill="#fff" font-size="13" font-weight="bold" font-family="monospace">SCC</text>`;
 
-    // Pwned bolt (top-right, mirroring SAP nodes)
+    // POWNED tag (top-right, mirroring SAP nodes)
     if (sn.pwned) {
-      const lx = x + BOX_W + 2, ly = y - 2;
-      html += `<text x="${lx}" y="${ly}" font-size="28" fill="#f0883e"`
-           + ` stroke="#0d1117" stroke-width="2.5" paint-order="stroke"`
-           + ` text-anchor="middle" dominant-baseline="middle"`
-           + ` font-weight="bold" pointer-events="none">&#9889;</text>`;
+      html += pwnedTagSvg(x + BOX_W + 8, y);
     }
 
     // Body lines — host first (IP or hostname), then details
@@ -5874,13 +5866,9 @@ function updateMap() {
          + `fill="#5dade2" font-size="14" font-weight="bold" `
          + `font-family="monospace" pointer-events="none">&#9729; BTP</text>`;
 
-    // Pwned bolt (top-right)
+    // POWNED tag (top-right)
     if (bn.pwned) {
-      const lx = x + BOX_W - 10, ly = y + 18;
-      html += `<text x="${lx}" y="${ly}" font-size="28" fill="#f0883e"`
-           + ` stroke="#0d1117" stroke-width="2.5" paint-order="stroke"`
-           + ` text-anchor="middle" dominant-baseline="middle"`
-           + ` font-weight="bold" pointer-events="none">&#9889;</text>`;
+      html += pwnedTagSvg(x + BOX_W + 2, y + 10);
     }
 
     // Body lines — region / subdomain / counts
@@ -6184,12 +6172,9 @@ function updateMap() {
              + `font-family="Arial,sans-serif" `
              + `pointer-events="none">SAP</text>`;
       }
-      // Lightning bolt on pwn
+      // POWNED tag on pwn
       if (e.pwned) {
-        html += `<text x="${x + DB_BOX_W - 10}" y="${y + 18}" font-size="26" `
-             + `fill="#f0883e" stroke="#0d1117" stroke-width="2.5" paint-order="stroke" `
-             + `text-anchor="middle" dominant-baseline="middle" font-weight="bold" `
-             + `pointer-events="none">&#9889;</text>`;
+        html += pwnedTagSvg(x + DB_BOX_W + 6, y + 10);
       }
       html += '</g>';
     });
@@ -6427,10 +6412,7 @@ function updateMap() {
              + `pointer-events="none">CTRL</text>`;
       }
       if (e.pwned) {
-        html += `<text x="${x + TMS_BOX_W - 10}" y="${y + 18}" font-size="26" `
-             + `fill="#f0883e" stroke="#0d1117" stroke-width="2.5" paint-order="stroke" `
-             + `text-anchor="middle" dominant-baseline="middle" font-weight="bold" `
-             + `pointer-events="none">&#9889;</text>`;
+        html += pwnedTagSvg(x + TMS_BOX_W + 6, y + 10);
       }
       html += '</g>';
     });
@@ -6584,6 +6566,23 @@ function downloadCsv(sid, scenario) {
       }
     })
     .catch(err => alert('Export error: ' + err));
+}
+
+// Issue #178: a red "POWNED" badge replaces the ⚡ lightning glyph as the
+// pwned marker on map nodes — a tag reads more clearly at a glance than a
+// bolt.  Draws a rounded-rect badge whose RIGHT edge sits at `rightX` and
+// which is vertically centred on `midY` (so callers pass the node's
+// top-right corner, matching where the old bolt hung).  Dark stroke +
+// paint-order:stroke keep it legible over any node colour; non-interactive.
+function pwnedTagSvg(rightX, midY) {
+  const w = 46, h = 15, r = 3;
+  const bx = rightX - w, by = midY - h / 2;
+  return `<rect x="${bx}" y="${by}" width="${w}" height="${h}" rx="${r}"`
+    + ` fill="#8b0000" stroke="#0d1117" stroke-width="1.5" paint-order="stroke"`
+    + ` pointer-events="none"/>`
+    + `<text x="${bx + w / 2}" y="${by + h / 2 + 0.5}" text-anchor="middle"`
+    + ` dominant-baseline="middle" font-size="9.5" font-weight="bold"`
+    + ` fill="#ffffff" letter-spacing="0.6" pointer-events="none">POWNED</text>`;
 }
 
 function escHtml(s) {
