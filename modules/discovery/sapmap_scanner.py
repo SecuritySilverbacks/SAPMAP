@@ -5240,6 +5240,15 @@ def enumerate_system_clients(host: str, disp_port: int, timeout: float = 5,
                   f"probed={probed}, errors={errors})")
             if err_msg:
                 print(f"      reason: {err_msg}")
+            # Break down the per-probe failure codes (issue #193) so the
+            # operator can tell an SNC/compression drop (no_login_response)
+            # from a load/firewall problem (timeout) at a glance.
+            reasons_breakdown = result.get("error_reasons")
+            if reasons_breakdown:
+                parts = ", ".join(
+                    f"{code}×{n}" for code, n in
+                    sorted(reasons_breakdown.items(), key=lambda kv: -kv[1]))
+                print(f"      probe failures: {parts}")
             # Even when DIAG init fails, client 000 is ALWAYS
             # present on any SAP system.  Return it so downstream
             # code (default-cred probe, RFC login) has something
