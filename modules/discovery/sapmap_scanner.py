@@ -705,6 +705,51 @@ _MS_ROUTE_RE = _re.compile(
 )
 
 
+def _ms_http_get(host: str, port: int, path: str,
+                 timeout: float = 3.0, saprouter: str = "") -> bytes:
+    """Raw unauthenticated HTTP/1.0 GET against a Message Server HTTP port.
+
+    Shared by the SID-fallback probe (``_query_ms_http_info``) and the
+    SNC-name harvest (``harvest_ms_snc_name``).  Returns the full response
+    bytes (headers + body) or ``b""`` on any error.  When *saprouter* is
+    set the GET is tunnelled through the router via a raw NI_ROUTE channel.
+    """
+    s = None
+    try:
+        if saprouter:
+            from sap_saprouter import connect_through_saprouter
+            s = connect_through_saprouter(
+                saprouter + f"/H/{host}/S/{port}",
+                timeout=timeout, talk_mode=1,
+            )
+        else:
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.settimeout(timeout)
+            s.connect((host, port))
+        s.sendall(
+            f"GET {path} HTTP/1.0\r\n".encode("ascii", "ignore")
+            + b"Host: x\r\n\r\n"
+        )
+        resp = b""
+        while len(resp) < 16384:
+            try:
+                chunk = s.recv(4096)
+            except socket.timeout:
+                break
+            if not chunk:
+                break
+            resp += chunk
+        return resp
+    except Exception:
+        return b""
+    finally:
+        try:
+            if s is not None:
+                s.close()
+        except Exception:
+            pass
+
+
 def _query_ms_http_info(host: str, inst_nr: int,
                         timeout: float = 3.0,
                         saprouter: str = "") -> tuple:
@@ -725,37 +770,8 @@ def _query_ms_http_info(host: str, inst_nr: int,
     SAPControl metadata channels are firewalled.
     """
     port = 8100 + inst_nr
-    try:
-        if saprouter:
-            from sap_saprouter import connect_through_saprouter
-            s = connect_through_saprouter(
-                saprouter + f"/H/{host}/S/{port}",
-                timeout=timeout, talk_mode=1,
-            )
-        else:
-            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            s.settimeout(timeout)
-            s.connect((host, port))
-        s.sendall(
-            b"GET /msgserver/text/logon HTTP/1.0\r\n"
-            b"Host: x\r\n\r\n"
-        )
-        resp = b""
-        while len(resp) < 16384:
-            try:
-                chunk = s.recv(4096)
-            except socket.timeout:
-                break
-            if not chunk:
-                break
-            resp += chunk
-        try:
-            s.close()
-        except Exception:
-            pass
-    except Exception:
-        return ("", "", "")
-
+    resp = _ms_http_get(host, port, "/msgserver/text/logon",
+                        timeout=timeout, saprouter=saprouter)
     if not resp:
         return ("", "", "")
 
@@ -774,6 +790,248 @@ def _query_ms_http_info(host: str, inst_nr: int,
                 f"{inst_nr:02d}")
 
     return ("", "", "")
+
+
+# ---------------------------------------------------------------------------
+# MS text/logon SNC-name harvest (issue #167 — unauthenticated SNC identity
+# enumeration).  The Message Server's /msgserver/text/logon access-point list
+# names the SNC partner identity for every SNC-protected service (RFCS on
+# 48NN, DIAGS on 32NN).  We harvest it pre-auth and thread it onto
+# node.snc_partnername so authenticated SNC RFC can target the right
+# principal — and flag the disclosure.
+# ---------------------------------------------------------------------------
+
+# An SNC name: a name-type prefix (a letter such as "p" or "u") + an optional
+# "/mech" (e.g. "/cstb" = CyberSafe TrustBroker / Kerberos, "/secude") + ":"
+# + the principal / DN.  Examples:
+#   p/cstb:prd.corp.example       (Kerberos / CyberSafe TrustBroker)
+#   p:CN=PRD, O=Example, C=NL     (CommonCryptoLib X.509 DN)
+_MS_SNC_NAME_RE = _re.compile(r'^[A-Za-z](?:/[A-Za-z0-9_.-]+)?:\S')
+
+# text/logon service names (column 0) that carry an SNC identity, most
+# preferred first — RFCS is the RFC-over-SNC access point we actually want.
+_MS_SNC_SERVICE_PREF = ("RFCS", "DIAGS")
+
+
+def _parse_ms_logon_access_points(body: bytes) -> list:
+    """Parse a /msgserver/text/logon body into access-point dicts.
+
+    Each tab-separated row is ``SERVICE<TAB>host<TAB>port<TAB>extra``; for
+    SNC-protected services the ``extra`` field is the server's SNC name
+    (for plain services it is empty or a load-balancing hint like
+    ``LB=10``).  Returns ``[{service, host, port, snc_name}, ...]`` with
+    ``snc_name`` set only where the extra field looks like an SNC name.
+    """
+    out: list = []
+    if not body:
+        return out
+    try:
+        text = body.decode("latin-1", "ignore")
+    except Exception:
+        return out
+    for line in text.splitlines():
+        if "\t" not in line:
+            continue
+        parts = line.split("\t")
+        if len(parts) < 3:
+            continue
+        svc = parts[0].strip()
+        host = parts[1].strip()
+        port_s = parts[2].strip()
+        extra = parts[3].strip() if len(parts) > 3 else ""
+        if not svc or not port_s.isdigit():
+            continue
+        snc = extra if (extra and _MS_SNC_NAME_RE.match(extra)) else ""
+        out.append({"service": svc, "host": host,
+                    "port": int(port_s), "snc_name": snc})
+    return out
+
+
+def _pick_snc_name(access_points: list) -> tuple:
+    """Pick the best SNC name from parsed access points.
+
+    Prefers RFCS (RFC-over-SNC), then DIAGS, then any other service that
+    carries a name.  Returns ``(snc_name, port, service)`` or ``("", 0, "")``.
+    """
+    best = None  # (rank, ap)
+    for ap in access_points:
+        name = ap.get("snc_name") or ""
+        if not name:
+            continue
+        svc = (ap.get("service") or "").upper()
+        rank = (_MS_SNC_SERVICE_PREF.index(svc)
+                if svc in _MS_SNC_SERVICE_PREF else 9)
+        if best is None or rank < best[0]:
+            best = (rank, ap)
+    if best is None:
+        return ("", 0, "")
+    ap = best[1]
+    return (ap.get("snc_name", ""), ap.get("port", 0), ap.get("service", ""))
+
+
+def _has_ms_port(node) -> bool:
+    """True when *node* has a discovered Message Server port — internal
+    (36NN), external (39NN), or HTTP (81NN).  Real evidence that an MS is
+    present, so the text/logon SNC-name harvest is worth attempting.  Used
+    to gate the AUTOMATIC harvest (network scan / manual-add enrich) so it
+    doesn't fire a speculative HTTP GET at every discovered node; the
+    operator-initiated probes keep their derived-port fallback.
+    """
+    for inst in node.instances:
+        for port in (inst.ports or {}):
+            try:
+                p = int(port)
+            except (ValueError, TypeError):
+                continue
+            if (3600 <= p <= 3699) or (3900 <= p <= 3999) or (8100 <= p <= 8199):
+                return True
+    return False
+
+
+def _ms_http_candidates(node) -> list:
+    """Build the MS HTTP port candidate list for *node*.
+
+    Returns ``[(http_port, inst_nr), ...]`` — any port tagged ms_http /
+    msghttp or in the 8100-8199 range on the node's instances, plus the
+    derived 8100+inst_nr for each known instance (which may be firewalled
+    from the scanner yet reachable from the operator's console).  Deduped
+    in discovery order so operator-recorded instances take priority.
+    Shared by ``check_ms_info_disclosure`` and the SNC re-probe.
+    """
+    candidates: list = []   # (http_port, inst_nr)
+    seen: set = set()
+
+    def _add(p: int, nr: int) -> None:
+        if p not in seen:
+            candidates.append((p, nr))
+            seen.add(p)
+
+    for inst in node.instances:
+        inst_nr = None
+        try:
+            inst_nr = int(inst.instance_nr)
+        except (AttributeError, TypeError, ValueError):
+            inst_nr = None
+        for port, svc in (inst.ports or {}).items():
+            try:
+                p = int(port)
+            except (ValueError, TypeError):
+                continue
+            svc_l = (svc or "").lower()
+            if ("ms_http" in svc_l or "msghttp" in svc_l
+                    or (8100 <= p <= 8199)):
+                _add(p, inst_nr if inst_nr is not None else (p - 8100))
+            # The message server often lives on a separate ASCS instance
+            # (e.g. ABAP app server on 00, ASCS on 01), so the MS HTTP port
+            # is 81NN for the ASCS number, NOT the app instance.  Derive it
+            # from any discovered MS internal (36NN) / external (39NN) port.
+            elif 3600 <= p <= 3699:
+                _add(8100 + (p - 3600), p - 3600)
+            elif 3900 <= p <= 3999:
+                _add(8100 + (p - 3900), p - 3900)
+        if inst_nr is not None:
+            _add(8100 + inst_nr, inst_nr)
+    return candidates
+
+
+def harvest_ms_snc_name(node, candidates: list, timeout: float = 5.0,
+                        saprouter: str = "") -> dict:
+    """Harvest the SNC partner name from the MS text/logon access-point list.
+
+    Fetches ``/msgserver/text/logon`` from each candidate MS HTTP port
+    (*candidates* = ``[(http_port, inst_nr), ...]``) until one advertises an
+    SNC name, then:
+      * threads it onto ``node.snc_partnername`` when that field is empty
+        (an operator-supplied value is never overwritten), and
+      * emits a LOW info-disclosure finding — the MS ACL lets any
+        unauthenticated client read the SNC identity and see that
+        RFC-over-SNC is exposed.
+
+    Returns ``{found, snc_name, service, snc_port, http_port,
+    access_points}``; ``found`` is False when nothing was harvested.
+    """
+    out = {"found": False, "snc_name": "", "service": "", "snc_port": 0,
+           "http_port": 0, "access_points": []}
+    host = node.ip or node.hostname
+    if not host or not candidates:
+        return out
+
+    for port, _inst_nr in candidates:
+        body = _ms_http_get(host, port, "/msgserver/text/logon",
+                            timeout=timeout, saprouter=saprouter)
+        aps = _parse_ms_logon_access_points(body)
+        if not aps:
+            continue
+        snc_name, snc_port, svc = _pick_snc_name(aps)
+        if not snc_name:
+            # Reachable MS HTTP, but no SNC-protected service advertised —
+            # keep sweeping the remaining candidate ports.
+            continue
+        out.update({"found": True, "snc_name": snc_name, "service": svc,
+                    "snc_port": snc_port, "http_port": port,
+                    "access_points": aps})
+
+        prev = (getattr(node, "snc_partnername", "") or "").strip()
+        if not prev:
+            node.snc_partnername = snc_name
+            print(f"[+] {node.sid}: harvested SNC name {snc_name!r} "
+                  f"({svc} on :{snc_port}) from {host}:{port}"
+                  f"/msgserver/text/logon → snc_partnername")
+        elif prev != snc_name:
+            print(f"[*] {node.sid}: MS advertises SNC name {snc_name!r} but "
+                  f"operator-set snc_partnername {prev!r} kept (not "
+                  f"overwritten)")
+
+        logon_url = f"http://{host}:{port}/msgserver/text/logon"
+        try:
+            already = any(
+                getattr(f, "name", "") ==
+                "SNC Partner Name Disclosure (MS text/logon)"
+                for f in node.findings)
+            if not already:
+                emit_finding(
+                    "LOW", node.sid,
+                    f"SNC partner name '{snc_name}' disclosed pre-auth via "
+                    f"the Message Server access-point list on {host}:{port} "
+                    f"(service {svc}, SNC port {snc_port}).  Any "
+                    f"unauthenticated client learns the system's SNC "
+                    f"identity and that RFC-over-SNC is exposed — direct "
+                    f"recon for a targeted SNC/Kerberos logon.  Fix: set "
+                    f"ms/acl_info and ms/HTTP/acl_info (SAP Notes 1421005 / "
+                    f"2696233).  Reproduce: `curl {logon_url}`.",
+                    cve="Info Disclosure / MS ACL missing "
+                        "(Notes 1421005 / 2696233)",
+                    ref="ms.info_disclosure.snc_name",
+                    attack_capability="recon.ms_info_disclosure",
+                    persist_node=False,
+                )
+                node.findings.append(Finding(
+                    name="SNC Partner Name Disclosure (MS text/logon)",
+                    severity=Severity.LOW,
+                    attack_techniques=_attack_for("recon.ms_info_disclosure"),
+                    description=(
+                        "The Message Server /msgserver/text/logon endpoint "
+                        "lists every registered access point and, for the "
+                        "SNC-protected services (RFCS on 48NN, DIAGS on "
+                        "32NN), the server's SNC partner name.  With the MS "
+                        "ACL unset this is readable by any unauthenticated "
+                        "client, disclosing the system's SNC identity and "
+                        "confirming RFC-over-SNC is reachable — the exact "
+                        "targeting data needed to attempt an SNC/Kerberos "
+                        "authentication."),
+                    remediation=(
+                        "Set ms/acl_info (SAP Note 1421005) and "
+                        "ms/HTTP/acl_info (SAP Note 2696233) so text/logon "
+                        "returns HTTP 403 to unauthorised sources, and "
+                        "firewall the MS HTTP port (81NN) to the admin "
+                        "subnet."),
+                    detail=(f"Endpoint: {logon_url}; SNC name: {snc_name}; "
+                            f"access point: {svc} on :{snc_port}"),
+                ))
+        except Exception:
+            pass
+        return out
+    return out
 
 
 # Ports that collide with SAP port formulas but are NOT standard SAP services.
@@ -1728,34 +1986,7 @@ def check_ms_info_disclosure(node: SAPNode, timeout: float = 5.0,
     # ``ms_http`` / ``msghttp`` in the scan results; fall back to
     # 8100+inst_nr for every known instance.  Sweep in the order they
     # appear so operator-recorded instances take priority.
-    candidates: list = []   # (http_port, inst_nr)
-    seen: set = set()
-    for inst in node.instances:
-        inst_nr = None
-        try:
-            inst_nr = int(inst.instance_nr)
-        except (AttributeError, TypeError, ValueError):
-            inst_nr = None
-        for port, svc in (inst.ports or {}).items():
-            try:
-                p = int(port)
-            except (ValueError, TypeError):
-                continue
-            svc_l = (svc or "").lower()
-            if ("ms_http" in svc_l or "msghttp" in svc_l
-                    or (8100 <= p <= 8199)):
-                if p not in seen:
-                    candidates.append((p, inst_nr if inst_nr is not None
-                                                 else (p - 8100)))
-                    seen.add(p)
-        # Also try the derived port even if it wasn't discovered — the
-        # port may be firewalled from the scanner but reachable now
-        # from the operator's console.
-        if inst_nr is not None:
-            derived = 8100 + inst_nr
-            if derived not in seen:
-                candidates.append((derived, inst_nr))
-                seen.add(derived)
+    candidates = _ms_http_candidates(node)
 
     if not candidates:
         node.ms_info_leak = {
@@ -1769,6 +2000,16 @@ def check_ms_info_disclosure(node: SAPNode, timeout: float = 5.0,
     print(f"[*] {node.sid}: MS info-disclosure — probing "
           f"{len(candidates)} MS HTTP port(s): "
           f"{[p for p, _ in candidates]}")
+
+    # Harvest the SNC partner name from the same MS (text/logon access-point
+    # list).  This is independent of the text/dump ACL below — text/logon is
+    # frequently readable even where text/dump is locked down — so run it
+    # first and unconditionally (issue #167).
+    try:
+        harvest_ms_snc_name(node, candidates, timeout=timeout,
+                            saprouter=(node.saprouter or ""))
+    except Exception as _e:
+        print(f"[!] {node.sid}: SNC-name harvest skipped: {_e}")
 
     # Try each candidate; first one that leaks wins.  Track the LAST
     # error so we can surface something useful when none work.
@@ -6012,6 +6253,20 @@ def _build_nodes_from_fast_scan(scan_result: dict, timeout: float = 10,
                         saprouter=saprouter)
                 print(f"[+] {sid}: {format_summary(node.snc_info)} "
                       f"(probed {snc_protocol}://{host}:{snc_port})")
+
+            # Harvest the SNC partner name from the MS text/logon list (issue
+            # #167) so network-scanned systems show their SNC identity in the
+            # SNC panel without a separate Re-probe.  Only when the node has a
+            # discovered MS port, so we don't GET every scanned node blindly.
+            if system_type != "SAPROUTER" and _has_ms_port(node):
+                try:
+                    _cands = _ms_http_candidates(node)
+                    if _cands:
+                        harvest_ms_snc_name(node, _cands,
+                                            timeout=min(timeout, 6),
+                                            saprouter=saprouter)
+                except Exception as _he:
+                    logger.debug(f"SNC-name harvest failed for {sid}: {_he}")
         except Exception as e:
             # Probe is best-effort — don't let it block node creation.
             logger.debug(f"SNC probe failed for {sid} on {host}: {e}")

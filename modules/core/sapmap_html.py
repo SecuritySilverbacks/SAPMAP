@@ -11444,7 +11444,6 @@ function showDetails(sid, opts) {
             : 'Not checked'
       }</span></div>` : ''}
       ${n.saprouter ? `<div class="detail-row"><span class="detail-key">SAProuter</span><span class="detail-val" style="color:#d29922">${escHtml(n.saprouter)}</span></div>` : ''}
-      ${n.snc_partnername ? `<div class="detail-row"><span class="detail-key">SNC Name</span><span class="detail-val" style="color:#d29922">${escHtml(n.snc_partnername)}</span></div>` : ''}
 
       ${n.java_secstore_checked ? `
       <div class="detail-row"><span class="detail-key">Java Secure Store</span><span class="detail-val">${
@@ -11670,17 +11669,27 @@ function showDetails(sid, opts) {
     })()}
     ${(() => {
       const s = n.snc_info || {};
-      if (!s.checked) return '';
+      const sncName = (n.snc_partnername || '').trim();
+      if (!s.checked && !sncName) return '';
       const sid = n.sid;
+      const nameRow = sncName
+        ? '<div class="detail-row"><span class="detail-key" title="SNC partner identity (snc_partnername). Harvested unauthenticated from the Message Server /msgserver/text/logon access-point list, or operator-set. Used as the partner name for authenticated SNC RFC.">SNC name</span><span class="detail-val" style="font-family:monospace;font-size:11px;color:#58a6ff">' + escHtml(sncName) + '</span></div>'
+        : '';
       let title, color, body;
-      if (s.error && !s.enabled) {
+      if (!s.checked) {
+        // SNC name harvested, but full posture (QoP / enforcement) not probed yet.
+        title = '&#128274; SNC: name discovered';
+        color = '#58a6ff';
+        body = nameRow +
+          '<div style="color:#8b949e;font-size:11px;margin:4px 0">SNC partner identity harvested unauthenticated from the Message Server. Click <b>Re-probe SNC</b> for the full posture (protocol / QoP / enforcement).</div>';
+      } else if (s.error && !s.enabled) {
         title = '&#128274; SNC: probe failed';
         color = '#8b949e';
-        body = '<div class="detail-row"><span class="detail-key">Error</span><span class="detail-val">' + escHtml(s.error) + '</span></div>';
+        body = nameRow + '<div class="detail-row"><span class="detail-key">Error</span><span class="detail-val">' + escHtml(s.error) + '</span></div>';
       } else if (!s.enabled) {
         title = '&#128275; SNC: not enabled';
         color = '#d29922';
-        body = '<div style="color:#8b949e;font-size:11px;margin:4px 0">DIAG/Router traffic is unencrypted on the wire. SAP recommends snc/enabled=1 + snc/data_protection/min=3 for production.</div>';
+        body = nameRow + '<div style="color:#8b949e;font-size:11px;margin:4px 0">DIAG/Router traffic is unencrypted on the wire. SAP recommends snc/enabled=1 + snc/data_protection/min=3 for production.</div>';
       } else {
         title = '&#128274; SNC: enabled';
         color = '#3fb950';
@@ -11689,7 +11698,7 @@ function showDetails(sid, opts) {
           const c = val === 3 ? '#3fb950' : '#d29922';
           return '<div class="detail-row"><span class="detail-key">' + label + '</span><span class="detail-val" style="color:' + c + '">' + val + ' (' + lvl + ')</span></div>';
         };
-        body =
+        body = nameRow +
           '<div class="detail-row"><span class="detail-key">Protocol</span><span class="detail-val">' + escHtml(s.protocol || '') + '</span></div>' +
           (s.mech_label ? '<div class="detail-row"><span class="detail-key">Mechanism</span><span class="detail-val">' + escHtml(s.mech_label) + '</span></div>' : '') +
           (s.cryptolib ? '<div class="detail-row"><span class="detail-key">CryptoLib</span><span class="detail-val" style="font-family:monospace;font-size:11px">' + escHtml(s.cryptolib) + '</span></div>' : '') +
