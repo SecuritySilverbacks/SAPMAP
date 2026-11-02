@@ -18085,6 +18085,19 @@ def create_app(api: SAPMAPApi) -> Bottle:
                     host, probe_port, timeout=8,
                     saprouter=node.saprouter)
             print(f"[+] {sid}: {format_summary(node.snc_info)}")
+            # Also harvest the SNC partner name from the Message Server
+            # text/logon access-point list (issue #167) so the SNC panel
+            # shows the system's SNC identity, not just posture.  Router
+            # nodes have no Message Server, so skip them.
+            if not is_router:
+                try:
+                    _cands = sapmap_scanner._ms_http_candidates(node)
+                    if _cands:
+                        sapmap_scanner.harvest_ms_snc_name(
+                            node, _cands, timeout=8,
+                            saprouter=(node.saprouter or ""))
+                except Exception as _e:
+                    print(f"[!] {sid}: SNC-name harvest skipped: {_e}")
             # ATT&CK: TA0007 T1082 — passive SNC-capability
             # discovery.  Info-level; carries the summary text so
             # the finding drawer shows the actual posture.
@@ -19440,6 +19453,20 @@ def create_app(api: SAPMAPApi) -> Bottle:
                     print(f"[*] {sid}: no dispatcher/router port for SNC probe")
             except Exception as e:
                 logger.debug(f"{sid}: SNC posture check failed: {e}")
+
+            # Harvest the SNC partner name from the MS text/logon access-point
+            # list so a manually-added system shows its SNC identity in the SNC
+            # panel without a separate Re-probe (issue #167).
+            try:
+                if ("SAPROUTER" not in (node.system_type or "").upper()
+                        and sapmap_scanner._has_ms_port(node)):
+                    _cands = sapmap_scanner._ms_http_candidates(node)
+                    if _cands:
+                        sapmap_scanner.harvest_ms_snc_name(
+                            node, _cands, timeout=8,
+                            saprouter=(saprouter or ""))
+            except Exception as _e2:
+                logger.debug(f"{sid}: SNC-name harvest failed: {_e2}")
 
         _bg(f"{sid}:enrich", "Enriching via RFC_SYSTEM_INFO", _enrich)
 
