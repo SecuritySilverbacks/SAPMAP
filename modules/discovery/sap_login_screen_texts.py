@@ -514,6 +514,20 @@ def parse_options():
     return parser.parse_args()
 
 
+def _diag_error_text(payload):
+    """Best-effort human-readable text from a DIAG error response.
+
+    The server's error message trails the 8-byte DIAG header as (often
+    unframed) text — ``walk_items`` can't parse it, so read it directly:
+    decode latin-1, collapse control-character runs to single spaces, and
+    cap the length so a binary payload can't flood the console.
+    """
+    tail = payload[8:] if len(payload) >= 8 else b""
+    text = tail.decode("latin-1", errors="replace")
+    text = "".join(c if (c.isprintable() or c == " ") else " " for c in text)
+    return " ".join(text.split())[:200]
+
+
 def fetch_login_items(host, port, options, terminal):
     """Run the DIAG login handshake against one target and return its items.
 
@@ -546,6 +560,24 @@ def fetch_login_items(host, port, options, terminal):
         if options.verbose:
             print("[*] Received %d bytes login screen" % len(login_screen))
             hexdump(login_screen)
+
+        # A server-side logon error sets err_no (byte 3 of the DIAG header)
+        # non-zero.  Catch it BEFORE the short-response filter and item
+        # parsing (issue #199): otherwise walk_items stalls on the raw error
+        # text, returns [], and process_target reports a success with empty
+        # sections and exit 0.  Surface the target + error number + the
+        # server's message, and fail — this covers both long and short error
+        # frames (a short one would otherwise be mislabelled "SNC / wrong
+        # port" by the filter below).
+        if login_screen and len(login_screen) >= 8 and login_screen[3] != 0:
+            err_no = login_screen[3]
+            # Decode the trailing message only when the payload is
+            # uncompressed (byte 7 == 0); a compressed error body would
+            # decode to noise, so report just the number in that case.
+            msg = _diag_error_text(login_screen) if login_screen[7] == 0 else ""
+            print("[!] %s:%d returned a DIAG logon error (err_no=%d)%s"
+                  % (host, port, err_no, (" — %s" % msg) if msg else ""))
+            return None
 
         if not login_screen or len(login_screen) < 50:
             print("[!] No / short login-screen response (%d bytes). The port "

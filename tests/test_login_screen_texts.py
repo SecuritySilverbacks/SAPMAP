@@ -285,3 +285,144 @@ def test_collect_text_info_decodes_utf16le_dynt_atom():
     assert value == "pw=Welcome1", (
         f"UTF-16LE DYNT atom didn't decode cleanly; got {value!r}")
     assert "\x00" not in value
+
+
+# ---------------------------------------------------------------------------
+# Issue #199 — a DIAG logon error (err_no != 0) must NOT read as success
+# ---------------------------------------------------------------------------
+# The server's error is signalled by a non-zero err_no (byte 3 of the DIAG
+# header).  walk_items used to skip the whole header and then stall on the
+# raw error text, so fetch_login_items returned [] and process_target/main
+# reported an empty success with exit 0.  fetch_login_items now checks err_no
+# before the short-response filter and item parsing, surfaces the message and
+# returns None (-> process_target False -> main nonzero), while valid screens
+# (err_no == 0) and no-match searches stay successful.
+
+def _opts(**kw):
+    import types
+    base = dict(route_string="", timeout=1, verbose=False, search=None)
+    base.update(kw)
+    return types.SimpleNamespace(**base)
+
+
+def _patch_recv(monkeypatch, frame):
+    import sap_login_screen_texts as mod
+
+    class _FakeSock:
+        def close(self):
+            pass
+    monkeypatch.setattr(mod, "_diag_connect",
+                        lambda h, p, t, saprouter="": _FakeSock())
+    monkeypatch.setattr(mod, "ni_send", lambda s, d: None)
+    monkeypatch.setattr(mod, "ni_recv", lambda s, t: frame)
+    return mod
+
+
+# The reporter's frame: 8-byte DIAG header with err_no=1 + a rabax message.
+_ERR_LONG = bytes.fromhex("0002000100010000") \
+    + b"rabax during sapgui logon (location example)\x0c"
+# A SHORT error frame (< 50 B) — must be caught by the err_no check, not
+# mislabelled "short / SNC" by the 50-byte filter.
+_ERR_SHORT = bytes([0, 0, 0, 1, 0, 0, 0, 0]) + b"short err"
+
+
+def test_fetch_returns_none_on_diag_error_long(monkeypatch):
+    mod = _patch_recv(monkeypatch, _ERR_LONG)
+    assert mod.fetch_login_items("h", 3200, _opts(), "t") is None
+
+
+def test_fetch_returns_none_on_diag_error_short(monkeypatch, capsys):
+    # A short error frame (< 50 B) must be caught by the err_no check, NOT
+    # swallowed by the 50-byte short-response filter.  Assert on stdout, not
+    # just the None return: a 17-byte frame returns None via the short filter
+    # too, so a bare `is None` would stay green even if the err_no check were
+    # moved below the filter — reintroducing the exact "short / SNC" mislabel
+    # the fix removes.  Checking for "err_no=1" (and the absence of the short
+    # filter's message) pins the err_no-before-filter ordering.
+    mod = _patch_recv(monkeypatch, _ERR_SHORT)
+    assert mod.fetch_login_items("h", 3200, _opts(), "t") is None
+    out = capsys.readouterr().out
+    assert "err_no=1" in out
+    assert "SNC is enforced" not in out
+
+
+def test_diag_error_surfaces_number_and_message(monkeypatch, capsys):
+    mod = _patch_recv(monkeypatch, _ERR_LONG)
+    mod.fetch_login_items("1.2.3.4", 3200, _opts(), "t")
+    out = capsys.readouterr().out
+    assert "err_no=1" in out
+    assert "rabax during sapgui logon" in out
+    assert "1.2.3.4:3200" in out
+    # NOT mislabelled as a short / SNC response
+    assert "SNC is enforced" not in out
+
+
+def test_process_target_fails_and_prints_no_success_on_error(monkeypatch, capsys):
+    mod = _patch_recv(monkeypatch, _ERR_LONG)
+    assert mod.process_target("h", 3200, _opts(), "t") is False
+    out = capsys.readouterr().out
+    assert "Dumping technical information" not in out
+    assert "Login Screen text" not in out
+
+
+def test_error_on_search_prints_no_match_line(monkeypatch, capsys):
+    mod = _patch_recv(monkeypatch, _ERR_LONG)
+    assert mod.process_target("h", 3200, _opts(search=["SAP"]), "t") is False
+    out = capsys.readouterr().out
+    # an error must not masquerade as a completed (no-match) search
+    assert "No matches" not in out
+    assert "Matches for" not in out
+
+
+def test_valid_screen_errno_zero_still_succeeds(monkeypatch):
+    # err_no == 0, >= 50 bytes, one parseable APPL item -> genuine success.
+    import struct
+    import sap_login_screen_texts as mod
+    frame = bytes(8) + bytes([mod.DIAG_ITEM_APPL, mod.DIAG_APPL_ST_USER,
+                              mod.DIAG_USER_LANGUAGE]) \
+        + struct.pack("!H", 44) + b"E" * 44
+    _patch_recv(monkeypatch, frame)
+    items = mod.fetch_login_items("h", 3200, _opts(), "t")
+    assert items is not None and len(items) == 1
+
+
+def test_valid_screen_search_no_matches_stays_success(monkeypatch):
+    import struct
+    import sap_login_screen_texts as mod
+    frame = bytes(8) + bytes([mod.DIAG_ITEM_APPL, mod.DIAG_APPL_ST_USER,
+                              mod.DIAG_USER_LANGUAGE]) \
+        + struct.pack("!H", 44) + b"E" * 44
+    _patch_recv(monkeypatch, frame)
+    assert mod.process_target("h", 3200, _opts(search=["ZZZ_NONE"]), "t") is True
+
+
+def test_diag_error_text_helper():
+    import sap_login_screen_texts as mod
+    assert mod._diag_error_text(_ERR_LONG) == \
+        "rabax during sapgui logon (location example)"
+    # control runs collapse to single spaces; output is length-capped
+    assert mod._diag_error_text(bytes(8) + b"a\x00\x00\x00b") == "a b"
+    assert len(mod._diag_error_text(bytes(8) + b"x" * 500)) == 200
+    assert mod._diag_error_text(b"\x00\x00") == ""   # too short for a header
+
+
+def test_main_exits_nonzero_on_diag_error(monkeypatch, tmp_path):
+    # End-to-end mirror of the reporter's repro: main() must return nonzero.
+    import sap_login_screen_texts as mod
+    tf = tmp_path / "targets.txt"
+    tf.write_text("example.invalid:3200\n", encoding="utf-8")
+    _patch_recv(monkeypatch, _ERR_LONG)
+    monkeypatch.setattr(mod, "parse_options",
+                        lambda: _opts(terminal="t", targets_file=str(tf)))
+    assert mod.main() != 0
+
+
+def test_diag_error_compressed_reports_number_not_noise(monkeypatch, capsys):
+    # err_no != 0 AND compress byte != 0: report the number, skip the
+    # (compressed -> noise) message body.
+    import sap_login_screen_texts as mod
+    frame = bytes([0, 0, 0, 7, 0, 0, 0, 1]) + bytes(range(60))  # err_no=7, compress=1
+    _patch_recv(monkeypatch, frame)
+    assert mod.fetch_login_items("h", 3200, _opts(), "t") is None
+    out = capsys.readouterr().out
+    assert "err_no=7" in out
