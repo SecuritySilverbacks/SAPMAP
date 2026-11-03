@@ -485,31 +485,55 @@ def find_all_chains(state: SAPMAPState, max_depth: int = 6,
 
     for entry_sid, entry_m in entries:
 
-        # BFS: queue holds (current_sid, path_so_far)
+        # Two distinct frontiers, because "reached" and "owned" differ:
+        #   recorded — endpoints we've already emitted one chain to (one
+        #              representative path per (entry, endpoint); the
+        #              first, shortest BFS touch wins).
+        #   expanded — nodes we've OWNED and already pushed onward from.
+        #
+        # The earlier single-visit BFS marked a node seen on its first
+        # touch, *before* the _edge_propagates gate — so a node first
+        # reached over a NON-propagating edge (a plain RFC logon that
+        # reaches but does not own the box) was marked seen and never
+        # expanded, even when a later propagating edge (SAP_ALL / trusted
+        # RFC / forged MYSAPSSO2) owned it.  Every onward chain that
+        # pivoted through such a node was silently dropped.  Separating
+        # "reached" (recorded) from "owned" (expanded) lets a node be
+        # enqueued when a propagating edge reaches it, regardless of an
+        # earlier weaker touch — the same two-phase idea blast_radius()
+        # uses for the flood.
         queue = deque()
         queue.append((entry_sid, []))
-        visited_from_entry = {entry_sid}
+        recorded = {entry_sid}      # never emit the entry as an endpoint
+        expanded: set = set()       # nodes already popped & pushed onward
 
         while queue:
             current_sid, path = queue.popleft()
+
+            # Own (expand) each node at most once, over the first/shortest
+            # owning path BFS dequeues.  A node may be enqueued several
+            # times (reached by several propagating edges); this guard
+            # dedups the expansion and breaks propagating cycles.
+            if current_sid in expanded:
+                continue
+            expanded.add(current_sid)
 
             if len(path) >= max_depth:
                 continue
 
             for target_sid, conn in adj.get(current_sid, []):
-                if target_sid in visited_from_entry:
-                    continue
-                visited_from_entry.add(target_sid)
-
                 # One shared builder yields the ChainHop (technique
                 # caption + per-hop severity + untested flag) so chains
                 # and the blast-radius flood never diverge.
                 hop = _make_hop(current_sid, target_sid, conn)
                 new_path = path + [hop]
 
-                # Record chain if it has 1+ hops
+                # Record one representative chain per (entry, endpoint),
+                # over whatever edge first reaches it — reachability is
+                # reported even for boxes we only touch but never own.
                 path_key = (entry_sid, tuple(h.target_sid for h in new_path))
-                if path_key not in seen_paths:
+                if target_sid not in recorded and path_key not in seen_paths:
+                    recorded.add(target_sid)
                     seen_paths.add(path_key)
 
                     target_node = state.nodes.get(target_sid)
@@ -527,10 +551,13 @@ def find_all_chains(state: SAPMAPState, max_depth: int = 6,
                     _generate_headline(chain, state)
                     chains.append(chain)
 
-                # Continue BFS only when owning the target confers
-                # onward pivot (SAP_ALL / trusted RFC / forged MYSAPSSO2)
-                # — see _edge_propagates.
-                if _edge_propagates(conn):
+                # Continue BFS only when owning the target confers onward
+                # pivot (SAP_ALL / trusted RFC / forged MYSAPSSO2) — see
+                # _edge_propagates.  Enqueue even if the target was already
+                # *recorded* over a weaker edge: recorded means "reached",
+                # not "owned".  The expanded-guard above keeps the
+                # re-enqueue cheap and loop-safe.
+                if _edge_propagates(conn) and target_sid not in expanded:
                     queue.append((target_sid, new_path))
 
     return chains
