@@ -54,7 +54,7 @@ Supported actions:
     ssh_harvest, ssh_test_keys, ssh_plant_key,
     # Business impact + trust chain analysis
     impact_assess, impact_show, impact_export, analyze_chains,
-    highlight_chain, layout, sleep, verify_pp_impersonation,
+    highlight_chain, play_chain, layout, sleep, verify_pp_impersonation,
     read_usrextid, read_oa2c, analyse_capabilities,
     # Node identity / metadata overrides
     set_sid, set_instance_nr, set_type, set_db_type, set_os_type,
@@ -206,6 +206,17 @@ def _map_step(step: dict) -> tuple:
 
     if action == "highlight_chain":
         return ("HIGHLIGHT_CHAIN", "", {
+            "start": step.get("start", ""),
+            "end": step.get("end", ""),
+            "index": step.get("index", 0),
+        }, False)
+
+    if action == "play_chain":
+        # Replay a chain hop-by-hop in the GUI kill-chain player (#196).
+        # Same selector args as highlight_chain (start/end SID pair or
+        # index); the whole chain object is pushed so the player has the
+        # per-hop methods + severities.
+        return ("PLAY_CHAIN", "", {
             "start": step.get("start", ""),
             "end": step.get("end", ""),
             "index": step.get("index", 0),
@@ -1320,6 +1331,7 @@ _ACTION_LABELS = {
     "impact_export":          "Exporting impact results",
     "analyze_chains":         "Analysing trust chains",
     "highlight_chain":        "Highlighting chain",
+    "play_chain":             "Playing kill-chain",
     "propagate":              "Propagating credentials",
     "deep_scan":              "Deep scanning",
     "lpe":                    "Local privilege escalation",
@@ -1427,10 +1439,26 @@ def _script_flash_label(action: str, target: str, step: dict) -> str:
     elif action == "sleep":
         secs = step.get("seconds", 5)
         base = f"{base} {secs}s"
-    elif action == "highlight_chain":
+    elif action in ("highlight_chain", "play_chain"):
         start = step.get("start", ""); end = step.get("end", "")
         if start and end: base = f"{base} {start} → {end}"
     return f"{base} on {target}" if target else base
+
+
+def _pick_chain(chain_list: list, start: str, end: str, idx: int):
+    """Select one analyzed chain by start/end SID pair, else by index.
+
+    Shared by the highlight_chain and play_chain script verbs: when a
+    start+end pair is given and matches, return that chain; otherwise fall
+    back to the index (default 0 = highest-ranked).  Returns None when the
+    index is out of range (e.g. analyze_chains hasn't run)."""
+    if start and end:
+        for c in chain_list:
+            if c.get("start_sid") == start and c.get("end_sid") == end:
+                return c
+    if 0 <= idx < len(chain_list):
+        return chain_list[idx]
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -1645,19 +1673,9 @@ class ScriptRunner:
             if method == "HIGHLIGHT_CHAIN":
                 chains = self._api_call("GET", "/api/chains")
                 chain_list = chains.get("chains", [])
-                start = payload.get("start", "")
-                end = payload.get("end", "")
-                idx = payload.get("index", 0)
-
-                # Find matching chain by start/end SIDs or by index
-                target_chain = None
-                if start and end:
-                    for c in chain_list:
-                        if c.get("start_sid") == start and c.get("end_sid") == end:
-                            target_chain = c
-                            break
-                if not target_chain and idx < len(chain_list):
-                    target_chain = chain_list[idx]
+                target_chain = _pick_chain(
+                    chain_list, payload.get("start", ""),
+                    payload.get("end", ""), payload.get("index", 0))
 
                 if target_chain:
                     path_sids = target_chain.get("path_sids", [])
@@ -1665,6 +1683,28 @@ class ScriptRunner:
                     try:
                         from sapmap_gui import ui_command
                         ui_command("highlight_chain", path_sids=path_sids)
+                    except ImportError:
+                        pass
+                else:
+                    pf(f"[SCRIPT]   No matching chain found (run analyze_chains first)")
+                continue
+
+            # Special case: replay a chain hop-by-hop in the GUI player (#196).
+            # Pushes the whole chain object so the player has the per-hop
+            # methods + severities (not just the path SIDs).
+            if method == "PLAY_CHAIN":
+                chains = self._api_call("GET", "/api/chains")
+                chain_list = chains.get("chains", [])
+                target_chain = _pick_chain(
+                    chain_list, payload.get("start", ""),
+                    payload.get("end", ""), payload.get("index", 0))
+
+                if target_chain:
+                    path_sids = target_chain.get("path_sids", [])
+                    pf(f"[SCRIPT]   Playing kill-chain: {' → '.join(path_sids)}")
+                    try:
+                        from sapmap_gui import ui_command
+                        ui_command("play_chain", chain=target_chain)
                     except ImportError:
                         pass
                 else:

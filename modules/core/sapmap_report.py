@@ -3295,6 +3295,96 @@ def _build_landscape_svg(state: SAPMAPState) -> str:
     return svg
 
 
+def _build_killchain_svg(chain) -> str:
+    """Inline SVG storyboard of ONE attack chain for the HTML report.
+
+    Renders the chain's ordered hops left-to-right: a box per system joined
+    by an arrow per hop, the arrow coloured by that hop's severity and
+    captioned with the technique (ChainHop.method).  Untested hops are drawn
+    dashed + faint.  Self-contained, no JS, responsive viewBox — the static
+    report counterpart of the animated GUI kill-chain player (#196).
+    """
+    hops = list(getattr(chain, "hops", None) or [])
+    sids = list(getattr(chain, "path_sids", None) or [])
+    if not hops or len(sids) < 2:
+        return ""
+    SEV_COLOR = {5: "#f85149", 4: "#db6d28", 3: "#d4a72c", 2: "#3fb950"}
+    box_w, box_h = 118, 52
+    gap = 150
+    mx, m_top, m_bot = 24, 74, 44
+    n = len(sids)
+    width = mx * 2 + n * box_w + (n - 1) * gap
+    height = m_top + box_h + m_bot
+    cy = int(m_top + box_h / 2)
+    end_prod = bool(getattr(chain, "end_is_production", False))
+
+    def _x(i):
+        return mx + i * (box_w + gap)
+
+    parts = [
+        f'<svg viewBox="0 0 {int(width)} {int(height)}" width="100%" '
+        f'style="max-width:100%;height:auto;background:#0d1117;'
+        f'border:1px solid #21262d;border-radius:8px" '
+        f'font-family="system-ui,Segoe UI,Roboto,sans-serif">'
+    ]
+    # Arrows (one per hop) — drawn before the boxes so the boxes overlay the
+    # arrow tails.
+    for i, hop in enumerate(hops):
+        if i + 1 >= n:
+            break
+        sev = int(getattr(hop, "severity", 2) or 2)
+        color = SEV_COLOR.get(sev, "#3fb950")
+        untested = bool(getattr(hop, "untested", False))
+        x1 = int(_x(i) + box_w)
+        x2 = int(_x(i + 1))
+        mid = int((x1 + x2) / 2)
+        dash = ' stroke-dasharray="7,5"' if untested else ''
+        op = '0.5' if untested else '1'
+        parts.append(
+            f'<line x1="{x1}" y1="{cy}" x2="{x2 - 11}" y2="{cy}" '
+            f'stroke="{color}" stroke-width="3"{dash} opacity="{op}"/>')
+        parts.append(
+            f'<path d="M {x2 - 11} {cy - 6} L {x2} {cy} L {x2 - 11} '
+            f'{cy + 6} Z" fill="{color}" opacity="{op}"/>')
+        method = str(getattr(hop, "method", "") or "")
+        label = method if len(method) <= 30 else method[:29] + "…"
+        italic = ' font-style="italic"' if untested else ''
+        parts.append(
+            f'<text x="{mid}" y="{cy - 15}" text-anchor="middle" '
+            f'font-size="11" font-weight="bold" fill="{color}"{italic}>'
+            f'<title>{_hesc(method)}</title>{_hesc(label)}</text>')
+        parts.append(
+            f'<text x="{mid}" y="{cy + 24}" text-anchor="middle" '
+            f'font-size="9" fill="#6b7280">hop {i + 1}</text>')
+    # Node boxes
+    for i, sid in enumerate(sids):
+        x = int(_x(i))
+        is_start = (i == 0)
+        is_end = (i == n - 1)
+        is_crown = is_end and end_prod
+        stroke = ('#f0883e' if is_start
+                  else '#f85149' if is_crown
+                  else '#58a6ff' if is_end
+                  else '#30363d')
+        sw = 2.5 if (is_start or is_end) else 1.2
+        parts.append(
+            f'<rect x="{x}" y="{m_top}" width="{box_w}" height="{box_h}" '
+            f'rx="8" fill="#161b22" stroke="{stroke}" stroke-width="{sw}"/>')
+        parts.append(
+            f'<text x="{x + box_w // 2}" y="{m_top + 22}" '
+            f'text-anchor="middle" font-size="13" font-weight="bold" '
+            f'fill="#c9d1d9" font-family="monospace">{_hesc(sid)}</text>')
+        role = ('★ entry' if is_start
+                else '\U0001f3af crown jewel' if is_crown
+                else 'target' if is_end
+                else 'pivot')
+        parts.append(
+            f'<text x="{x + box_w // 2}" y="{m_top + 40}" '
+            f'text-anchor="middle" font-size="9" fill="#8b949e">{role}</text>')
+    parts.append('</svg>')
+    return "".join(parts)
+
+
 # ---------------------------------------------------------------------------
 # HTML report sections — ported 1:1 from the equivalent Markdown builders
 # so the HTML report has the same coverage.  Issue #31 root cause: build_
@@ -4470,6 +4560,7 @@ def build_html_report(state: SAPMAPState,
 
     # Trust chains
     chain_rows_html = ""
+    killchain_svg_html = ""
     chain_count = 0
     prd_chain_count = 0
     try:
@@ -4478,6 +4569,18 @@ def build_html_report(state: SAPMAPState,
                                  print_fn=lambda *a, **kw: None)
         chain_count = len(chains)
         prd_chain_count = sum(1 for c in chains if c.end_is_production)
+        # Static storyboard of the highest-severity path (#196) — prefer a
+        # production-reaching chain, else the top-ranked one.
+        _top = next((c for c in chains if c.end_is_production),
+                    chains[0] if chains else None)
+        if _top is not None:
+            _svg = _build_killchain_svg(_top)
+            if _svg:
+                killchain_svg_html = (
+                    '<p style="font-size:12px;color:#6b7280;margin:0 0 10px">'
+                    'Highest-severity attack path, hop by hop — arrow '
+                    'colour marks per-hop severity; a dashed arrow is an '
+                    'unvalidated hop.</p>' + _svg)
         for c in chains[:30]:
             risk_color = {
                 "CRITICAL": "#f85149",
@@ -5101,6 +5204,7 @@ def build_html_report(state: SAPMAPState,
 
   <section id="sec-chains">
     <h2>🔗 Lateral movement / trust chains ({chain_count})</h2>
+    {killchain_svg_html}
     <table class="grid"><thead><tr>
       <th>Risk</th><th>Path</th><th>Hops</th><th>PRD</th><th>Entry</th>
     </tr></thead><tbody>{chain_rows_html}</tbody></table>

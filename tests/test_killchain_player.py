@@ -114,6 +114,15 @@ class TestPlayerEngine:
         assert "st.drawn !== st.i" in body
         assert "st.drawn = st.i" in body
 
+    def test_scriptable_play_entry_point(self, html):
+        # playChainData(chain) plays a whole chain object — used by the card
+        # (via playChain(idx)) AND by the 'play_chain' UI command the
+        # scripting engine pushes (#196, PR3). Pin both the delegation and
+        # the command dispatch.
+        assert "function playChainData(" in html
+        assert "playChainData(_lastChains[idx])" in html
+        assert "c.cmd === 'play_chain') playChainData(c.chain)" in html
+
     def test_btp_sentinel_resolution(self, html):
         # BTP-rooted chains start with a 'BTP:<uuid8>' sentinel absent from
         # mapState.nodes; the resolver falls back to btp_subaccounts.
