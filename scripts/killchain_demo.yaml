@@ -1,0 +1,99 @@
+# SAPMAP Script: Kill-Chain Player Demo  (issue #196)
+#
+# Drives the animated kill-chain player: analyse the ranked trust chains,
+# then replay the top path hop-by-hop on the map (edge draws on -> node
+# pulses -> technique caption), including a start/end-selected replay.
+#
+# Usage (run WITH the GUI so the replay is visible -- do NOT pass --no-gui):
+#
+#     python3 sapmap.py --script scripts/killchain_demo.yaml --confirm
+#
+# `--confirm` is only needed for the landscape-build prelude below (it
+# creates a user + propagates).  The player steps themselves are read-only.
+#
+# ---------------------------------------------------------------------------
+# EDIT THESE TARGETS before running.  The IPs below are RFC 5737
+# documentation placeholders (TEST-NET-3, 203.0.113.0/24) and resolve to
+# nothing -- swap in your OWN, WRITTEN-AUTHORISED systems.  See DISCLAIMER.md.
+#
+# ALREADY HAVE A LANDSCAPE LOADED?  (from a scan, or File > Load state)
+# Then you don't need the prelude at all -- delete everything down to the
+# "KILL-CHAIN PLAYER" banner and just run the player section on what's loaded.
+# ---------------------------------------------------------------------------
+
+name: "Kill-Chain Player Demo"
+description: "Analyse trust chains, then replay the top attack path hop-by-hop in the GUI player (#196)"
+
+# Give each replay room to breathe before the next step fires.
+step_delay: 2
+
+steps:
+  # === Landscape prelude (optional; needs --confirm) ======================
+  # A minimal DEV -> QA -> PRD landscape so there is a real chain to play.
+  - action: add_system
+    sid: DEV
+    ip: 203.0.113.10
+    instance: "00"
+
+  - action: add_system
+    sid: QA
+    ip: 203.0.113.20
+    instance: "00"
+
+  - action: add_system
+    sid: PRD
+    ip: 203.0.113.30
+    instance: "00"
+
+  # Compromise the entry system, then pull + propagate across its RFC trust
+  # so the chain engine has edges to rank.
+  - action: check_all_gw
+
+  - action: create_user
+    target: DEV
+    method: gw_exploit
+    client: "001"
+
+  - action: retrieve_rfcs
+    target: DEV
+
+  - action: propagate
+    target: DEV
+
+  - action: retrieve_rfcs
+    target: QA
+
+  - action: propagate
+    target: QA
+
+  # === KILL-CHAIN PLAYER ==================================================
+  # Rank every reachable attack path.  (Read-only from here down.)
+  - action: analyze_chains
+
+  # A hierarchy layout makes the hop-by-hop replay easiest to follow.
+  - action: layout
+    mode: hierarchy
+
+  # Replay the highest-severity chain (index 0) hop by hop.  Each hop draws
+  # its edge, pulses the reached node in its per-hop severity colour, and
+  # captions the technique; untested hops render faint + dashed.  Use the
+  # Play / Pause / Replay / speed (0.5x / 1x / 2x) controls on the chain
+  # card in the panel to drive it by hand.
+  - action: play_chain
+    index: 0
+
+  - action: sleep
+    seconds: 6
+
+  # You can also pick a chain by its endpoints instead of its rank -- replay
+  # the path from the DEV entry to the PRD crown jewel.
+  - action: play_chain
+    start: DEV
+    end: PRD
+
+  - action: sleep
+    seconds: 6
+
+  # For contrast: the original static whole-chain highlight (no animation).
+  - action: highlight_chain
+    index: 0

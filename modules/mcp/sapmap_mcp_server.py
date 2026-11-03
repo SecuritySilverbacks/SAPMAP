@@ -286,7 +286,10 @@ def get_findings() -> str:
 @mcp.tool()
 def get_attack_chains() -> str:
     """Analyze and return RFC trust-chain attack paths across the landscape.
-    Shows how lateral movement can reach production systems."""
+    Shows how lateral movement can reach production systems.  Each chain's
+    ordered `hops` carry a per-hop `method` (the technique), `severity`
+    (5=CRITICAL..2=LOW) and `untested` flag, so a caller can reason about or
+    render the path step by step."""
     _api("POST", "/api/actions/analyze_chains", {})
     _wait_for_tasks(timeout=60)
     resp = _api("GET", "/api/chains")

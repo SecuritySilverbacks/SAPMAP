@@ -4311,6 +4311,7 @@ async function pollUpdates() {
           else if (c.cmd === 'show_chains') { const r = await fetch('/api/chains'); const d = await r.json(); showChainResults(d.chains || []); }
           else if (c.cmd === 'show_detail') showSystemDetail(c.sid);
           else if (c.cmd === 'highlight_chain') highlightChain(c.path_sids);
+          else if (c.cmd === 'play_chain') playChainData(c.chain);
           else if (c.cmd === 'relayout') {
             const m = (c.mode || '').toLowerCase();
             if      (m === 'circle')     layoutCircle();
@@ -20401,13 +20402,20 @@ function _playResolveCenter(sid) {
 }
 
 function playChain(idx) {
-  const chain = _lastChains[idx];
+  playChainData(_lastChains[idx]);
+}
+
+// Replay a specific chain object.  Used by the card Play control (via
+// playChain(idx)) AND by the 'play_chain' UI command the scripting engine
+// pushes, which hands over the whole chain dict (path_sids + per-hop
+// methods/severities) so playback needs no _lastChains index.
+function playChainData(chain) {
   if (!chain) return;
   const hops = chain.hops || [];
   if (hops.length === 0) { alert('This chain has no hops to replay.'); return; }
   _cancelPlay();
   _clearPlayLayer();
-  _playState = { idx: idx, i: 0, drawn: -1, hops: hops,
+  _playState = { i: 0, drawn: -1, hops: hops,
                  pathSids: chain.path_sids || [], paused: false };
   _syncPlayButtons();
   _playStep(_playToken);
