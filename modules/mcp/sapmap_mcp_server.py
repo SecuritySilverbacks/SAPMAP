@@ -297,6 +297,27 @@ def get_attack_chains() -> str:
 
 
 @mcp.tool()
+def get_blast_radius(sid: str, mode: str = "forward") -> str:
+    """Flood one system's reachable set over the RFC/trust graph (issue #197).
+
+    Where get_attack_chains enumerates ranked paths, this answers the blunt
+    question directly.  mode='forward' (default) returns every system
+    reachable FROM `sid` — own this box, own all of that; mode='inverse'
+    returns every system that can reach `sid` (the crown-jewel exposure
+    cone).  The result groups nodes into shortest-distance `rings` and
+    carries, per node, `hop` / `method` / `severity` / `untested` / `via`,
+    plus `reachable` and `max_hop` totals.  Read-only — no exploitation.
+
+    Args:
+        sid: the system to flood from (forward) or to (inverse)
+        mode: 'forward' or 'inverse'
+    """
+    resp = _api("POST", "/api/actions/blast_radius",
+                {"sid": sid, "mode": mode})
+    return json.dumps(resp, indent=2)
+
+
+@mcp.tool()
 def save_state(name: str = "") -> str:
     """Save the current SAPMAP session to a .sapmap file.
     If name is empty, auto-generates a timestamped filename."""
