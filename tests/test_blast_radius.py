@@ -345,18 +345,20 @@ class TestInvariants:
 
     def test_blast_is_at_least_as_complete_as_find_all_chains(self):
         """blast_radius never reaches *fewer* systems than find_all_chains
-        enumerates from the same entry.  On the asymmetric graph it reaches
-        strictly more: find_all_chains de-duplicates to one representative
-        path per endpoint and dead-ends on X's weak first touch, so it omits
-        Y — a pre-existing under-report in the chain enumerator (tracked
-        separately).  This invariant holds whether or not that is fixed."""
+        enumerates from the same entry.  On the asymmetric graph both now
+        reach the crown jewel Y: find_all_chains used to de-duplicate to one
+        representative path per endpoint and dead-end on X's weak first
+        touch, dropping Y, until the enumerator was taught to separate
+        "reached" from "owned" (see tests/test_chain.py::TestFindAllChains::
+        test_owning_path_pivots_through_weak_first_touch).  The >= invariant
+        holds regardless; the Y membership pins that the two walks agree."""
         state = _landscape_asymmetric()
         chains = find_all_chains(state, print_fn=lambda *a: None)
         chain_ends = {c.end_sid for c in chains if c.start_sid == "S"}
         reach = set(blast_radius(state, "S").get("nodes", {}))
         assert reach >= chain_ends                  # at least as complete
         assert "Y" in reach                         # blast finds the jewel
-        assert "Y" not in chain_ends                # chains currently do not
+        assert "Y" in chain_ends                    # and so does the enumerator
 
     def test_synthetic_edges_flood(self):
         """blast_radius walks STRUSTSSO2 / DBCON / TMS synthetic edges and

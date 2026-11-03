@@ -216,6 +216,81 @@ class TestFindAllChains:
         chains = find_all_chains(state, print_fn=lambda *a: None)
         assert len(chains) == 0
 
+    def test_owning_path_pivots_through_weak_first_touch(self):
+        """Regression for the single-visit false-negative: a node first
+        reached over a NON-propagating edge (a plain RFC logon — reaches
+        but does not own the box) used to be marked visited *before* the
+        propagation gate and never expanded, so any crown jewel behind it
+        was silently dropped.
+
+            S --SAP_ALL--> A        (propagating)
+            S --plain RFC-> X       (NON-propagating; shortest touch of X)
+            A --SAP_ALL--> X        (propagating; this actually OWNS X)
+            X --SAP_ALL--> Y        (propagating; Y is production)
+
+        The real attack path S->A->X->Y must be enumerated and Y reported
+        reachable, even though X is first touched over the weak S->X edge.
+        """
+        state = SAPMAPState()
+        state.add_node(SAPNode(sid="S", ip="10.0.0.1", hostname="s",
+                               pwned=True))
+        state.add_node(SAPNode(sid="A", ip="10.0.0.2", hostname="a"))
+        state.add_node(SAPNode(sid="X", ip="10.0.0.3", hostname="x"))
+        state.add_node(SAPNode(sid="Y", ip="10.0.0.4", hostname="y",
+                               is_production=True))
+        state.add_connection(RFCConnection(
+            source_sid="S", source_host="s", target_sid="A", target_host="a",
+            destination_name="D_A", rfc_user="RFC",
+            has_sap_all=True, tested=True, logon_successful=True))
+        state.add_connection(RFCConnection(
+            source_sid="S", source_host="s", target_sid="X", target_host="x",
+            destination_name="D_X", rfc_user="RFC",
+            has_sap_all=False, tested=True, logon_successful=True))  # non-prop
+        state.add_connection(RFCConnection(
+            source_sid="A", source_host="a", target_sid="X", target_host="x",
+            destination_name="D_AX", rfc_user="RFC",
+            has_sap_all=True, tested=True, logon_successful=True))
+        state.add_connection(RFCConnection(
+            source_sid="X", source_host="x", target_sid="Y", target_host="y",
+            destination_name="D_Y", rfc_user="RFC",
+            has_sap_all=True, tested=True, logon_successful=True))
+
+        chains = find_all_chains(state, print_fn=lambda *a: None)
+        end_sids = {c.end_sid for c in chains}
+        assert end_sids == {"A", "X", "Y"}, (
+            f"expected to reach A, X and the crown jewel Y; got {end_sids}")
+
+        # The chain that reaches Y must pivot through the OWNING path
+        # S -> A -> X -> Y, not the weak S -> X touch.
+        y_chains = [c for c in chains if c.end_sid == "Y"]
+        assert y_chains, "crown jewel Y must be reachable"
+        assert ["S", "A", "X", "Y"] in [c.path_sids for c in y_chains]
+        assert y_chains[0].end_is_production is True
+
+    def test_weak_first_touch_alone_confers_no_pivot(self):
+        """Guard against over-correcting: a non-propagating edge still
+        does NOT propagate.  Reaching X over a plain RFC logon reports X
+        as reachable, but without an owning edge into X the walk must not
+        continue to Y."""
+        state = SAPMAPState()
+        state.add_node(SAPNode(sid="S", ip="10.0.0.1", hostname="s",
+                               pwned=True))
+        state.add_node(SAPNode(sid="X", ip="10.0.0.3", hostname="x"))
+        state.add_node(SAPNode(sid="Y", ip="10.0.0.4", hostname="y",
+                               is_production=True))
+        state.add_connection(RFCConnection(
+            source_sid="S", source_host="s", target_sid="X", target_host="x",
+            destination_name="D_X", rfc_user="RFC",
+            has_sap_all=False, tested=True, logon_successful=True))  # non-prop
+        state.add_connection(RFCConnection(
+            source_sid="X", source_host="x", target_sid="Y", target_host="y",
+            destination_name="D_Y", rfc_user="RFC",
+            has_sap_all=True, tested=True, logon_successful=True))
+        chains = find_all_chains(state, print_fn=lambda *a: None)
+        end_sids = {c.end_sid for c in chains}
+        assert "X" in end_sids          # reached over the plain RFC logon
+        assert "Y" not in end_sids      # but X was never OWNED, so no pivot
+
     def test_btp_subaccount_with_cleartext_is_an_entry_point(self):
         """Operator's symptom: 4 cleartext-captured BTP destinations
         landed on a PRD-flagged S4H, but Analyse Chains returned
