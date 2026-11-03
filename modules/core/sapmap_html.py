@@ -1139,6 +1139,8 @@ body {
       <div class="dd-item" onclick="layoutHierarchy()">&#128719; Layout: Hierarchy (top &rarr; bottom by RFC)</div>
       <div class="dd-item" onclick="layoutByStack()">&#128218; Layout: Group by Stack (ABAP / Java / Dual)</div>
       <div class="dd-sep"></div>
+      <div class="dd-item" id="blast-mode-item" onclick="toggleBlastMode()" title="Blast-radius explore mode (issue #197).  While ON, LEFT-click a node to flood everything it can reach, RIGHT-click to flood everything that can reach it (the crown-jewel exposure cone).  Node dragging is suspended while the mode is on.  Right-click any node's context menu also has 'Blast Radius' / 'Exposure Cone' entries that work with the mode off.">&#128165; Blast-Radius Mode: Off</div>
+      <div class="dd-sep"></div>
       <div class="dd-item" onclick="toggleConsole()">&#128203; Toggle Console</div>
     </div>
   </div>
@@ -1251,6 +1253,14 @@ body {
     <svg id="pulse-svg" xmlns="http://www.w3.org/2000/svg"
          style="position:absolute;inset:0;width:100%;height:100%;
                 pointer-events:none;z-index:5"></svg>
+    <!-- Blast-radius legend / counter (issue #197).  Populated + shown by
+         _renderBlastLegend(); hidden until a flood runs.  pointer-events
+         on so the clear (x) button is clickable; sits above the pulse. -->
+    <div id="blast-legend" style="display:none;position:absolute;left:12px;
+         bottom:12px;z-index:6;max-width:300px;background:rgba(13,17,23,0.92);
+         border:1px solid #30363d;border-radius:8px;padding:10px 12px;
+         font-size:12px;color:#c9d1d9;box-shadow:0 4px 16px rgba(0,0,0,0.5)">
+    </div>
   </div>
 
   <!-- Legend — collapsed bar (click LEGEND to expand modal) -->
@@ -1395,6 +1405,8 @@ body {
   <!-- Top-level quick actions -->
   <div class="ctx-item" data-action="details">&#128269; View System Details</div>
   <div class="ctx-item" data-action="findings">&#128203; View Findings</div>
+  <div class="ctx-item" data-action="blast_radius_forward" title="Flood every system reachable FROM this node, ring by ring, colour-graded by hop distance (issue #197).  'Own this box, own all of that.'  Read-only view over the RFC/trust graph — no exploitation.">&#128165; Blast Radius (reachable from here)</div>
+  <div class="ctx-item" data-action="blast_radius_inverse" title="Flood every system that can reach THIS node — the exposure cone of a crown jewel (issue #197).  'Who can get to me?'  Read-only view over the RFC/trust graph.">&#127919; Exposure Cone (who can reach this)</div>
   <div class="ctx-item write-op" data-action="wd_admin_creds">&#128273; Add WD admin credentials (webadm / pull backend table)</div>
   <div class="ctx-item" data-action="credentials">&#128273; Provide Credentials</div>
   <div class="ctx-item" data-action="remove_credentials">&#128465;&#65039; Remove Credentials</div>
@@ -6554,6 +6566,9 @@ function updateMap() {
   // pulsing overlay we attached in filterMapToSids(), shortening the
   // visible effect to ~0.5s.
   try { _reapplyAttackHighlights(); } catch (_) {}
+  // Likewise re-attach the blast-radius ring outlines (#197) the rewrite
+  // just wiped, so the flood view survives every state poll.
+  try { _reapplyBlast(); } catch (_) {}
 }
 
 // --- Event handlers ---
@@ -6823,6 +6838,9 @@ function getSuggestedActions(n, sid) {
 function showCtxMenu(e, sid) {
   e.preventDefault();
   e.stopPropagation();
+  // Blast-Radius Mode (#197): a right-click floods who can reach this node
+  // (the exposure cone) instead of opening the context menu.
+  if (_blastMode) { floodBlastRadius(sid, 'inverse'); return; }
   hideMapCtxMenu();
   hideSCCCtxMenu();
   hideBTPCtxMenu();
@@ -9001,6 +9019,8 @@ async function ctxAction(action) {
   switch (action) {
     case 'details': showDetails(sid); break;
     case 'findings': showFindings(sid); break;
+    case 'blast_radius_forward': floodBlastRadius(sid, 'forward'); break;
+    case 'blast_radius_inverse': floodBlastRadius(sid, 'inverse'); break;
     case 'credentials': showCredModal(sid); break;
     case 'remove_credentials': showRemoveCredsModal(sid); break;
     case 'rfc_system_info':
@@ -20559,6 +20579,262 @@ function _syncPlayButtons() {
   });
 }
 
+// ---------------------------------------------------------------------------
+// Blast-radius flood-fill (#197) — flood a node's reachable set ring by ring
+// in the #pulse-svg overlay, colour-graded by hop distance, and leave a
+// persistent ring-tinted node outline (re-applied after every state poll) +
+// a legend / counter.  Two triggers: the node context-menu entries
+// (Blast Radius / Exposure Cone), and Blast-Radius Mode (left-click = forward
+// flood, right-click = inverse cone).  Purely a VIEW over the adjacency the
+// server already computes (/api/actions/blast_radius) — no discovery, no
+// exploitation.  The ring animation lives in the #pulse-svg overlay (updateMap
+// rebuilds #map-svg via innerHTML on every poll and would wipe it); the
+// persistent outlines hang off the node-box groups and are re-attached by
+// _reapplyBlast() after each poll, exactly like the ATT&CK highlight.
+// ---------------------------------------------------------------------------
+let _blastMode = false;      // mode toggle: node clicks flood instead of drag
+let _blastToken = 0;         // monotonic cancel token for the ring animation
+let _blastTimers = [];       // pending setTimeout ids for the active flood
+let _blastState = null;      // the last flood result dict while it is shown
+let _blastReqSeq = 0;        // request generation: a later flood or a clear
+                             // bumps it so an in-flight fetch that has been
+                             // superseded or dismissed never paints on resume
+
+// Distance ramp: near (ring 1, hot) -> far (cool); beyond the ramp -> grey.
+const _BLAST_RING_COLORS =
+  ['#ff3b30', '#ff9500', '#ffd60a', '#34c759', '#40c8e0', '#5e5ce6'];
+
+function _blastRingColor(hop) {
+  if (hop >= 1 && hop <= _BLAST_RING_COLORS.length)
+    return _BLAST_RING_COLORS[hop - 1];
+  return '#8e8e93';
+}
+
+function _blastLayer() {
+  const pulse = document.getElementById('pulse-svg');
+  if (!pulse) return null;
+  let g = pulse.querySelector('g.bl-flood-layer');
+  if (!g) {
+    g = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+    g.setAttribute('class', 'bl-flood-layer');
+    pulse.appendChild(g);
+  }
+  return g;
+}
+
+function _clearBlastLayer() {
+  const g = _blastLayer();
+  if (g) g.innerHTML = '';
+}
+
+function _cancelBlastAnim() {
+  _blastToken++;
+  _blastTimers.forEach(function(t) { clearTimeout(t); });
+  _blastTimers = [];
+}
+
+function toggleBlastMode() {
+  _blastMode = !_blastMode;
+  const item = document.getElementById('blast-mode-item');
+  if (item)
+    item.innerHTML = '&#128165; Blast-Radius Mode: ' + (_blastMode ? 'On' : 'Off');
+  const mc = document.getElementById('map-container');
+  if (mc) mc.style.cursor = _blastMode ? 'crosshair' : '';
+  try {
+    if (typeof showToast === 'function')
+      showToast(_blastMode
+        ? 'Blast-Radius Mode ON — LEFT-click a node to flood what it can reach, '
+          + 'RIGHT-click for who can reach it. Node dragging is suspended.'
+        : 'Blast-Radius Mode off.', 'info');
+  } catch (_) {}
+}
+
+async function floodBlastRadius(sid, mode) {
+  if (!sid) return;
+  mode = (mode === 'inverse') ? 'inverse' : 'forward';
+  // Request generation: capture now, re-check after the await.  A later
+  // flood or a clearBlast() bumps _blastReqSeq, so a response that arrives
+  // after its flood was superseded or dismissed (out-of-order double-click,
+  // or clear-while-in-flight) is dropped instead of painting a stale view.
+  const myReq = ++_blastReqSeq;
+  let data;
+  try {
+    const r = await fetch('/api/actions/blast_radius', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sid: sid, mode: mode, max_depth: 6 }),
+    });
+    data = await r.json();
+  } catch (e) {
+    try { if (typeof showToast === 'function') showToast('Blast radius failed: ' + e, 'error'); } catch (_) {}
+    return;
+  }
+  if (myReq !== _blastReqSeq) return;   // superseded / cleared while in flight
+  if (!data || data.status !== 'ok') {
+    try { if (typeof showToast === 'function') showToast('Blast radius: ' + ((data && data.error) || 'no result'), 'error'); } catch (_) {}
+    return;
+  }
+  if (!data.reachable) {
+    clearBlast();
+    try {
+      if (typeof showToast === 'function')
+        showToast((mode === 'inverse' ? 'Nothing can reach ' : 'Nothing reachable from ')
+                  + sid + '.', 'info');
+    } catch (_) {}
+    return;
+  }
+  _cancelBlastAnim();
+  _clearBlastLayer();
+  _blastState = data;               // {anchor, mode, rings, nodes, reachable, max_hop}
+  _renderBlastLegend(data);
+  _clearBlastOutlines();
+  _reapplyBlast();                  // persistent ring outlines, immediately
+  _animateBlast(data, ++_blastToken);
+}
+
+function _animateBlast(data, token) {
+  const rings = data.rings || [];
+  const perRing = 450;              // ms between successive hop-rings
+  let lastAt = 0;
+  rings.forEach(function(ring, idx) {
+    const at = idx * perRing;
+    lastAt = at;
+    const t = setTimeout(function() {
+      if (token !== _blastToken) return;
+      const color = _blastRingColor(ring.hop);
+      (ring.sids || []).forEach(function(tgt) {
+        const meta = (data.nodes || {})[tgt] || {};
+        _blastDrawEdge(meta.via, tgt, color);
+        try { _pulseNode(tgt, color); } catch (_) {}
+      });
+    }, at);
+    _blastTimers.push(t);
+  });
+  // Fade the transient edge layer once the propagation has played out; the
+  // persistent ring outlines + legend remain until the flood is cleared.
+  const tc = setTimeout(function() {
+    if (token === _blastToken) _clearBlastLayer();
+  }, lastAt + 2600);
+  _blastTimers.push(tc);
+}
+
+function _blastDrawEdge(srcSid, tgtSid, color) {
+  const g = _blastLayer();
+  if (!g) return;
+  const a = _getNodeCenter(srcSid), b = _getNodeCenter(tgtSid);
+  if (!a || !b) return;             // a node not plotted (e.g. BTP sentinel)
+  const NS = 'http://www.w3.org/2000/svg';
+  const glow = document.createElementNS(NS, 'line');
+  glow.setAttribute('x1', a.cx); glow.setAttribute('y1', a.cy);
+  glow.setAttribute('x2', b.cx); glow.setAttribute('y2', b.cy);
+  glow.setAttribute('stroke', color); glow.setAttribute('stroke-width', 10);
+  glow.setAttribute('opacity', 0.16); glow.setAttribute('stroke-linecap', 'round');
+  g.appendChild(glow);
+  const line = document.createElementNS(NS, 'line');
+  line.setAttribute('x1', a.cx); line.setAttribute('y1', a.cy);
+  line.setAttribute('x2', b.cx); line.setAttribute('y2', b.cy);
+  line.setAttribute('stroke', color); line.setAttribute('stroke-width', 3);
+  line.setAttribute('stroke-linecap', 'round');
+  g.appendChild(line);
+  const len = line.getTotalLength ? line.getTotalLength() : 400;
+  line.style.strokeDasharray = len;
+  line.style.strokeDashoffset = len;
+  line.style.transition = 'stroke-dashoffset 360ms ease-out';
+  line.getBoundingClientRect();     // force reflow so the draw-on animates
+  line.style.strokeDashoffset = '0';
+}
+
+// Re-attach the persistent per-node ring outline after a state poll wiped it
+// (updateMap rebuilds #map-svg).  Called from updateMap, mirroring
+// _reapplyAttackHighlights.
+function _reapplyBlast() {
+  if (!_blastState || !_blastState.nodes) return;
+  const nodes = _blastState.nodes;
+  document.querySelectorAll('g.node-box[data-sid]').forEach(function(el) {
+    const sid = el.getAttribute('data-sid');
+    if (sid === _blastState.anchor) {
+      _attachBlastOutline(el, '#ffffff', true);   // the anchor, dashed white
+      return;
+    }
+    const meta = nodes[sid];
+    if (meta) _attachBlastOutline(el, _blastRingColor(meta.hop), false);
+  });
+}
+
+function _attachBlastOutline(el, color, isAnchor) {
+  // Drop any prior blast outline on this node so repeated applies (immediate
+  // + per-poll) never stack duplicate rects.
+  el.querySelectorAll('rect.blast-hl-overlay').forEach(function(e) {
+    try { e.remove(); } catch (_) {}
+  });
+  const rectEl = el.querySelector('rect');
+  if (!rectEl) return;
+  const x = parseFloat(rectEl.getAttribute('x'));
+  const y = parseFloat(rectEl.getAttribute('y'));
+  const w = parseFloat(rectEl.getAttribute('width'));
+  const h = parseFloat(rectEl.getAttribute('height'));
+  if (isNaN(x) || isNaN(y) || isNaN(w) || isNaN(h)) return;
+  const NS = 'http://www.w3.org/2000/svg';
+  const ring = document.createElementNS(NS, 'rect');
+  ring.setAttribute('class', 'blast-hl-overlay');
+  ring.setAttribute('x', x - 3); ring.setAttribute('y', y - 3);
+  ring.setAttribute('width', w + 6); ring.setAttribute('height', h + 6);
+  ring.setAttribute('rx', '9'); ring.setAttribute('fill', 'none');
+  ring.setAttribute('stroke', color);
+  ring.setAttribute('stroke-width', isAnchor ? 6 : 4);
+  ring.setAttribute('pointer-events', 'none');
+  if (isAnchor) ring.setAttribute('stroke-dasharray', '10,5');
+  ring.innerHTML =
+    '<animate attributeName="stroke-opacity" values="1;0.45;1" '
+    + 'dur="1.6s" repeatCount="indefinite" />';
+  el.appendChild(ring);
+}
+
+function _clearBlastOutlines() {
+  document.querySelectorAll('rect.blast-hl-overlay').forEach(function(e) {
+    try { e.remove(); } catch (_) {}
+  });
+}
+
+function _renderBlastLegend(data) {
+  const el = document.getElementById('blast-legend');
+  if (!el) return;
+  const anchor = escHtml(data.anchor || '');
+  const n = data.reachable || 0, k = data.max_hop || 0;
+  const title = (data.mode === 'inverse') ? 'Exposure cone' : 'Blast radius';
+  const verb = (data.mode === 'inverse')
+    ? (n + ' system' + (n === 1 ? '' : 's') + ' can reach ' + anchor)
+    : (n + ' system' + (n === 1 ? '' : 's') + ' reachable from ' + anchor);
+  let swatches = '';
+  (data.rings || []).forEach(function(ring) {
+    const c = _blastRingColor(ring.hop);
+    swatches +=
+      '<span style="display:inline-flex;align-items:center;margin:0 8px 2px 0;white-space:nowrap">'
+      + '<span style="width:11px;height:11px;border-radius:3px;background:' + c
+      + ';display:inline-block;margin-right:3px"></span>hop ' + ring.hop
+      + ' (' + (ring.sids || []).length + ')</span>';
+  });
+  el.innerHTML =
+    '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px">'
+    + '<strong>' + title + '</strong>'
+    + '<span onclick="clearBlast()" title="Clear" '
+    + 'style="cursor:pointer;color:#8b949e;font-weight:bold;padding:0 2px">&#10005;</span>'
+    + '</div>'
+    + '<div style="margin-bottom:6px">' + escHtml(verb)
+    + ' &middot; &le; ' + k + ' hop' + (k === 1 ? '' : 's') + '</div>'
+    + '<div style="display:flex;flex-wrap:wrap">' + swatches + '</div>';
+  el.style.display = '';
+}
+
+function clearBlast() {
+  _cancelBlastAnim();
+  _blastReqSeq++;                  // invalidate any in-flight flood request
+  _clearBlastLayer();
+  _clearBlastOutlines();
+  _blastState = null;
+  const el = document.getElementById('blast-legend');
+  if (el) { el.style.display = 'none'; el.innerHTML = ''; }
+}
+
 async function testAllRFCs() {
   const nodes = mapState.nodes || {};
   const conns = mapState.connections || [];
@@ -21413,6 +21689,9 @@ function _getDragTarget(sid) {
 }
 function startDrag(e, sid) {
   if (e.button === 2) return; // right-click = context menu
+  // Blast-Radius Mode (#197): a left-click floods what this node can reach
+  // instead of starting a drag.
+  if (_blastMode) { e.stopPropagation(); floodBlastRadius(sid, 'forward'); return; }
   e.stopPropagation();
   dragNode = sid;
   dragMoved = false;
@@ -21759,7 +22038,12 @@ function _pulseNode(sid, severity) {
   if (!pulse) return;
   const pos = _getNodeCenter(sid);
   if (!pos) return;
-  const color = _PULSE_COLORS[severity] || _PULSE_COLORS.INFO;
+  // `severity` is normally a key into _PULSE_COLORS, but callers (the
+  // blast-radius flood) may pass an explicit "#rrggbb" to pulse in a
+  // distance-ramp colour instead.
+  const color = _PULSE_COLORS[severity]
+    || (typeof severity === 'string' && severity.charAt(0) === '#'
+          ? severity : _PULSE_COLORS.INFO);
   const svgNS = 'http://www.w3.org/2000/svg';
   // Border rect: starts flush with the node, expands outward while fading.
   const pad = 4;
@@ -21942,6 +22226,17 @@ document.addEventListener('click', e => {
   hideDBCONCtxMenu();
   if (!e.target.closest('.info-panel') && !e.target.closest('.edge-line'))
     document.getElementById('info-panel').classList.remove('visible');
+  // Blast-radius flood (#197) clears on a click-away: anywhere that is not a
+  // node, the legend, ANY context menu (all six share the .ctx-menu class —
+  // #ctx-menu / #map-ctx-menu / #scc-ctx-menu / #btp-ctx-menu / #tms-ctx-menu
+  // / #dbcon-ctx-menu), or the top-nav (which is how it is triggered).  A node
+  // click in Blast-Radius Mode re-floods instead.
+  if (_blastState && !e.target.closest('.node-box')
+      && !e.target.closest('#blast-legend')
+      && !e.target.closest('.ctx-menu')
+      && !e.target.closest('.menu-item')) {
+    clearBlast();
+  }
 });
 
 document.addEventListener('contextmenu', e => {
