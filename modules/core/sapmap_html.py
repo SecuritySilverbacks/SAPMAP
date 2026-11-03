@@ -20263,6 +20263,9 @@ function showChainResults(chains) {
   // Also drop any stale dataset.sid so the poll's diff checks skip.
   panel.setAttribute('data-view', 'chains');
   panel.dataset.sid = 'chains';
+  // Hand the rendered chains to the kill-chain player (#196) so a card's
+  // Play control can replay chain N hop-by-hop without a server round-trip.
+  _lastChains = chains || [];
   const sevColors = { 5:'#e74c3c', 4:'#e67e22', 3:'#f1c40f', 2:'#3498db', 1:'#95a5a6' };
 
   if (chains.length === 0) {
@@ -20302,12 +20305,21 @@ function showChainResults(chains) {
             pathSids.map((s,i) => '<span style="color:' + (i === 0 ? '#f0883e' : i === pathSids.length-1 ? (c.end_is_production ? '#e74c3c' : '#58a6ff') : '#c9d1d9') + '">' + escHtml(s) + '</span>').join(arrow) +
           '</span>' +
         '</div>' +
+        '<div style="margin:5px 0;display:flex;gap:4px;align-items:center" onclick="event.stopPropagation()">' +
+          '<button class="kc-play-btn" title="Replay this attack path hop-by-hop on the map" onclick="event.stopPropagation(); playChain(' + idx + ')" style="background:#21262d;color:#c9d1d9;border:1px solid #30363d;border-radius:4px;padding:2px 8px;font-size:11px;cursor:pointer">&#9654; Play</button>' +
+          '<button class="kc-pause-btn" title="Pause / resume replay" onclick="event.stopPropagation(); togglePlayPause()" style="background:#21262d;color:#c9d1d9;border:1px solid #30363d;border-radius:4px;padding:2px 7px;font-size:11px;cursor:pointer">&#10073;&#10073;</button>' +
+          '<button class="kc-replay-btn" title="Replay from the start" onclick="event.stopPropagation(); replayChain(' + idx + ')" style="background:#21262d;color:#c9d1d9;border:1px solid #30363d;border-radius:4px;padding:2px 7px;font-size:11px;cursor:pointer">&#8635;</button>' +
+          '<select class="kc-speed" title="Playback speed" onclick="event.stopPropagation()" onchange="event.stopPropagation(); setPlaySpeed(this.value)" style="background:#21262d;color:#c9d1d9;border:1px solid #30363d;border-radius:4px;padding:2px 4px;font-size:11px;cursor:pointer">' +
+            '<option value="0.5">0.5&times;</option><option value="1" selected>1&times;</option><option value="2">2&times;</option>' +
+          '</select>' +
+        '</div>' +
         (c.hops || []).map((h, hi) =>
           '<div style="font-size:11px;color:#8b949e;margin:2px 0;padding-left:' + (hi * 8 + 4) + 'px">' +
             '&#9654; ' + escHtml(h.source_sid) + ' &#8594; ' + escHtml(h.target_sid) +
             (h.destination_name ? ' via <span style="color:#58a6ff">' + escHtml(h.destination_name) + '</span>' : '') +
             (h.rfc_user ? ' (user: ' + escHtml(h.rfc_user) + ')' : '') +
             (h.has_sap_all ? ' <span style="color:#e74c3c;font-weight:bold">SAP_ALL</span>' : '') +
+            (h.method ? ' <span style="color:' + (sevColors[h.severity] || '#8b949e') + (h.untested ? ';opacity:0.65;font-style:italic' : ';font-weight:bold') + '">[' + escHtml(h.method) + ']</span>' : '') +
           '</div>'
         ).join('') +
         '<div style="font-size:11px;color:#8b949e;margin-top:4px">' +
@@ -20328,6 +20340,215 @@ function highlightChain(pathSids) {
   updateMap();
   // Auto-clear after 15 seconds
   setTimeout(() => { _highlightedChain = null; updateMap(); }, 15000);
+}
+
+// ---------------------------------------------------------------------------
+// Kill-chain player (#196) — replay a precomputed attack path hop-by-hop in
+// the #pulse-svg overlay.  Per hop: draw the edge on, pulse the landing node,
+// caption the technique.  Draws ONLY into #pulse-svg because updateMap()
+// rebuilds #map-svg via innerHTML on every state poll and would wipe any
+// animation parked in the main map.  Per-hop severity (5..2, from PR1) colours
+// each hop; untested hops are drawn faint + dashed.  100% client-side off the
+// chains already rendered in the panel — no new server route.
+// ---------------------------------------------------------------------------
+let _lastChains = [];     // chains most recently rendered by showChainResults
+let _playToken = 0;       // monotonic cancel token; bumping it kills in-flight play
+let _playTimers = [];     // pending setTimeout ids for the active play
+let _playState = null;    // {idx,i,hops,pathSids,paused} while playing, else null
+let _playSpeed = 1;       // 0.5 / 1 / 2
+
+const _PLAY_SEV_COLOR = { 5:'#ff4d4d', 4:'#f0883e', 3:'#d29922', 2:'#388bfd', 1:'#8b949e' };
+const _PLAY_SEV_NAME  = { 5:'CRITICAL', 4:'HIGH', 3:'MEDIUM', 2:'INFO', 1:'INFO' };
+
+function _playLayer() {
+  const pulse = document.getElementById('pulse-svg');
+  if (!pulse) return null;
+  let g = pulse.querySelector('g.kc-play-layer');
+  if (!g) {
+    g = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+    g.setAttribute('class', 'kc-play-layer');
+    pulse.appendChild(g);
+  }
+  return g;
+}
+
+function _clearPlayLayer() {
+  const g = _playLayer();
+  if (g) g.innerHTML = '';
+}
+
+function _cancelPlay() {
+  _playToken++;
+  _playTimers.forEach(function(t) { clearTimeout(t); });
+  _playTimers = [];
+}
+
+// BTP-aware centre resolver: mapState.nodes OR a 'BTP:<uuid8>' sentinel ->
+// mapState.btp_subaccounts.  Returns world-coord centre, or null when the
+// node isn't plotted yet (the hop is then skipped visually).
+function _playResolveCenter(sid) {
+  const BOX_W = 240, BOX_H = 174;
+  let n = (mapState.nodes || {})[sid];
+  if (!n && sid && sid.indexOf('BTP:') === 0) {
+    const suffix = sid.slice(4).toLowerCase();
+    const btp = mapState.btp_subaccounts || {};
+    for (const u in btp) {
+      if (u.toLowerCase().indexOf(suffix) === 0) { n = btp[u]; break; }
+    }
+  }
+  if (!n || n._x == null) return null;
+  return { x: n._x, y: n._y, cx: n._x + BOX_W / 2, cy: n._y + BOX_H / 2 };
+}
+
+function playChain(idx) {
+  const chain = _lastChains[idx];
+  if (!chain) return;
+  const hops = chain.hops || [];
+  if (hops.length === 0) { alert('This chain has no hops to replay.'); return; }
+  _cancelPlay();
+  _clearPlayLayer();
+  _playState = { idx: idx, i: 0, drawn: -1, hops: hops,
+                 pathSids: chain.path_sids || [], paused: false };
+  _syncPlayButtons();
+  _playStep(_playToken);
+}
+
+function _playStep(token) {
+  if (token !== _playToken || !_playState || _playState.paused) return;
+  const st = _playState;
+  if (st.i >= st.hops.length) {               // finished
+    try {
+      if (typeof showToast === 'function')
+        showToast('Kill-chain replay complete — ' + st.hops.length + ' hops.');
+    } catch (_) {}
+    _playState = null;
+    _syncPlayButtons();
+    _playTimers.push(setTimeout(function() {
+      if (token === _playToken) _clearPlayLayer();
+    }, 6000));
+    return;
+  }
+  const hop = st.hops[st.i];
+  const sev = hop.severity || 2;
+  const color = _PLAY_SEV_COLOR[sev] || _PLAY_SEV_COLOR[2];
+  const a = _playResolveCenter(hop.source_sid);
+  const b = _playResolveCenter(hop.target_sid);
+  const drawMs = Math.round(800 / _playSpeed);
+  const dwellMs = Math.round(400 / _playSpeed);
+
+  // Draw each hop's edge + caption exactly once.  Pausing clears the
+  // pending timers without advancing st.i, so a resume re-enters _playStep
+  // on the same hop; the st.drawn guard stops that from stacking duplicate
+  // glow/line/caption elements (and re-triggering the draw-on) in the layer.
+  if (st.drawn !== st.i && a && b) {
+    const g = _playLayer();
+    const NS = 'http://www.w3.org/2000/svg';
+    // glow underlay
+    const glow = document.createElementNS(NS, 'line');
+    glow.setAttribute('x1', a.cx); glow.setAttribute('y1', a.cy);
+    glow.setAttribute('x2', b.cx); glow.setAttribute('y2', b.cy);
+    glow.setAttribute('stroke', color); glow.setAttribute('stroke-width', 12);
+    glow.setAttribute('opacity', 0.18); glow.setAttribute('stroke-linecap', 'round');
+    if (g) g.appendChild(glow);
+    // main line, drawn on
+    const line = document.createElementNS(NS, 'line');
+    line.setAttribute('x1', a.cx); line.setAttribute('y1', a.cy);
+    line.setAttribute('x2', b.cx); line.setAttribute('y2', b.cy);
+    line.setAttribute('stroke', color); line.setAttribute('stroke-width', 4);
+    line.setAttribute('stroke-linecap', 'round');
+    if (g) g.appendChild(line);
+    if (hop.untested) {
+      // Dashed + opacity fade-in (dash-offset draw-on would fight the dashes).
+      line.setAttribute('stroke-dasharray', '9,6');
+      line.style.opacity = '0';
+      line.style.transition = 'opacity ' + drawMs + 'ms ease-out';
+      line.getBoundingClientRect();        // force reflow
+      line.style.opacity = '0.9';
+    } else {
+      const len = line.getTotalLength ? line.getTotalLength() : 600;
+      line.style.strokeDasharray = len;
+      line.style.strokeDashoffset = len;
+      line.style.transition = 'stroke-dashoffset ' + drawMs + 'ms ease-out';
+      line.getBoundingClientRect();        // force reflow
+      line.style.strokeDashoffset = '0';
+    }
+    _playCaption(hop, b, color, st.i + 1, st.hops.length);
+    st.drawn = st.i;
+  }
+
+  // Pulse the landing node once the edge finishes drawing.
+  const t1 = setTimeout(function() {
+    if (token !== _playToken || !_playState || _playState.paused) return;
+    try { _pulseNode(hop.target_sid, _PLAY_SEV_NAME[sev] || 'INFO'); } catch (_) {}
+  }, drawMs);
+  _playTimers.push(t1);
+
+  // Advance to the next hop after the draw + dwell.
+  const t2 = setTimeout(function() {
+    if (token !== _playToken || !_playState || _playState.paused) return;
+    _playState.i++;
+    _playStep(token);
+  }, drawMs + dwellMs);
+  _playTimers.push(t2);
+}
+
+function _playCaption(hop, center, color, step, total) {
+  const g = _playLayer();
+  if (!g) return;
+  const NS = 'http://www.w3.org/2000/svg';
+  const txt = document.createElementNS(NS, 'text');
+  txt.setAttribute('x', center.cx);
+  txt.setAttribute('y', center.y - 14);
+  txt.setAttribute('text-anchor', 'middle');
+  txt.setAttribute('font-size', '15');
+  txt.setAttribute('font-weight', 'bold');
+  txt.setAttribute('font-family', 'monospace');
+  txt.setAttribute('fill', color);
+  txt.setAttribute('stroke', '#0d1117');       // dark halo for legibility
+  txt.setAttribute('stroke-width', '0.6');
+  txt.setAttribute('paint-order', 'stroke');
+  if (hop.untested) {
+    txt.setAttribute('opacity', '0.65');
+    txt.setAttribute('font-style', 'italic');
+  }
+  txt.textContent = '[' + step + '/' + total + '] ' + (hop.method || '');
+  g.appendChild(txt);
+}
+
+function togglePlayPause() {
+  if (!_playState) return;
+  if (_playState.paused) {
+    _playState.paused = false;
+    _syncPlayButtons();
+    _playStep(_playToken);        // resume from the current hop
+  } else {
+    _playState.paused = true;
+    _playTimers.forEach(function(t) { clearTimeout(t); });
+    _playTimers = [];
+    _syncPlayButtons();
+  }
+}
+
+function replayChain(idx) { playChain(idx); }
+
+function stopPlay() {
+  _cancelPlay();
+  _clearPlayLayer();
+  _playState = null;
+  _syncPlayButtons();
+}
+
+function setPlaySpeed(mult) {
+  const v = parseFloat(mult);
+  if (v > 0) _playSpeed = v;
+}
+
+function _syncPlayButtons() {
+  const playing = !!(_playState && !_playState.paused);
+  document.querySelectorAll('.kc-pause-btn').forEach(function(btn) {
+    btn.innerHTML = playing ? '&#10073;&#10073;' : '&#9654;';
+    btn.title = playing ? 'Pause replay' : 'Resume replay';
+  });
 }
 
 async function testAllRFCs() {
