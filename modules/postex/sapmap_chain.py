@@ -29,7 +29,13 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class ChainHop:
-    """A single hop in an attack chain."""
+    """A single hop in an attack chain.
+
+    ``severity`` (5=CRITICAL .. 2=LOW) and ``untested`` score this one
+    hop on its own — see :func:`_hop_severity`.  Whole-chain severity
+    still lives on :class:`TrustChain`; these let a consumer colour each
+    step, not just the chain as a whole.
+    """
     source_sid: str
     target_sid: str
     destination_name: str = ""
@@ -37,6 +43,8 @@ class ChainHop:
     has_sap_all: bool = False
     method: str = ""
     description: str = ""
+    severity: int = 2
+    untested: bool = False
 
     def to_dict(self) -> dict:
         return {
@@ -47,7 +55,53 @@ class ChainHop:
             "has_sap_all": self.has_sap_all,
             "method": self.method,
             "description": self.description,
+            "severity": self.severity,
+            "untested": self.untested,
         }
+
+
+# Per-hop severity rungs (mirror TrustChain's 5..2 ladder, scored for a
+# single hop rather than the whole chain).
+_HOP_SEV_CRITICAL = 5   # passwordless lateral movement
+_HOP_SEV_HIGH = 4       # lands SAP_ALL-equivalent rights
+_HOP_SEV_MEDIUM = 3     # authenticated RFC logon
+_HOP_SEV_LOW = 2        # floor (also: a downgraded untested hop)
+
+
+def _hop_severity(conn, is_trusted: bool, is_sso2: bool,
+                  is_dbcon: bool, is_tms: bool) -> int:
+    """Severity of a single attack hop, 5 (CRITICAL) down to 2 (LOW).
+
+    The ranking tracks the technique the hop's ``method`` caption names,
+    so the number and the label never drift apart:
+
+    * trusted RFC or a forged MYSAPSSO2 ticket need **no password** and
+      let the attacker act as any user — CRITICAL (5);
+    * a hop that lands SAP_ALL-equivalent rights — a BAPI call with
+      SAP_ALL, a direct-DB user plant (DBCON), or a TMS transport edge —
+      HIGH (4);
+    * a plain RFC logon that still has to authenticate — MEDIUM (3).
+
+    An *untested* edge (the destination exists on the source's disk but
+    the logon has not been proven) is only a candidate, so it is knocked
+    down one rung, with LOW (2) as the floor.  Passwordless, DBCON and
+    TMS edges are never treated as untested here — matching the caption
+    logic, which does not tag them ``— UNTESTED`` either.
+
+    Pure and side-effect-free: ``conn`` may be a real ``RFCConnection``
+    or one of the synthetic edge objects the BFS builds, so every
+    attribute read is guarded.
+    """
+    if is_trusted or is_sso2:
+        sev = _HOP_SEV_CRITICAL
+    elif getattr(conn, "has_sap_all", False) or is_dbcon or is_tms:
+        sev = _HOP_SEV_HIGH
+    else:
+        sev = _HOP_SEV_MEDIUM
+    untested = not getattr(conn, "tested", False)
+    if untested and not (is_trusted or is_sso2 or is_dbcon or is_tms):
+        sev = max(_HOP_SEV_LOW, sev - 1)
+    return sev
 
 
 @dataclass
@@ -371,7 +425,12 @@ def find_all_chains(state: SAPMAPState, max_depth: int = 6,
                     method = "BAPI (SAP_ALL)"
                 else:
                     method = "RFC logon"
-                if untested and not is_trusted and not is_sso2 and not is_dbcon and not is_tms:
+                # One predicate drives the caption suffix, the
+                # description tag, the per-hop severity clamp and the
+                # ChainHop.untested flag — so they can never drift.
+                hop_untested = (untested and not is_trusted and not is_sso2
+                                and not is_dbcon and not is_tms)
+                if hop_untested:
                     method += " — UNTESTED"
                 hop = ChainHop(
                     source_sid=current_sid,
@@ -386,8 +445,11 @@ def find_all_chains(state: SAPMAPState, max_depth: int = 6,
                         + (" [tms]" if is_tms else "")
                         + (" [strustsso2]" if is_sso2 else "")
                         + (" [trusted]" if is_trusted else "")
-                        + (" [untested]" if untested and not is_trusted and not is_sso2 and not is_dbcon and not is_tms else "")
+                        + (" [untested]" if hop_untested else "")
                     ).strip(),
+                    severity=_hop_severity(conn, is_trusted, is_sso2,
+                                           is_dbcon, is_tms),
+                    untested=hop_untested,
                 )
                 new_path = path + [hop]
 
