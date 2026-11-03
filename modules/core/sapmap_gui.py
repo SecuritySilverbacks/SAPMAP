@@ -20401,6 +20401,34 @@ def create_app(api: SAPMAPApi) -> Bottle:
         chains = getattr(api.state, '_trust_chains', [])
         return json.dumps({"chains": chains})
 
+    @app.route("/api/actions/blast_radius", method="POST")
+    def actions_blast_radius():
+        """Flood one node's reachable set (issue #197).
+
+        Pure graph walk over the lateral-movement adjacency — fast enough
+        to answer synchronously (no _bg thread).  ``mode='forward'`` floods
+        what the node can reach; ``mode='inverse'`` floods every system that
+        can reach it (the crown-jewel exposure cone)."""
+        response.content_type = "application/json"
+        data = request.json or {}
+        sid = (data.get("sid") or "").strip()
+        mode = (data.get("mode") or "forward").strip().lower()
+        try:
+            max_depth = int(data.get("max_depth", 6))
+        except (TypeError, ValueError):
+            max_depth = 6
+        max_depth = max(1, min(max_depth, 12))   # clamp to a sane range
+        if not sid:
+            return json.dumps({"status": "error",
+                               "error": "no sid given"})
+        import sapmap_chain
+        if mode == "inverse":
+            result = sapmap_chain.exposure_cone(api.state, sid, max_depth)
+        else:
+            result = sapmap_chain.blast_radius(api.state, sid, max_depth)
+        result["status"] = "ok"
+        return json.dumps(result)
+
     @app.route("/api/actions/check_all_betrusted", method="POST")
     def actions_check_all_betrusted():
         """Check MS betrusted + inject trusted IP on all nodes."""
