@@ -1138,6 +1138,7 @@ body {
       <div class="dd-item" onclick="layoutStar()">&#10024; Layout: Star (hub &amp; spoke)</div>
       <div class="dd-item" onclick="layoutHierarchy()">&#128719; Layout: Hierarchy (top &rarr; bottom by RFC)</div>
       <div class="dd-item" onclick="layoutByStack()">&#128218; Layout: Group by Stack (ABAP / Java / Dual)</div>
+      <div class="dd-item" id="defense-rings-item" onclick="toggleDefenseRings()" title="Defense-in-depth rings layout (issue #198).  Centres the crown jewel (the deepest production system from an entry) and arranges every system in concentric rings by exploit distance — the shortest hop count from an internet-facing / compromised / credentialed entry.  Entry points sit on the outer ring; each ring inward is one more hop; nodes with no path from an entry sit in a separated outer band.  One glance shows whether production is 1 hop from the edge or 5.  Toggle off to restore your previous layout.">&#127919; Layout: Defense-in-Depth Rings</div>
       <div class="dd-sep"></div>
       <div class="dd-item" id="blast-mode-item" onclick="toggleBlastMode()" title="Blast-radius explore mode (issue #197).  While ON, LEFT-click a node to flood everything it can reach, RIGHT-click to flood everything that can reach it (the crown-jewel exposure cone).  Node dragging is suspended while the mode is on.  Right-click any node's context menu also has 'Blast Radius' / 'Exposure Cone' entries that work with the mode off.">&#128165; Blast-Radius Mode: Off</div>
       <div class="dd-sep"></div>
@@ -4332,6 +4333,9 @@ async function pollUpdates() {
             else if (m === 'hierarchy')  layoutHierarchy();
             else if (m === 'stack'
                   || m === 'by_stack')   layoutByStack();
+            else if (m === 'rings'
+                  || m === 'defense'
+                  || m === 'defense_rings') layoutDefenseRings();
             else if (m === 'reset')      resetLayout();
             else console.warn('relayout: unknown mode', c.mode);
           }
@@ -21082,6 +21086,7 @@ function _sccHostForNode(n) {
 }
 function resetLayout() {
   flashActivity('Rearranging: Reset');
+  _clearRingsMode();
   _loReanchorSatellites();
   viewBoxUserControlled = false;
   viewBox.x = 0; viewBox.y = 0; viewBox._nodeCount = 0;
@@ -21171,6 +21176,7 @@ function layoutCircle() {
   ].filter(x => x.obj);
   if (allItems.length === 0) return;
   flashActivity('Rearranging: Circle');
+  _clearRingsMode();
   _loReanchorSatellites();
   // Radius scales with total node count so boxes never overlap on the ring.
   const total = allItems.length;
@@ -21192,6 +21198,7 @@ function layoutStar() {
   const sccHosts = Object.keys(mapState.scc_nodes || {}).sort();
   if (sids.length === 0 && sccHosts.length === 0) return;
   flashActivity('Rearranging: Star');
+  _clearRingsMode();
   _loReanchorSatellites();
   const nodes = mapState.nodes || {};
   const conns = mapState.connections || [];
@@ -21235,6 +21242,7 @@ function layoutHierarchy() {
   const sids = _loSortedNodeKeys();
   if (sids.length === 0) return;
   flashActivity('Rearranging: Hierarchy');
+  _clearRingsMode();
   _loReanchorSatellites();
   const nodes = mapState.nodes;
   const conns = mapState.connections || [];
@@ -21402,6 +21410,7 @@ function layoutByStack() {
   const sccHosts = Object.keys(mapState.scc_nodes || {}).sort();
   if (sids.length === 0 && sccHosts.length === 0) return;
   flashActivity('Rearranging: Group by Stack');
+  _clearRingsMode();
   _loReanchorSatellites();
   const nodes = mapState.nodes;
 
@@ -21442,6 +21451,184 @@ function layoutByStack() {
   });
   fitMap();
   updateMap();
+}
+
+// ---------------------------------------------------------------------------
+// Defense-in-depth rings layout (#198) — centre the crown jewel and arrange
+// every system in concentric rings by exploit distance (shortest hop count
+// from the nearest entry).  Entry points on the outer ring; each ring inward
+// = +1 hop; unreachable-from-entry nodes in a separated outer band.  It is a
+// TOGGLE: entering snapshots the current positions; toggling off restores
+// them.  A view over the exploit distances the server computes
+// (/api/actions/exploit_distances) — no new discovery.
+// ---------------------------------------------------------------------------
+let _ringsActive = false;
+let _ringsSavedPositions = null;   // {sap,scc,btp} position snapshot, for restore
+let _ringsReqSeq = 0;              // request generation: a newer rings run or a
+                                   // switch to another layout bumps it, so a
+                                   // stale exploit_distances response that
+                                   // resolves late never paints or re-snapshots
+
+function _snapshotPositions() {
+  const snap = { sap: {}, scc: {}, btp: {} };
+  const put = (obj, map, id) => { if (obj) map[id] = { x: obj._x, y: obj._y }; };
+  Object.keys(mapState.nodes || {}).forEach(s => put(mapState.nodes[s], snap.sap, s));
+  Object.keys(mapState.scc_nodes || {}).forEach(h => put(mapState.scc_nodes[h], snap.scc, h));
+  Object.keys(mapState.btp_subaccounts || {}).forEach(u => put(mapState.btp_subaccounts[u], snap.btp, u));
+  return snap;
+}
+
+function _restorePositions(snap) {
+  if (!snap) return;
+  const take = (obj, map, id) => { if (obj && map[id]) { obj._x = map[id].x; obj._y = map[id].y; } };
+  Object.keys(mapState.nodes || {}).forEach(s => take(mapState.nodes[s], snap.sap, s));
+  Object.keys(mapState.scc_nodes || {}).forEach(h => take(mapState.scc_nodes[h], snap.scc, h));
+  Object.keys(mapState.btp_subaccounts || {}).forEach(u => take(mapState.btp_subaccounts[u], snap.btp, u));
+}
+
+function _syncRingsButton() {
+  const item = document.getElementById('defense-rings-item');
+  if (item) item.innerHTML = '🎯 Layout: Defense-in-Depth Rings' + (_ringsActive ? ' ✓' : '');
+}
+
+// Another layout replaced the rings view — forget the rings state so the menu
+// label and the restore snapshot reflect reality.  Called by the other layout
+// entry points (they are an explicit choice of a new layout, not a toggle-off,
+// so they do NOT restore the snapshot).
+function _clearRingsMode() {
+  if (!_ringsActive && !_ringsSavedPositions) return;
+  _ringsReqSeq++;                 // invalidate any in-flight rings fetch
+  _ringsActive = false;
+  _ringsSavedPositions = null;
+  _syncRingsButton();
+}
+
+async function toggleDefenseRings() {
+  if (_ringsActive) {
+    _ringsReqSeq++;               // invalidate any in-flight rings fetch
+    _restorePositions(_ringsSavedPositions);
+    _ringsSavedPositions = null;
+    _ringsActive = false;
+    _syncRingsButton();
+    _loReanchorSatellites();
+    fitMap(); updateMap();
+    try { if (typeof showToast === 'function') showToast('Restored your previous layout.', 'info'); } catch (_) {}
+    return;
+  }
+  await layoutDefenseRings();
+}
+
+async function layoutDefenseRings() {
+  // Request generation: a newer rings run, a switch to another layout, or a
+  // toggle-off bumps _ringsReqSeq, so a response that resolves after its run
+  // was superseded is dropped instead of painting / re-snapshotting.
+  const myReq = ++_ringsReqSeq;
+  // Snapshot the pre-rings layout BEFORE the fetch, and only when entering
+  // from a non-rings state — so re-entry while already active (a second
+  // `layout rings`, a double-click) never overwrites the saved original with
+  // ring coordinates.
+  if (!_ringsActive) _ringsSavedPositions = _snapshotPositions();
+  let data;
+  try {
+    const r = await fetch('/api/actions/exploit_distances', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ max_depth: 6 }),
+    });
+    data = await r.json();
+  } catch (e) {
+    try { if (typeof showToast === 'function') showToast('Rings layout failed: ' + e, 'error'); } catch (_) {}
+    return;
+  }
+  if (myReq !== _ringsReqSeq) return;   // superseded / cleared while in flight
+  if (!data || data.status !== 'ok') {
+    try { if (typeof showToast === 'function') showToast('Rings layout: ' + ((data && data.error) || 'no result'), 'error'); } catch (_) {}
+    return;
+  }
+  const distances = data.distances || {};
+  const entries = data.entries || [];
+  if (!entries.length) {
+    try {
+      if (typeof showToast === 'function')
+        showToast('No entry points yet — nothing to measure exploit distance from. '
+                  + 'Scan / exploit a system first.', 'info');
+    } catch (_) {}
+    return;
+  }
+  flashActivity('Rearranging: Defense-in-Depth Rings');
+  _loReanchorSatellites();
+
+  const maxDist = data.max_distance || 0;
+  const centerSid = data.center_sid;
+  const RING = _LO_BOX_H + _LO_MARGIN * 1.2;    // base radial spacing
+
+  // Resolve a distance-map SID to its plottable object (SAP node, or a
+  // "BTP:<uuid8>" sentinel -> its subaccount).  SCC nodes aren't in the
+  // exploit graph; they ride along in the unreachable band.
+  const resolve = (sid) => {
+    if ((mapState.nodes || {})[sid]) return mapState.nodes[sid];
+    if (sid.indexOf('BTP:') === 0) {
+      const suf = sid.slice(4).toLowerCase();
+      const btp = mapState.btp_subaccounts || {};
+      for (const u in btp) if (u.toLowerCase().indexOf(suf) === 0) return btp[u];
+    }
+    return null;
+  };
+
+  // Group by RING INDEX = (maxDist - distance + 1): entries (distance 0) land
+  // on the outermost reachable ring, the deepest systems just outside the
+  // centre.  The crown jewel sits at the exact centre.  Unreachable nodes
+  // (incl. SCC) go in an extra outer band beyond the entries.
+  const byRing = {};
+  const centerObj = centerSid ? resolve(centerSid) : null;
+  Object.keys(distances).forEach(sid => {
+    if (sid === centerSid) return;              // centre
+    const obj = resolve(sid);
+    if (!obj) return;
+    const ri = (maxDist - distances[sid]) + 1;
+    (byRing[ri] = byRing[ri] || []).push(obj);
+  });
+  const OUTER_BAND = maxDist + 2;
+  const unreachObjs = [];
+  (data.unreachable || []).forEach(sid => { const o = resolve(sid); if (o) unreachObjs.push(o); });
+  Object.keys(mapState.scc_nodes || {}).forEach(h => unreachObjs.push(mapState.scc_nodes[h]));
+  if (unreachObjs.length) byRing[OUTER_BAND] = (byRing[OUTER_BAND] || []).concat(unreachObjs);
+
+  // Canvas centre big enough to hold the outermost band without clipping.
+  const outerR = OUTER_BAND * RING;
+  const cx = outerR + _LO_BOX_W;
+  const cy = outerR + _LO_BOX_H;
+  if (centerObj) _loCenter(centerObj, cx, cy);
+
+  Object.keys(byRing).map(Number).sort((a, b) => a - b).forEach(ri => {
+    const objs = byRing[ri];
+    const n = objs.length;
+    // Radius: at least ri*RING, grown so n boxes fit the circumference.
+    const minR = (n * (_LO_BOX_W + _LO_MARGIN)) / (2 * Math.PI);
+    const radius = Math.max(ri * RING, minR);
+    // Rotate each ring by the golden angle so sparse rings (1-2 nodes) fan
+    // out instead of collapsing onto a single vertical spoke — on a near-
+    // linear landscape that is the difference between concentric rings and
+    // an unreadable column.
+    const offset = ri * 2.399963;
+    objs.forEach((obj, i) => {
+      const angle = offset + (2 * Math.PI * i) / n;
+      _loCenter(obj, cx + radius * Math.cos(angle), cy + radius * Math.sin(angle));
+    });
+  });
+
+  _ringsActive = true;
+  _syncRingsButton();
+  fitMap(); updateMap();
+  try {
+    if (typeof showToast === 'function') {
+      const jewel = centerSid ? (centerSid + ' centred, ') : '';
+      const nUnreach = (data.unreachable || []).length;
+      showToast('Defense-in-depth rings: ' + jewel + 'production is ' + maxDist
+                + ' hop' + (maxDist === 1 ? '' : 's') + ' from the attack edge'
+                + (nUnreach ? ' (' + nUnreach + ' unreachable from any entry).' : '.'),
+                'info');
+    }
+  } catch (_) {}
 }
 
 // Arrange every node in a grid whose bounding-box aspect ratio matches

@@ -240,7 +240,8 @@ def _map_step(step: dict) -> tuple:
 
     if action == "layout":
         mode = (step.get("mode") or "").strip().lower()
-        valid = {"circle", "star", "hierarchy", "stack", "by_stack", "reset"}
+        valid = {"circle", "star", "hierarchy", "stack", "by_stack",
+                 "rings", "defense", "defense_rings", "reset"}
         if mode not in valid:
             raise ValueError(
                 f"layout requires mode in {sorted(valid)} (got {mode!r})"
