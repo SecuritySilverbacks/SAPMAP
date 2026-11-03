@@ -54,7 +54,8 @@ Supported actions:
     ssh_harvest, ssh_test_keys, ssh_plant_key,
     # Business impact + trust chain analysis
     impact_assess, impact_show, impact_export, analyze_chains,
-    highlight_chain, play_chain, layout, sleep, verify_pp_impersonation,
+    highlight_chain, play_chain, blast_radius,
+    layout, sleep, verify_pp_impersonation,
     read_usrextid, read_oa2c, analyse_capabilities,
     # Node identity / metadata overrides
     set_sid, set_instance_nr, set_type, set_db_type, set_os_type,
@@ -221,6 +222,21 @@ def _map_step(step: dict) -> tuple:
             "end": step.get("end", ""),
             "index": step.get("index", 0),
         }, False)
+
+    if action == "blast_radius":
+        # Flood a node's reachable set in the GUI blast-radius view (#197).
+        # mode=forward floods what the node can reach; mode=inverse floods
+        # who can reach it (the crown-jewel exposure cone).  GUI-only, like
+        # highlight_chain / play_chain.
+        sid = (step.get("sid") or step.get("node") or step.get("target")
+               or "").strip()
+        if not sid:
+            raise ValueError("blast_radius requires a 'sid' (the node to flood)")
+        mode = (step.get("mode") or "forward").strip().lower()
+        if mode not in ("forward", "inverse"):
+            raise ValueError(
+                f"blast_radius mode must be 'forward' or 'inverse' (got {mode!r})")
+        return ("BLAST_RADIUS", "", {"sid": sid, "mode": mode}, False)
 
     if action == "layout":
         mode = (step.get("mode") or "").strip().lower()
@@ -1332,6 +1348,7 @@ _ACTION_LABELS = {
     "analyze_chains":         "Analysing trust chains",
     "highlight_chain":        "Highlighting chain",
     "play_chain":             "Playing kill-chain",
+    "blast_radius":           "Flooding blast radius",
     "propagate":              "Propagating credentials",
     "deep_scan":              "Deep scanning",
     "lpe":                    "Local privilege escalation",
@@ -1442,6 +1459,11 @@ def _script_flash_label(action: str, target: str, step: dict) -> str:
     elif action in ("highlight_chain", "play_chain"):
         start = step.get("start", ""); end = step.get("end", "")
         if start and end: base = f"{base} {start} → {end}"
+    elif action == "blast_radius":
+        sid = (step.get("sid") or step.get("node") or step.get("target") or "")
+        mode = (step.get("mode") or "forward").strip().lower()
+        if sid:
+            base = f"{base} {'into' if mode == 'inverse' else 'from'} {sid}"
     return f"{base} on {target}" if target else base
 
 
@@ -1709,6 +1731,22 @@ class ScriptRunner:
                         pass
                 else:
                     pf(f"[SCRIPT]   No matching chain found (run analyze_chains first)")
+                continue
+
+            # Special case: flood a node's reachable set in the GUI
+            # blast-radius view (#197).  GUI-only, like play_chain — pushes a
+            # ui_command the map's command poller turns into
+            # floodBlastRadius(sid, mode).
+            if method == "BLAST_RADIUS":
+                sid = payload.get("sid", "")
+                mode = payload.get("mode", "forward")
+                pf(f"[SCRIPT]   Blast radius ({mode}) "
+                   f"{'into' if mode == 'inverse' else 'from'} {sid}")
+                try:
+                    from sapmap_gui import ui_command
+                    ui_command("blast_radius", sid=sid, mode=mode)
+                except ImportError:
+                    pass
                 continue
 
             # Execute the API call

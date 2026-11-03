@@ -697,6 +697,76 @@ def _trust_chains_section(state: SAPMAPState) -> list:
     return out
 
 
+def _blast_radius_section(state: SAPMAPState) -> list:
+    """Per-foothold blast radius + crown-jewel exposure (issue #197).
+
+    The chain table above enumerates *paths*; this answers the blunt
+    stakeholder question directly: from each foothold we hold, how much of
+    the landscape falls — and for each crown jewel, how many systems can
+    reach it.  Same reachable-set computation the GUI blast-radius view
+    renders (sapmap_chain.blast_radius / exposure_cone)."""
+    out = ["## Blast radius (reachable landscape per foothold)", ""]
+    try:
+        from sapmap_chain import blast_radius, exposure_cone
+    except Exception as e:
+        out.append(f"_Blast-radius analysis failed: {e}_")
+        out.append("")
+        return out
+
+    footholds = [
+        sid for sid, n in sorted(state.nodes.items())
+        if n.pwned or getattr(n, "gw_vulnerable", False)
+        or getattr(n, "ms_vulnerable", False)
+        or any(getattr(c, "verified", False) for c in (n.credentials or []))
+    ]
+    if not footholds:
+        out.append("_No footholds (compromised / exploitable / credentialed "
+                   "systems) to measure reach from._")
+        out.append("")
+        return out
+
+    out.append("From each established foothold, how many other systems fall "
+               "within reach — own this box, own all of *that* — by hop "
+               "distance:")
+    out.append("")
+    out.append("| Foothold | Reachable | Max hops | Ring breakdown (hop: count) |")
+    out.append("| --- | --- | --- | --- |")
+    rows = []
+    for sid in footholds:
+        r = blast_radius(state, sid, max_depth=6)
+        rings = "; ".join(f"{rr['hop']}: {len(rr['sids'])}"
+                          for rr in r["rings"]) or "—"
+        rows.append((r["reachable"], sid, r["max_hop"], rings))
+    for reachable, sid, max_hop, rings in sorted(rows, reverse=True):
+        out.append(f"| {_esc(sid)} | {reachable} | {max_hop} | {rings} |")
+    out.append("")
+
+    widest = max(rows)   # (reachable, sid, ...) — most-reaching foothold
+    if widest[0] > 0:
+        out.append(f"The widest-reaching foothold is **{_esc(widest[1])}** — "
+                   f"{widest[0]} system(s) within {widest[2]} hop(s). "
+                   f"Containing or hardening it shrinks the exposed surface "
+                   f"the most.")
+        out.append("")
+
+    jewels = [sid for sid, n in sorted(state.nodes.items())
+              if n.is_production]
+    if jewels:
+        out.append("### Crown-jewel exposure (who can reach each)")
+        out.append("")
+        out.append("The inverse view — for each production system, how many "
+                   "systems can reach it, and from how few hops away:")
+        out.append("")
+        out.append("| Crown jewel | Reachable by | Nearest (min hops) |")
+        out.append("| --- | --- | --- |")
+        for sid in jewels:
+            c = exposure_cone(state, sid, max_depth=6)
+            nearest = c["rings"][0]["hop"] if c["rings"] else "—"
+            out.append(f"| {_esc(sid)} | {c['reachable']} | {nearest} |")
+        out.append("")
+    return out
+
+
 def _per_system_table(state: SAPMAPState) -> list:
     """One-row-per-node landscape inventory."""
     out = ["## Landscape inventory", ""]
@@ -2843,6 +2913,9 @@ def build_markdown_report(state: SAPMAPState,
     sections.extend(_trust_chains_section(state))
     sections.append("---")
     sections.append("")
+    sections.extend(_blast_radius_section(state))
+    sections.append("---")
+    sections.append("")
     colocated_section = _colocated_section(state)
     if colocated_section:
         sections.extend(colocated_section)
@@ -4487,6 +4560,73 @@ def _html_cert_auth_destinations_section(state: SAPMAPState) -> str:
         '</section>')
 
 
+def _html_blast_radius_section(state: SAPMAPState) -> str:
+    """Self-contained HTML for the blast-radius section (issue #197) — the
+    forward per-foothold reach table + the inverse crown-jewel exposure
+    table.  Returns '' when there are no footholds to measure from, so the
+    section (and its nav entry) drops out cleanly."""
+    try:
+        from sapmap_chain import blast_radius, exposure_cone
+    except Exception:
+        return ""
+    footholds = [
+        sid for sid, n in sorted(state.nodes.items())
+        if n.pwned or getattr(n, "gw_vulnerable", False)
+        or getattr(n, "ms_vulnerable", False)
+        or any(getattr(c, "verified", False) for c in (n.credentials or []))
+    ]
+    if not footholds:
+        return ""
+
+    fwd_rows = ""
+    data = []
+    for sid in footholds:
+        r = blast_radius(state, sid, max_depth=6)
+        rings = "; ".join(f"{rr['hop']}: {len(rr['sids'])}"
+                          for rr in r["rings"]) or "—"
+        data.append((r["reachable"], sid, r["max_hop"], rings))
+    for reachable, sid, max_hop, rings in sorted(data, reverse=True):
+        fwd_rows += (
+            f'<tr><td class="mono">{_hesc(sid)}</td>'
+            f'<td class="num">{reachable}</td>'
+            f'<td class="num">{max_hop}</td>'
+            f'<td>{_hesc(rings)}</td></tr>'
+        )
+
+    jewel_html = ""
+    jewels = [sid for sid, n in sorted(state.nodes.items()) if n.is_production]
+    if jewels:
+        jrows = ""
+        for sid in jewels:
+            c = exposure_cone(state, sid, max_depth=6)
+            nearest = c["rings"][0]["hop"] if c["rings"] else "—"
+            jrows += (
+                f'<tr><td class="mono">{_hesc(sid)}</td>'
+                f'<td class="num">{c["reachable"]}</td>'
+                f'<td class="num">{_hesc(str(nearest))}</td></tr>'
+            )
+        jewel_html = (
+            '<h3>Crown-jewel exposure (who can reach each)</h3>'
+            '<table class="grid"><thead><tr>'
+            '<th>Crown jewel</th><th>Reachable by</th><th>Nearest (min hops)</th>'
+            '</tr></thead><tbody>' + jrows + '</tbody></table>'
+        )
+
+    return (
+        '<section id="sec-blast">'
+        '<h2>💥 Blast radius (reachable landscape per foothold)</h2>'
+        '<p style="font-size:12px;color:#6b7280;margin:0 0 10px">'
+        'From each foothold, how much of the landscape falls — own this box, '
+        'own all of that — by hop distance.</p>'
+        '<table class="grid"><thead><tr>'
+        '<th>Foothold</th><th>Reachable</th><th>Max hops</th>'
+        '<th>Ring breakdown (hop: count)</th>'
+        '</tr></thead><tbody>' + fwd_rows + '</tbody></table>'
+        + jewel_html +
+        '</section>'
+    )
+
+
 def build_html_report(state: SAPMAPState,
                         engagement_name: Optional[str] = None,
                         var_tlp: str = "TLP_RED",
@@ -4925,6 +5065,7 @@ def build_html_report(state: SAPMAPState,
     cert_dest_section_html = _html_cert_auth_destinations_section(state)
     attack_coverage_html = _html_attack_coverage_section(state)
     compliance_coverage_html = _html_compliance_coverage_section(state)
+    blast_radius_section_html = _html_blast_radius_section(state)
     colocated_section_html = _html_colocated_section(state)
     med_info_html = _html_medium_info_findings_section(state)
     created_users_html = _html_created_users_section(state)
@@ -4945,6 +5086,8 @@ def build_html_report(state: SAPMAPState,
         ("sec-critical",      "🛑 Critical findings",     True),
         ("sec-high",          "⚠️ High findings",         True),
         ("sec-chains",        "🔗 Trust chains",          True),
+        ("sec-blast",         "💥 Blast radius",
+                              bool(blast_radius_section_html)),
         ("sec-colocated",     "🏠 Same-host co-located",
                               bool(colocated_section_html)),
         ("sec-pwspray",       "🔓 Password spraying",
@@ -5209,6 +5352,8 @@ def build_html_report(state: SAPMAPState,
       <th>Risk</th><th>Path</th><th>Hops</th><th>PRD</th><th>Entry</th>
     </tr></thead><tbody>{chain_rows_html}</tbody></table>
   </section>
+
+  {blast_radius_section_html}
 
   {colocated_section_html}
 

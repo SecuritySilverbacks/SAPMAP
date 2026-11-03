@@ -4324,6 +4324,7 @@ async function pollUpdates() {
           else if (c.cmd === 'show_detail') showSystemDetail(c.sid);
           else if (c.cmd === 'highlight_chain') highlightChain(c.path_sids);
           else if (c.cmd === 'play_chain') playChainData(c.chain);
+          else if (c.cmd === 'blast_radius') floodBlastRadius(c.sid, c.mode);
           else if (c.cmd === 'relayout') {
             const m = (c.mode || '').toLowerCase();
             if      (m === 'circle')     layoutCircle();
