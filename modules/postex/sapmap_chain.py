@@ -426,6 +426,31 @@ def _edge_propagates(conn) -> bool:
     return bool(getattr(conn, "has_sap_all", False) or is_trusted or is_sso2)
 
 
+def _entry_points(state: SAPMAPState) -> list:
+    """The attack origins — internet-facing / compromised / credentialed
+    systems (and BTP subaccounts) a walk starts from.
+
+    Returns ``[(sid, method), ...]``.  Shared by ``find_all_chains`` (path
+    enumeration) and ``exploit_distances`` (ring layout) so both agree on
+    what counts as an entry.  BTP subaccounts use the sentinel
+    ``"BTP:<uuid8>"`` SID the adjacency already walks.
+    """
+    entries: list = []
+    for sid, node in state.nodes.items():
+        if node.pwned or node.gw_vulnerable or node.ms_vulnerable:
+            entries.append((sid, _entry_method(node)))
+        elif any(c.verified for c in node.credentials):
+            entries.append((sid, _entry_method(node)))
+        elif getattr(node, "forged_tickets", None):
+            # PSE-stolen nodes are entry points for STRUSTSSO2 trust
+            entries.append((sid, "pse_stolen"))
+    for uuid, sub in (state.btp_subaccounts or {}).items():
+        if not getattr(sub, "pwned", False):
+            continue
+        entries.append((f"BTP:{uuid[:8]}", "btp_destination_leak"))
+    return entries
+
+
 # ---------------------------------------------------------------------------
 # BFS chain discovery
 # ---------------------------------------------------------------------------
@@ -444,34 +469,9 @@ def find_all_chains(state: SAPMAPState, max_depth: int = 6,
     # _build_adjacency for the full edge-inclusion policy.
     adj = _build_adjacency(state)
 
-    # Find entry points.  Each entry is a (sid, entry_method) pair so
-    # we can mix on-prem SAPNode entries with BTP-subaccount entries
-    # without forcing a fake SAPNode shim through the rest of the
-    # pipeline.  BTP-source edges in state.connections use the
-    # sentinel "BTP:<uuid8>" SID, which the BFS already walks happily
-    # — we just need to seed BFS with those SIDs so they actually act
-    # as starting points.
-    entries: list = []   # [(sid, method), ...]
-    for sid, node in state.nodes.items():
-        if node.pwned or node.gw_vulnerable or node.ms_vulnerable:
-            entries.append((sid, _entry_method(node)))
-        elif any(c.verified for c in node.credentials):
-            entries.append((sid, _entry_method(node)))
-        elif getattr(node, "forged_tickets", None):
-            # PSE-stolen nodes are entry points for STRUSTSSO2 trust
-            entries.append((sid, "pse_stolen"))
-
-    # BTP subaccounts with at least one cleartext destination captured
-    # are entry points: anyone with the right BTP token (or the
-    # service-key creds we just minted) can walk the synthetic
-    # BTP:<uuid8> → on-prem edges and reach whatever those
-    # destinations point at.  BTPSubaccountNode.pwned flips True the
-    # moment link_destinations_to_onprem captures the first
-    # cleartext credential.
-    for uuid, sub in (state.btp_subaccounts or {}).items():
-        if not getattr(sub, "pwned", False):
-            continue
-        entries.append((f"BTP:{uuid[:8]}", "btp_destination_leak"))
+    # Entry points — the attack origins the BFS seeds from.  See
+    # _entry_points (shared with exploit_distances).
+    entries = _entry_points(state)
 
     if not entries:
         pf("[*] No entry points found (no compromised/exploitable systems)")
@@ -864,3 +864,80 @@ def exposure_cone(state: SAPMAPState, target_sid: str,
                 }
                 queue.append((src, depth + 1))
     return _blast_result(target_sid, "inverse", nodes)
+
+
+# ---------------------------------------------------------------------------
+# Exploit distance — multi-source rings (issue #198)
+# ---------------------------------------------------------------------------
+
+
+def exploit_distances(state: SAPMAPState, max_depth: int = 6) -> dict:
+    """Shortest exploit distance to every system from the nearest entry point.
+
+    Powers the defense-in-depth rings layout: ring index = hop count from an
+    internet-facing / compromised / credentialed entry (see
+    :func:`_entry_points`).  The multi-source twin of :func:`blast_radius`'s
+    forward reach — phase 1 owns outward from ALL entries at once over
+    propagating edges, phase 2 relaxes one reach hop — so each node's distance
+    is the minimum over every entry, and the OWN-vs-REACH split keeps it from
+    under-reporting the way a naive single-visit BFS would.
+
+    Returns a JSON-safe dict:
+
+        {
+          "distances":    { sid: hops },   # entries = 0; unreachable omitted
+          "entries":      [sid, ...],      # attack origins (distance 0)
+          "max_distance": K,
+          "unreachable":  [sid, ...],      # landscape nodes with NO entry path
+          "center_sid":   sid | None,      # deepest production node (the jewel)
+        }
+    """
+    adj = _build_adjacency(state)
+    entry_sids = [sid for sid, _ in _entry_points(state)]
+
+    distances: dict = {sid: 0 for sid in entry_sids}   # entries anchored at 0
+    if entry_sids:
+        # Phase 1 — own_dist: multi-source BFS over PROPAGATING edges only.
+        own_dist = {sid: 0 for sid in entry_sids}
+        q = deque(entry_sids)
+        while q:
+            cur = q.popleft()
+            d = own_dist[cur]
+            if d >= max_depth:
+                continue
+            for tgt, conn in adj.get(cur, []):
+                if _edge_propagates(conn) and tgt not in own_dist:
+                    own_dist[tgt] = d + 1
+                    q.append(tgt)
+        # Phase 2 — reach: every owned node's edges reach their targets at
+        # own_dist[u] + 1 (last hop need not propagate).  Keep the minimum;
+        # never demote an entry from its anchored 0.
+        for u, du in own_dist.items():
+            if du >= max_depth:
+                continue
+            for tgt, conn in adj.get(u, []):
+                if distances.get(tgt) == 0:
+                    continue                      # entry stays at ring 0
+                cand = du + 1
+                prev = distances.get(tgt)
+                if prev is None or cand < prev:
+                    distances[tgt] = cand
+
+    unreachable = sorted(set(state.nodes.keys()) - set(distances.keys()))
+    max_distance = max(distances.values()) if distances else 0
+
+    # The crown jewel the rings layout centres: the production node with the
+    # greatest exploit distance (deepest = best-defended).  Deterministic tie
+    # break by SID.  None when no production system is reachable from an entry.
+    prod = [(d, sid) for sid, d in distances.items()
+            if state.nodes.get(sid) is not None
+            and getattr(state.nodes[sid], "is_production", False)]
+    center_sid = max(sorted(prod))[1] if prod else None
+
+    return {
+        "distances": distances,
+        "entries": sorted(entry_sids),
+        "max_distance": max_distance,
+        "unreachable": unreachable,
+        "center_sid": center_sid,
+    }

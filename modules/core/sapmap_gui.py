@@ -20429,6 +20429,23 @@ def create_app(api: SAPMAPApi) -> Bottle:
         result["status"] = "ok"
         return json.dumps(result)
 
+    @app.route("/api/actions/exploit_distances", method="POST")
+    def actions_exploit_distances():
+        """Shortest exploit distance to every system from the nearest entry
+        point (issue #198) — the ring index the defense-in-depth rings
+        layout places nodes by.  Pure graph walk, answered synchronously."""
+        response.content_type = "application/json"
+        data = request.json or {}
+        try:
+            max_depth = int(data.get("max_depth", 6))
+        except (TypeError, ValueError):
+            max_depth = 6
+        max_depth = max(1, min(max_depth, 12))   # clamp to a sane range
+        import sapmap_chain
+        result = sapmap_chain.exploit_distances(api.state, max_depth)
+        result["status"] = "ok"
+        return json.dumps(result)
+
     @app.route("/api/actions/check_all_betrusted", method="POST")
     def actions_check_all_betrusted():
         """Check MS betrusted + inject trusted IP on all nodes."""
