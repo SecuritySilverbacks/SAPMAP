@@ -2195,6 +2195,91 @@ def _is_bare_aws_default_node(node) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# SNCCredential — a looted PSE used as the SNC *client* identity (issue #137)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class SNCCredential:
+    """A looted PSE usable as the SNC client identity for RFC-over-SNC.
+
+    SAPMAP's default SNC client identity is the single global operator
+    posture (``SAPMAPState.snc_secudir`` / ``snc_sapcryptolib`` /
+    ``snc_identity``).  An ``SNCCredential`` is an *alternative* identity
+    minted from a PSE pulled off a pwned box — typically that box's own
+    ``SAPSYS.pse``, which the landscape's SNC ACL already trusts — so
+    SAPMAP can speak RFC-over-SNC to every system that trusts it.  The
+    classic "pwn one box → loot its PSE → RFC everywhere it is trusted"
+    pivot.
+
+    The wallet lives on ``SAPMAPState.snc_credentials`` (keyed by
+    ``cred_id``); ``SAPMAPState.active_snc_cred_id`` selects which one is
+    live.  When an entry is active, the connection layer presents this
+    PSE as the client identity instead of the operator posture.
+
+    ``key_is_rsa`` drives the connection path.  saprfclib's native
+    pure-Python SNC (``snc_pse``) supports RSA keys only, so an RSA PSE
+    can connect with *no* CommonCryptoLib binary; an EC PSE (common for
+    system PSEs) routes to the CommonCryptoLib (``snc_lib``) path.
+    ``None`` = not yet probed.  ``path_pref`` lets the operator override
+    the automatic choice: ``"auto"`` (default), ``"native"`` or
+    ``"cryptolib"``.
+
+    The PIN is stored alongside the path the same way credential
+    passwords already live in the ``.sapmap`` state — the state file is
+    operator loot and must be protected accordingly.
+    """
+    cred_id: str = ""            # stable id, e.g. "<source_sid>:SAPSYS"
+    source_sid: str = ""         # SID of the box the PSE was looted from
+    pse_path: str = ""           # path to the looted .pse on the operator host
+    cred_v2_path: str = ""       # optional cred_v2 (seclogin) alongside it
+    # PSE PIN ('' = empty PIN).  repr=False so the secret never lands in a
+    # stray print(cred)/log/traceback-locals dump — it is still serialized
+    # by to_dict() for the .sapmap round-trip (the state file is loot and is
+    # protected accordingly, like credential passwords already are).
+    pin: str = field(default="", repr=False)
+    snc_identity: str = ""       # this PSE's SNC name (p:CN=...), the my_name
+    key_is_rsa: Optional[bool] = None   # True RSA / False EC / None unprobed
+    path_pref: str = "auto"      # "auto" | "native" | "cryptolib"
+    source_label: str = ""       # free-text origin note (host, loot path, …)
+    looted_at: str = ""
+
+    def __post_init__(self):
+        # Derive a stable id when the caller didn't supply one so wallet
+        # keys stay deterministic across reloads.  Incorporate the PSE
+        # file stem (not a hardcoded ":SAPSYS") so two different PSEs
+        # looted from the same box get distinct ids instead of colliding.
+        if not self.cred_id:
+            base = (self.source_sid or "PSE").strip() or "PSE"
+            stem = ""
+            if self.pse_path:
+                tail = self.pse_path.strip().replace("\\", "/").rsplit("/", 1)[-1]
+                stem = tail.rsplit(".", 1)[0]
+            self.cred_id = f"{base}:{stem or 'SAPSYS'}"
+        if (self.path_pref or "").strip().lower() not in (
+                "auto", "native", "cryptolib"):
+            self.path_pref = "auto"
+
+    def to_dict(self) -> dict:
+        return {
+            "cred_id":      self.cred_id,
+            "source_sid":   self.source_sid,
+            "pse_path":     self.pse_path,
+            "cred_v2_path": self.cred_v2_path,
+            "pin":          self.pin,
+            "snc_identity": self.snc_identity,
+            "key_is_rsa":   self.key_is_rsa,
+            "path_pref":    self.path_pref,
+            "source_label": self.source_label,
+            "looted_at":    self.looted_at,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "SNCCredential":
+        known = {f.name for f in fields(cls)}
+        return cls(**{k: v for k, v in (data or {}).items() if k in known})
+
+
+# ---------------------------------------------------------------------------
 # SAPMAPState — full session state (serializable)
 # ---------------------------------------------------------------------------
 
@@ -2262,12 +2347,67 @@ class SAPMAPState:
     snc_secudir: str = ""           # SECUDIR (PSE/cred_v2 directory)
     snc_sapcryptolib: str = ""      # path to libsapcrypto.so / sapcrypto.dll
     snc_identity: str = ""          # SNC identity (my_name, e.g. "p:CN=...")
+    # Looted-PSE SNC client identities (issue #137).  A wallet of PSEs
+    # pulled off pwned boxes, each an ALTERNATIVE SNC client identity to
+    # the global operator posture above.  ``active_snc_cred_id`` selects
+    # which one is live; "" = use the operator posture.  Keyed by cred_id.
+    snc_credentials: dict = field(default_factory=dict)  # cred_id -> SNCCredential
+    active_snc_cred_id: str = ""
     timestamp: str = ""
     version: str = "1.0"
 
     def __post_init__(self):
         if not self.timestamp:
             self.timestamp = datetime.now().isoformat()
+
+    # -- Looted-PSE SNC client identities (issue #137) --
+
+    def add_snc_credential(self, cred: "SNCCredential") -> "SNCCredential":
+        """Add (or update) a looted PSE in the SNC wallet, keyed by its
+        ``cred_id``.  Returns the stored credential (whose ``cred_id`` may
+        have been disambiguated).
+
+        Re-adding the SAME PSE (same ``pse_path``) overwrites in place —
+        normal update semantics.  But a *different* PSE that collides on
+        the same id (e.g. two auto-id'd PSEs from one box that still map to
+        the same key) is given a ``#N`` suffix rather than silently
+        clobbering the existing entry.  The stored entry's ``cred_id`` is
+        kept equal to its wallet key so the round-trip invariant holds.
+        """
+        key = cred.cred_id
+        existing = self.snc_credentials.get(key)
+        if existing is not None and existing.pse_path != cred.pse_path:
+            n = 2
+            while f"{key}#{n}" in self.snc_credentials:
+                n += 1
+            key = f"{key}#{n}"
+            cred.cred_id = key
+        self.snc_credentials[key] = cred
+        return cred
+
+    def active_snc_credential(self) -> "Optional[SNCCredential]":
+        """Return the live looted-PSE client identity, or ``None`` when
+        the operator posture (``snc_identity`` etc.) is in effect.
+
+        Defensive: a stale ``active_snc_cred_id`` that no longer names a
+        wallet entry resolves to ``None`` (operator posture), never an
+        error.
+        """
+        if not self.active_snc_cred_id:
+            return None
+        return self.snc_credentials.get(self.active_snc_cred_id)
+
+    def set_active_snc_credential(self, cred_id: str = "") -> bool:
+        """Select the active looted-PSE identity by id (``""`` clears it,
+        reverting to the operator posture).  Returns ``True`` when the
+        selection is valid (empty, or a known wallet entry)."""
+        if not cred_id:
+            self.active_snc_cred_id = ""
+            return True
+        if cred_id in self.snc_credentials:
+            self.active_snc_cred_id = cred_id
+            return True
+        return False
 
     # -- Node management --
 
@@ -3446,6 +3586,10 @@ class SAPMAPState:
             "snc_secudir": self.snc_secudir,
             "snc_sapcryptolib": self.snc_sapcryptolib,
             "snc_identity": self.snc_identity,
+            "snc_credentials": {
+                cid: c.to_dict() for cid, c in self.snc_credentials.items()
+            },
+            "active_snc_cred_id": self.active_snc_cred_id,
         }
 
     @classmethod
@@ -3486,6 +3630,9 @@ class SAPMAPState:
         state.snc_secudir = str(d.get("snc_secudir", "") or "")
         state.snc_sapcryptolib = str(d.get("snc_sapcryptolib", "") or "")
         state.snc_identity = str(d.get("snc_identity", "") or "")
+        for cid, cred_d in (d.get("snc_credentials", {}) or {}).items():
+            state.snc_credentials[cid] = SNCCredential.from_dict(cred_d)
+        state.active_snc_cred_id = str(d.get("active_snc_cred_id", "") or "")
         # One-shot dedup pass: fold FQDN-keyed placeholder BTP nodes
         # (from earlier materialise_type_g_target runs) into any
         # real-UUID node that shares the same subdomain.  Handles

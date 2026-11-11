@@ -2715,12 +2715,34 @@ def _build_linuxlpe_shell_dispatch(prog: str, params_str: str) -> str:
 
 def _mirror_snc_config(state):
     """Push the state's SNC posture into sapmap_rfc so authenticated RFC
-    connections can negotiate SNC.  Safe no-op on any error."""
+    connections can negotiate SNC.  Safe no-op on any error.
+
+    Also mirrors the ACTIVE looted-PSE client identity (issue #137) so a
+    reloaded .sapmap that had a looted identity selected keeps using it.
+    ``set_snc_identity(None)`` when nothing is active reverts to the
+    operator posture above.
+    """
     try:
         sapmap_rfc.set_snc_config(
             secudir=getattr(state, "snc_secudir", "") or "",
             sapcryptolib=getattr(state, "snc_sapcryptolib", "") or "",
             identity=getattr(state, "snc_identity", "") or "")
+    except Exception:
+        pass
+    try:
+        active = state.active_snc_credential()
+        # Tag the key type once on activation so the `auto` path chooser
+        # can route RSA PSEs to the native (no-CommonCryptoLib) path and
+        # EC PSEs to CommonCryptoLib.  Probing here (not per-connection)
+        # gives _pse_key_is_rsa a real caller and persists the verdict onto
+        # the stored cred, so it survives the next .sapmap save.
+        if (active is not None and active.key_is_rsa is None
+                and active.pse_path):
+            verdict = sapmap_rfc._pse_key_is_rsa(active.pse_path,
+                                                 active.pin or "")
+            if verdict is not None:
+                active.key_is_rsa = verdict
+        sapmap_rfc.set_snc_identity(active.to_dict() if active else None)
     except Exception:
         pass
 
