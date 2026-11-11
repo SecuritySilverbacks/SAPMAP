@@ -2409,6 +2409,33 @@ class SAPMAPState:
             return True
         return False
 
+    def reach_targets_for_snc_identity(self, source_sid: str) -> list:
+        """Likely-reach SIDs for an SNC client identity looted from
+        ``source_sid`` (#137 reach hint).
+
+        A looted PSE IS ``source_sid``'s SAPSYS signing identity.  The
+        STRUSTSSO2 trust graph records which landscape systems accept
+        tickets signed by that identity (``trust_relations`` rows where
+        ``issuer_sid == source_sid``) — those systems also trust the
+        underlying X.509 identity, so presenting that identity at the SNC
+        layer is a well-founded *likely-reach* hint (not a guarantee —
+        SNC acceptance also depends on ``snc/permit/*`` ACLs which SAPMAP
+        does not model yet, so flag this in UI copy).
+
+        Returns sorted SIDs, deduplicated, and excluding ``source_sid``
+        itself (reaching back to yourself isn't a pivot).
+        """
+        src = (source_sid or "").strip()
+        if not src:
+            return []
+        seen = set()
+        for r in (self.trust_relations or []):
+            if getattr(r, "issuer_sid", "") == src:
+                t = getattr(r, "trusting_sid", "") or ""
+                if t and t != src:
+                    seen.add(t)
+        return sorted(seen)
+
     # -- Node management --
 
     def _resolve_add_node_key(self, node: SAPNode) -> str:

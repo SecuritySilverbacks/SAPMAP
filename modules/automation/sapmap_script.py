@@ -62,6 +62,8 @@ Supported actions:
     set_telnet_override,
     # SAProuter
     set_saprouter, check_router_info, router_scan,
+    # SNC client identity (looted PSE, issue #137)
+    set_snc_identity,
     # Message Server info disclosure (text/dump ACL — issue #48)
     check_ms_info_disclosure,
     # SAP Cloud Connector
@@ -372,6 +374,28 @@ def _map_step(step: dict) -> tuple:
         #           saprouter: "/H/192.168.2.209/S/3299"
         return ("POST", f"/api/node/{target}/set_saprouter", {
             "saprouter": (step.get("saprouter") or "").strip(),
+        }, False)
+
+    # -----------------------------------------------------------------
+    # SNC client identity (issue #137) — select a looted PSE from the
+    # wallet as the active SNC client identity, or clear it to revert to
+    # the operator posture.  The wallet is populated by the forge chain
+    # (a PSE looted in an earlier step).  Not DESTRUCTIVE: identity
+    # selection opens no socket and runs no exploit.
+    # -----------------------------------------------------------------
+    if action == "set_snc_identity":
+        # Usage (ACTIVATE by wallet cred_id — the canonical selector):
+        #   - action: set_snc_identity
+        #     cred_id: "S4H:SAPSYS"
+        # Usage (ACTIVATE by source SID — convenience; errors on ambiguity):
+        #   - action: set_snc_identity
+        #     source_sid: S4H
+        # Usage (CLEAR — revert to the operator posture):
+        #   - action: set_snc_identity
+        #     cred_id: ""
+        return ("POST", "/api/snc/wallet/activate", {
+            "cred_id": (step.get("cred_id") or "").strip(),
+            "source_sid": (step.get("source_sid") or "").strip().upper(),
         }, False)
 
     if action == "set_sid":
@@ -1355,6 +1379,7 @@ _ACTION_LABELS = {
     "lpe":                    "Local privilege escalation",
     "exploit_cve_31324":      "Exploiting CVE-2025-31324",
     "set_saprouter":          "Attaching SAProuter prefix",
+    "set_snc_identity":       "Selecting SNC client identity",
     "set_sid":                "Renaming node SID",
     "set_instance_nr":        "Setting instance number",
     "check_router_info":      "Probing SAProuter info leak",

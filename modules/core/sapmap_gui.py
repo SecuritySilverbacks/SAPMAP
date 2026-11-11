@@ -3054,6 +3054,21 @@ class SAPMAPApi:
     def get_state_dict(self):
         """Get current state as a dict for the frontend."""
         d = self.state.to_dict()
+        # #137 PR2: the SNC wallet's to_dict() serializes the PSE PIN
+        # (needed for the .sapmap round-trip, which is loot).  Drop it
+        # before shipping to the browser — nothing in the UI needs it,
+        # and keeping it out of the polling payload prevents a stray
+        # browser-side leak (devtools, extension, screenshot).  The
+        # on-disk state file is unchanged; state.to_dict() stays the
+        # single source of truth for save_state().  Same shape as the
+        # /api/snc/wallet route (which also pops "pin") so any future
+        # consumer sees one consistent masking convention.
+        wallet = d.get("snc_credentials") or {}
+        if wallet:
+            d["snc_credentials"] = {
+                cid: {k: v for k, v in cd.items() if k != "pin"}
+                for cid, cd in wallet.items()
+            }
         d["scan_state"] = self.scan_state
         d["scan_error"] = self.scan_error
         d["stats"] = self.state.stats()
@@ -5789,6 +5804,44 @@ def create_app(api: SAPMAPApi) -> Bottle:
                     lib_path = candidate
             except Exception:
                 lib_exists = False
+        # #137 PR2: active looted-PSE client identity (if any) so the
+        # Configure SNC modal can render a status row — tells the
+        # operator which identity SAPMAP actually presents on SNC
+        # logons right now, and which path (native/cryptolib) it uses.
+        active_cred = None
+        active_path = ""
+        active_reach = []
+        try:
+            cred = api.state.active_snc_credential()
+            if cred is not None:
+                active_cred = {
+                    "cred_id":      cred.cred_id,
+                    "source_sid":   cred.source_sid,
+                    "snc_identity": cred.snc_identity,
+                    "key_is_rsa":   cred.key_is_rsa,
+                    "path_pref":    cred.path_pref,
+                    "source_label": cred.source_label,
+                    "looted_at":    cred.looted_at,
+                }
+                # Resolve the effective path: path_pref 'auto' selects
+                # native when the key is affirmatively RSA, else
+                # cryptolib (mirrors the chooser in _snc_params_for).
+                pref = (cred.path_pref or "auto").lower()
+                if pref == "native":
+                    active_path = "native"
+                elif pref == "cryptolib":
+                    active_path = "cryptolib"
+                else:   # auto
+                    if cred.key_is_rsa is True:
+                        active_path = "native"
+                    elif cred.key_is_rsa is False:
+                        active_path = "cryptolib"
+                    else:
+                        active_path = "unprobed"
+                active_reach = api.state.reach_targets_for_snc_identity(
+                    cred.source_sid)
+        except Exception:
+            pass
         return json.dumps({
             "secudir": secudir,
             "sapcryptolib": lib_exists,
@@ -5797,6 +5850,12 @@ def create_app(api: SAPMAPApi) -> Bottle:
             # Previously-saved SNC Identity (if any) so the modal can
             # prefill the read-only field on re-open.
             "snc_identity": getattr(api.state, "snc_identity", "") or "",
+            # #137 PR2: looted-PSE wallet surface
+            "active_snc_cred_id": getattr(api.state, "active_snc_cred_id",
+                                           "") or "",
+            "active_snc_credential": active_cred,
+            "active_snc_path": active_path,
+            "active_snc_reach": active_reach,
         })
 
     @app.route("/api/snc/test", method="POST")
@@ -5865,7 +5924,98 @@ def create_app(api: SAPMAPApi) -> Bottle:
             secudir=api.state.snc_secudir,
             sapcryptolib=api.state.snc_sapcryptolib,
             identity=api.state.snc_identity)
-        return json.dumps({"ok": True})        
+        return json.dumps({"ok": True})
+
+    # #137 PR2 — Looted-PSE SNC client-identity wallet routes.
+    # The wallet is populated by the forge chain when a PSE is looted
+    # (modules/exploitation/sapmap_exploit.py), and persisted on the
+    # SAPMAPState (snc_credentials dict + active_snc_cred_id).  These
+    # routes let the operator LIST it, SELECT one entry as the active
+    # SNC client identity ("Use this PSE as SNC identity"), and CLEAR
+    # the selection to revert to the operator posture.  Changes mirror
+    # into sapmap_rfc via _mirror_snc_config (the same call state-load
+    # and state-upload already make).
+    @app.route("/api/snc/wallet", method="GET")
+    def get_snc_wallet():
+        """List looted-PSE SNC client identities + the active selection.
+
+        PIN is NEVER returned — the wallet is loot the state file carries,
+        and the browser has no legitimate need for the PSE PIN.
+        """
+        response.content_type = "application/json"
+        creds = []
+        try:
+            state_wallet = getattr(api.state, "snc_credentials", {}) or {}
+            for cid, c in state_wallet.items():
+                d = c.to_dict()
+                # strip secret material before the dict leaves the backend
+                d.pop("pin", None)
+                creds.append(d)
+            # Deterministic order for stable GUI rendering
+            creds.sort(key=lambda d: (d.get("source_sid", ""),
+                                       d.get("cred_id", "")))
+        except Exception:
+            creds = []
+        return json.dumps({
+            "credentials": creds,
+            "active_snc_cred_id": getattr(api.state, "active_snc_cred_id",
+                                           "") or "",
+        })
+
+    @app.route("/api/snc/wallet/activate", method="POST")
+    def activate_snc_wallet():
+        """Select a looted PSE as the active SNC client identity.
+
+        Body: ``{"cred_id": "<SID>:<stem>"}`` (canonical selector) OR
+        ``{"source_sid": "<SID>"}`` (convenience — resolves to the unique
+        wallet entry for that source, erroring on ambiguity).  Empty /
+        missing both clears the selection (same as /clear; matches
+        set_active_snc_credential("") semantics on the model).
+        """
+        response.content_type = "application/json"
+        data = request.json or {}
+        cred_id = str(data.get("cred_id", "") or "")
+        source_sid = str(data.get("source_sid", "") or "").strip().upper()
+        # Resolve source_sid → cred_id when cred_id wasn't given.  Convenient
+        # for scripts that just want "the PSE from this SID"; errors cleanly
+        # when the operator looted >1 PSE from one box.
+        if not cred_id and source_sid:
+            matches = [cid for cid, c
+                       in (api.state.snc_credentials or {}).items()
+                       if (c.source_sid or "") == source_sid]
+            if len(matches) == 1:
+                cred_id = matches[0]
+            elif len(matches) == 0:
+                return json.dumps({
+                    "ok": False, "active_snc_cred_id":
+                    api.state.active_snc_cred_id or "",
+                    "error": f"no looted PSE for source_sid {source_sid!r}",
+                })
+            else:
+                return json.dumps({
+                    "ok": False, "active_snc_cred_id":
+                    api.state.active_snc_cred_id or "",
+                    "error": (f"ambiguous: source_sid {source_sid!r} has "
+                              f"{len(matches)} PSEs — pass cred_id explicitly "
+                              f"(one of: {', '.join(matches)})"),
+                })
+        ok = api.state.set_active_snc_credential(cred_id)
+        if ok:
+            _mirror_snc_config(api.state)
+        return json.dumps({
+            "ok": ok,
+            "active_snc_cred_id": getattr(api.state, "active_snc_cred_id",
+                                           "") or "",
+            "error": ("" if ok else f"unknown cred_id {cred_id!r}"),
+        })
+
+    @app.route("/api/snc/wallet/clear", method="POST")
+    def clear_snc_wallet():
+        """Revert to the operator-posture SNC identity (no looted PSE)."""
+        response.content_type = "application/json"
+        api.state.set_active_snc_credential("")
+        _mirror_snc_config(api.state)
+        return json.dumps({"ok": True, "active_snc_cred_id": ""})
 
 
     @app.route("/api/settings/local", method="POST")

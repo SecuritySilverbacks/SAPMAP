@@ -1623,6 +1623,7 @@ body {
       <div class="ctx-item" data-action="set_instance_nr">&#9881; Set Instance Number</div>
       <div class="ctx-item" data-action="set_saprouter">&#128268; Set SAProuter</div>
       <div class="ctx-item" data-action="set_snc_name">&#128272; Add SNC Name</div>
+      <div class="ctx-item" data-action="use_pse_as_snc" title="Use this box's looted SAPSYS.pse as our SNC client identity (#137). Only shown when a PSE from this node is in the wallet.">&#128273; Use this PSE as SNC identity</div>
       <div class="ctx-item" data-action="set_telnet_override">&#128279; Set Telnet Endpoint (SSH tunnel)</div>
     </div>
   </div>
@@ -2379,12 +2380,29 @@ body {
 
 <!-- Configure SNC Modal -->
 <div class="modal-overlay" id="snc-config-modal">
-  <div class="modal" style="max-width:560px">
+  <div class="modal" style="max-width:640px">
     <h3>&#128274; Configure SNC</h3>
     <div style="font-size:12px;color:#8b949e;margin-bottom:12px;line-height:1.5">
       Secure Network Communications (SNC) requires the SAP Cryptographic
       Library and a configured <code>SECUDIR</code>.  The checks below reflect
       the environment of the running SAPMAP process.
+    </div>
+    <!-- #137 PR2: Active SNC client identity + looted-PSE wallet -->
+    <div id="snc-active-identity-block" style="margin-bottom:14px;padding:10px 12px;background:#0d1117;border:1px solid #30363d;border-radius:4px">
+      <div style="font-size:11px;color:#8b949e;text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px">Active SNC client identity</div>
+      <div id="snc-active-identity" style="font-family:monospace;font-size:12px;color:#c9d1d9;word-break:break-all;overflow-wrap:anywhere">&mdash;</div>
+      <div id="snc-active-path-row" style="margin-top:6px;font-size:11px;color:#8b949e">path: <span id="snc-active-path">&mdash;</span></div>
+      <div id="snc-active-reach-row" style="margin-top:6px;font-size:11px;color:#8b949e;display:none">likely reach: <span id="snc-active-reach" style="color:#c9d1d9"></span></div>
+      <div style="margin-top:8px">
+        <label style="font-size:11px;color:#8b949e">Switch to looted PSE</label>
+        <select id="snc-wallet-select" style="width:100%;margin-top:4px;background:#0d1117;color:#c9d1d9;border:1px solid #30363d;border-radius:4px;padding:4px 6px;font-family:monospace;font-size:12px">
+          <option value="">— operator posture (no looted PSE) —</option>
+        </select>
+      </div>
+      <div style="margin-top:8px;display:flex;gap:6px">
+        <button class="btn" style="font-size:11px;padding:4px 10px" onclick="activateSelectedSncWalletEntry()">Activate selection</button>
+        <button class="btn" style="font-size:11px;padding:4px 10px" onclick="clearActiveSncIdentity()">Revert to operator</button>
+      </div>
     </div>
     <div class="form-row">
       <label>SECUDIR</label>
@@ -7009,6 +7027,16 @@ function showCtxMenu(e, sid) {
     Object.entries(i.ports || {}).some(
       ([p,s]) => s === 'dispatcher' || (p >= 3200 && p <= 3299)));
 
+  // #137 PR2 — SNC client identity.  "Use this PSE as SNC identity"
+  // only makes sense when this node's looted PSE is already in the
+  // wallet (populated by the forge chain).  The wallet IS authoritative
+  // — sapsys_cert_subject_dn alone means a cert was parsed but may not
+  // carry the cred_id the activate route needs.
+  const walletCredForNode = (sid && mapState && mapState.snc_credentials)
+    ? Object.values(mapState.snc_credentials).find(c => c && c.source_sid === sid)
+    : null;
+  const hasLootedPseInWallet = !!walletCredForNode;
+
   // Enable/disable rules per action
   const rules = {
     'details':          true,                       // always available
@@ -7331,6 +7359,7 @@ function showCtxMenu(e, sid) {
     'router_scan':      true,                       // always (probes via SAProuter, no creds)
     'set_saprouter':    true,                       // always available
     'set_snc_name':     true,                       // always available
+    'use_pse_as_snc':   hasLootedPseInWallet,        // #137 — only when this node's PSE is in the wallet
     'set_telnet_override': isJavaStack,              // only meaningful for Java stacks
     'delete_system':    true,                       // always available
   };
@@ -7724,6 +7753,9 @@ function showCtxMenu(e, sid) {
     // Note: harvest_btp_creds is gated above (alongside check_ms)
     // — moved next to the WD-context block since the gating logic
     // shares the same "needs a usable RFC logon" requirement.
+    // #137 PR2 — hide "Use this PSE as SNC identity" when this node's
+    // PSE isn't in the wallet; the ctx-menu item is noise otherwise.
+    'use_pse_as_snc':     !hasLootedPseInWallet,
   };
 
   // Apply visibility + enable/disable state to each menu item
@@ -10299,6 +10331,7 @@ async function ctxAction(action) {
       break;
     case 'set_saprouter': showSaprouterModal(sid); break;
     case 'set_snc_name': showSncNameModal(sid); break;
+    case 'use_pse_as_snc': useLootedPseAsSncIdentity(sid); break;
     case 'harvest_scc': {
       const nh = (mapState.nodes || {})[sid];
       const canHarvest = nh && (nh.gw_vulnerable || nh.cve_2025_31324_vulnerable);
@@ -14475,6 +14508,11 @@ async function showConfigureSncModal() {
     }
     if (identEl) identEl.value = d.snc_identity || '';
     if (testBtn) testBtn.disabled = !d.ok;
+    // #137 PR2 — render the active looted-PSE SNC client identity, its
+    // effective path (native/cryptolib) and the likely-reach SID list,
+    // plus a wallet switcher populated from /api/snc/wallet.
+    renderActiveSncIdentity(d);
+    populateSncWalletSelect(d.active_snc_cred_id || '');
   } catch(e) {
     _sncStatus = null;
     if (secEl) secEl.textContent = '(error)';
@@ -14565,6 +14603,151 @@ async function saveSncConfig() {
     }
   } catch(e) {
     showToast('Failed to save SNC configuration: ' + e, 'error');
+  }
+}
+
+// #137 PR2 — Looted-PSE SNC client-identity wallet helpers.
+
+// Render the "Active SNC client identity" block from a /api/snc/status
+// payload (showConfigureSncModal already fetches it).
+function renderActiveSncIdentity(statusPayload) {
+  const idEl = document.getElementById('snc-active-identity');
+  const pathEl = document.getElementById('snc-active-path');
+  const reachRow = document.getElementById('snc-active-reach-row');
+  const reachEl = document.getElementById('snc-active-reach');
+  const active = statusPayload && statusPayload.active_snc_credential;
+  if (!active) {
+    if (idEl) idEl.innerHTML = '<span style="color:#8b949e">operator posture (no looted PSE active)</span>';
+    if (pathEl) pathEl.textContent = '—';
+    if (reachRow) reachRow.style.display = 'none';
+    return;
+  }
+  if (idEl) {
+    idEl.textContent = active.snc_identity || active.cred_id || '(unknown)';
+    idEl.style.color = '#3fb950';     // green: a looted identity is live
+  }
+  if (pathEl) {
+    pathEl.textContent = statusPayload.active_snc_path || '—';
+  }
+  const reach = (statusPayload.active_snc_reach || []);
+  if (reachRow && reachEl) {
+    if (reach.length > 0) {
+      reachEl.textContent = reach.join(', ') + ' (STRUSTSSO2 trust-graph hint, not an SNC ACL guarantee)';
+      reachRow.style.display = '';
+    } else {
+      reachRow.style.display = 'none';
+    }
+  }
+}
+
+// Populate the <select> of looted PSEs for the wallet switcher.
+async function populateSncWalletSelect(activeCredId) {
+  const sel = document.getElementById('snc-wallet-select');
+  if (!sel) return;
+  // Preserve the "operator posture" option at index 0.
+  sel.innerHTML = '<option value="">— operator posture (no looted PSE) —</option>';
+  try {
+    const d = await fetch('/api/snc/wallet').then(r => r.json());
+    const creds = (d && d.credentials) || [];
+    for (const c of creds) {
+      const opt = document.createElement('option');
+      opt.value = c.cred_id || '';
+      const pathHint = (c.key_is_rsa === true) ? 'RSA/native' :
+                       (c.key_is_rsa === false) ? 'EC/cryptolib' : 'unprobed';
+      opt.textContent = (c.cred_id || '?') + '  —  ' + (c.snc_identity || '') + '  (' + pathHint + ')';
+      sel.appendChild(opt);
+    }
+    sel.value = activeCredId || '';
+  } catch(e) {
+    // leave only the operator-posture option — wallet unreachable
+  }
+}
+
+// Activate whatever is picked in the switcher <select>.
+async function activateSelectedSncWalletEntry() {
+  const sel = document.getElementById('snc-wallet-select');
+  const credId = sel ? (sel.value || '') : '';
+  if (!credId) {
+    // user picked "operator posture" explicitly — same as clear
+    return clearActiveSncIdentity();
+  }
+  try {
+    const d = await fetch('/api/snc/wallet/activate', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({cred_id: credId}),
+    }).then(r => r.json());
+    if (d && d.ok) {
+      showToast('Active SNC client identity: ' + credId, 'success');
+      // Refresh the status block + switcher from the authoritative server view.
+      const s = await fetch('/api/snc/status').then(r => r.json());
+      _sncStatus = s;
+      renderActiveSncIdentity(s);
+      populateSncWalletSelect(s.active_snc_cred_id || '');
+    } else {
+      showToast('Activate failed: ' + (d && d.error || 'unknown'), 'error');
+    }
+  } catch(e) {
+    showToast('Activate failed: ' + e, 'error');
+  }
+}
+
+async function clearActiveSncIdentity() {
+  try {
+    const d = await fetch('/api/snc/wallet/clear', {method: 'POST'})
+      .then(r => r.json());
+    if (d && d.ok) {
+      showToast('Reverted to operator-posture SNC identity.', 'success');
+      const s = await fetch('/api/snc/status').then(r => r.json());
+      _sncStatus = s;
+      renderActiveSncIdentity(s);
+      populateSncWalletSelect('');
+    }
+  } catch(e) {
+    showToast('Clear failed: ' + e, 'error');
+  }
+}
+
+// ctx-menu: "Use this PSE as SNC identity" — pick the wallet entry whose
+// source_sid matches the clicked node and activate it.  The ctx-menu
+// gate (hasLootedPseInWallet) already guarantees ≥1 exists.  On a box
+// that yielded multiple PSEs (SNCCredential#N disambiguation) we
+// redirect to the Configure SNC modal so the operator picks explicitly
+// — the direct-POST path would silently gamble on iteration order.
+async function useLootedPseAsSncIdentity(sid) {
+  const wallet = (mapState && mapState.snc_credentials) || {};
+  const matches = Object.values(wallet).filter(c => c && c.source_sid === sid);
+  if (matches.length === 0) {
+    showToast('No looted PSE for ' + sid + ' in the wallet.', 'warning');
+    return;
+  }
+  if (matches.length > 1) {
+    // Ambiguous — open the modal so the operator can pick from the
+    // switcher and see which PSE is which.
+    showToast(sid + ' has ' + matches.length + ' looted PSEs — pick one in the Configure SNC modal.',
+              'info');
+    showConfigureSncModal();
+    return;
+  }
+  const entry = matches[0];
+  if (!confirm('Use the looted PSE from ' + sid + ' as the SNC client identity?\n\n' +
+               'SAPMAP will present identity:\n  ' + (entry.snc_identity || entry.cred_id) +
+               '\n\non every RFC-over-SNC logon until you revert.')) {
+    return;
+  }
+  try {
+    const d = await fetch('/api/snc/wallet/activate', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({cred_id: entry.cred_id || ''}),
+    }).then(r => r.json());
+    if (d && d.ok) {
+      showToast('Now using ' + sid + "'s PSE as SNC client identity.", 'success');
+    } else {
+      showToast('Activate failed: ' + (d && d.error || 'unknown'), 'error');
+    }
+  } catch(e) {
+    showToast('Activate failed: ' + e, 'error');
   }
 }
 
