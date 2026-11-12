@@ -1402,6 +1402,60 @@ def _cert_auth_destinations_section(state: SAPMAPState) -> list:
     return out
 
 
+def _snc_identity_section(state: SAPMAPState) -> list:
+    """Looted-PSE SNC client identities (issue #137 wallet).
+
+    Table one row per looted PSE: source SID, SNC identity (``p:CN=…``),
+    path (native vs CommonCryptoLib — derived from ``key_is_rsa`` with
+    ``path_pref`` override noted), the likely-reach SID count from the
+    STRUSTSSO2 trust-graph, active-flag, and loot time.  Empty when the
+    wallet is empty; no header noise.
+    """
+    wallet = getattr(state, "snc_credentials", {}) or {}
+    if not wallet:
+        return []
+    active_id = getattr(state, "active_snc_cred_id", "") or ""
+    out = ["## SNC client identity (looted PSEs)", ""]
+    out.append(
+        "A looted PSE pulled off a compromised SAP box can stand in as "
+        "the SNC *client* identity for RFC-over-SNC — the landscape's "
+        "SNC ACL already trusts it, so SAPMAP can speak RFC-over-SNC to "
+        "every system that trusts the source SID.  **The reach count "
+        "below is a trust-graph hint** (which systems' STRUSTSSO2 "
+        "accepts tickets signed by this identity) and is not a hard SNC "
+        "ACL guarantee — SNC acceptance also depends on "
+        "``snc/permit/*`` entries which SAPMAP does not yet model.")
+    out.append("")
+    out.append("| Active | Source SID | SNC identity | Path | Likely reach | Looted |")
+    out.append("| --- | --- | --- | --- | --- | --- |")
+    for cid in sorted(wallet.keys()):
+        c = wallet[cid]
+        pref = (c.path_pref or "auto").lower()
+        if pref == "native":
+            path = "native (forced)"
+        elif pref == "cryptolib":
+            path = "cryptolib (forced)"
+        else:   # auto
+            if c.key_is_rsa is True:
+                path = "native (RSA)"
+            elif c.key_is_rsa is False:
+                path = "cryptolib (EC)"
+            else:
+                path = "unprobed"
+        reach = state.reach_targets_for_snc_identity(c.source_sid or "")
+        reach_cell = (f"{len(reach)} ({', '.join(reach)})"
+                      if reach else "—")
+        is_active = (cid == active_id)
+        out.append(
+            f"| {'✓' if is_active else '—'} | "
+            f"{_esc(c.source_sid or '?')} | "
+            f"`{_esc(c.snc_identity or '?')}` | "
+            f"{_esc(path)} | {_esc(reach_cell)} | "
+            f"{_esc(c.looted_at or '?')} |")
+    out.append("")
+    return out
+
+
 def _impact_section(state: SAPMAPState) -> list:
     """Business-impact scenarios grouped by SID.  Only shows hits."""
     have = False
@@ -2960,6 +3014,11 @@ def build_markdown_report(state: SAPMAPState,
         sections.append("---")
         sections.append("")
         sections.extend(cert_dest_section)
+    snc_identity_section = _snc_identity_section(state)
+    if snc_identity_section:
+        sections.append("---")
+        sections.append("")
+        sections.extend(snc_identity_section)
     for extra in (_impact_section(state),
                   _secstore_section(state),
                   _dbcon_section(state),
@@ -4508,6 +4567,62 @@ def _html_cloud_lateral_section(state: SAPMAPState) -> str:
         + "".join(blocks) + '</section>')
 
 
+def _html_snc_identity_section(state: SAPMAPState) -> str:
+    """Looted-PSE SNC client identities (issue #137 wallet) — HTML sibling
+    of _snc_identity_section."""
+    wallet = getattr(state, "snc_credentials", {}) or {}
+    if not wallet:
+        return ""
+    active_id = getattr(state, "active_snc_cred_id", "") or ""
+    rows = []
+    for cid in sorted(wallet.keys()):
+        c = wallet[cid]
+        pref = (c.path_pref or "auto").lower()
+        if pref == "native":
+            path = "native (forced)"
+        elif pref == "cryptolib":
+            path = "cryptolib (forced)"
+        else:
+            if c.key_is_rsa is True:
+                path = "native (RSA)"
+            elif c.key_is_rsa is False:
+                path = "cryptolib (EC)"
+            else:
+                path = "unprobed"
+        reach = state.reach_targets_for_snc_identity(c.source_sid or "")
+        reach_cell = (f"{len(reach)} ({_hesc(', '.join(reach))})"
+                      if reach else "—")
+        is_active = (cid == active_id)
+        row_style = ' style="background:#fef3c7"' if is_active else ''
+        active_mark = '✓' if is_active else '—'
+        rows.append(
+            f'<tr{row_style}>'
+            f'<td style="text-align:center">{active_mark}</td>'
+            f'<td class="mono"><b>{_hesc(c.source_sid or "?")}</b></td>'
+            f'<td class="mono" style="font-size:11px;word-break:break-all;'
+            f'max-width:280px"><code>{_hesc(c.snc_identity or "?")}</code></td>'
+            f'<td>{_hesc(path)}</td>'
+            f'<td>{reach_cell}</td>'
+            f'<td style="font-size:11px">{_hesc(c.looted_at or "?")}</td>'
+            f'</tr>')
+    return (
+        '<section id="sec-snc-identity">'
+        '<h2>🔐 SNC client identity (looted PSEs)</h2>'
+        f'<p style="font-size:12px;color:#6b7280;margin:0 0 12px">'
+        f'{len(wallet)} looted PSE(s) available as the SNC client '
+        f'identity for RFC-over-SNC.  A looted PSE pulled off a '
+        f'compromised SAP box can stand in as the SNC client identity — '
+        f'the landscape\'s SNC ACL already trusts it.  The reach count '
+        f'is a <b>STRUSTSSO2 trust-graph hint</b> (not an SNC ACL '
+        f'guarantee: SNC acceptance also depends on <code>snc/permit/*'
+        f'</code> which SAPMAP does not yet model).</p>'
+        '<table class="grid">'
+        '<thead><tr><th>Active</th><th>Source SID</th>'
+        '<th>SNC identity</th><th>Path</th>'
+        '<th>Likely reach</th><th>Looted</th></tr></thead>'
+        f'<tbody>{"".join(rows)}</tbody></table></section>')
+
+
 def _html_cert_auth_destinations_section(state: SAPMAPState) -> str:
     """Cert-authenticated Type-G / H HTTP destinations."""
     rows_data: list[tuple[str, str, str, str, str, bool]] = []
@@ -5063,6 +5178,7 @@ def build_html_report(state: SAPMAPState,
     btp_section_html = _html_btp_section(state)
     cloud_lat_section_html = _html_cloud_lateral_section(state)
     cert_dest_section_html = _html_cert_auth_destinations_section(state)
+    snc_identity_section_html = _html_snc_identity_section(state)
     attack_coverage_html = _html_attack_coverage_section(state)
     compliance_coverage_html = _html_compliance_coverage_section(state)
     blast_radius_section_html = _html_blast_radius_section(state)
@@ -5106,6 +5222,8 @@ def build_html_report(state: SAPMAPState,
                               bool(cloud_lat_section_html)),
         ("sec-certauth",      "🔐 Cert-auth HTTP destinations",
                               bool(cert_dest_section_html)),
+        ("sec-snc-identity",  "🔐 SNC client identity (looted PSEs)",
+                              bool(snc_identity_section_html)),
         ("sec-medinfo",       "ℹ️ Medium & informational findings",
                               bool(med_info_html)),
         ("sec-impact",        "💰 Business impact",
@@ -5388,6 +5506,7 @@ def build_html_report(state: SAPMAPState,
   {cloud_lat_section_html}
 
   {cert_dest_section_html}
+  {snc_identity_section_html}
 
   {med_info_html}
 

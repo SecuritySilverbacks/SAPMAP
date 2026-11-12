@@ -365,6 +365,43 @@ def set_credentials(sid: str, username: str, password: str,
 
 
 @mcp.tool()
+def list_snc_identities() -> str:
+    """List looted-PSE SNC client identities in the wallet + the active one.
+
+    Issue #137 — a PSE pulled off a pwned box can stand in as the SNC
+    client identity so RFC-over-SNC speaks to every system that trusts
+    it.  The wallet is populated automatically by the forge chain when a
+    PSE is looted.  PINs are never returned.
+    """
+    return json.dumps(_api("GET", "/api/snc/wallet"))
+
+
+@mcp.tool()
+def set_snc_identity(cred_id: str = "", source_sid: str = "") -> str:
+    """Activate a looted PSE as the active SNC client identity (#137).
+
+    Args:
+        cred_id: Wallet key (canonical selector), e.g. "S4H:SAPSYS".
+        source_sid: Convenience — resolves to the unique PSE looted
+            from that SID.  Errors if the box yielded >1 PSE; pass
+            cred_id explicitly in that case.
+
+    Passing neither (both empty) reverts to the operator posture
+    (same as clear_snc_identity below).
+    """
+    return json.dumps(_api("POST", "/api/snc/wallet/activate", {
+        "cred_id": cred_id or "",
+        "source_sid": (source_sid or "").strip().upper(),
+    }))
+
+
+@mcp.tool()
+def clear_snc_identity() -> str:
+    """Revert to the operator-posture SNC identity (no looted PSE active)."""
+    return json.dumps(_api("POST", "/api/snc/wallet/clear"))
+
+
+@mcp.tool()
 def configure_system(sid: str, system_type: str = "",
                      db_type: str = "", os_type: str = "",
                      saprouter: str = "") -> str:
