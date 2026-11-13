@@ -1051,3 +1051,116 @@ def test_html_renders_snc_posture_row_when_set():
             continue        # '' default — no label needed
         assert verdict in html_src, (
             f"verdict {verdict!r} missing from GUI postureRow labels")
+
+
+# ------------------------------------------------------------------
+# Phase F — Engagement report (KPI card + SNC Posture column + badges)
+# ------------------------------------------------------------------
+
+
+from sapmap_report import (                              # noqa: E402
+    build_markdown_report, build_html_report,
+    _SNC_POSTURE_LABEL, _count_snc_enforced,
+)
+
+
+def _mk_report_state_with_postures(postures):
+    """Build a tiny SAPMAPState — one node per posture in postures."""
+    st = SAPMAPState()
+    for i, p in enumerate(postures):
+        sid = f"N{i:02d}"
+        node = SAPNode(sid=sid, hostname=f"host-{i}",
+                       ip=f"10.0.0.{i+1}", snc_posture=p)
+        st.nodes[sid] = node
+    return st
+
+
+def test_count_snc_enforced_counts_three_enforced_values():
+    """_count_snc_enforced only tallies the three enforced_* postures."""
+    st = _mk_report_state_with_postures([
+        "", "none", "optional", "enforced_no_creds",
+        "enforced_handshake_failed", "enforced_logon_failed",
+        "reachable_auth", "no_sap_signal",
+    ])
+    assert _count_snc_enforced(st) == 3
+
+
+def test_report_markdown_systems_table_includes_snc_posture_column():
+    """Markdown systems table header carries 'SNC posture' AND each row
+    renders the verdict's label from _SNC_POSTURE_LABEL."""
+    st = _mk_report_state_with_postures([
+        "none", "optional", "enforced_no_creds", "reachable_auth",
+    ])
+    md = build_markdown_report(st)
+    assert "SNC posture" in md
+    for p in ("none", "optional", "enforced_no_creds", "reachable_auth"):
+        assert _SNC_POSTURE_LABEL[p] in md, (
+            f"label for {p!r} missing from MD report")
+
+
+def test_report_html_renders_reachable_auth_as_success_badge():
+    """HTML inventory row for a reachable_auth node carries a success
+    badge; an enforced_no_creds node carries a warning badge."""
+    st = _mk_report_state_with_postures([
+        "reachable_auth", "enforced_no_creds",
+    ])
+    html = build_html_report(st)
+    # Two patterns to accommodate the exact label text + any inner
+    # markup; the badge class and label both have to be present on
+    # the same tag.
+    assert re.search(
+        r'<span class="badge badge-success">\s*'
+        r'SNC reachable \(authed\)',
+        html), "reachable_auth node missing success badge"
+    assert re.search(
+        r'<span class="badge badge-warning">\s*'
+        r'SNC enforced \(no creds\)',
+        html), "enforced_no_creds node missing warning badge"
+
+
+def test_report_html_kpi_card_counts_enforced_systems():
+    """The new KPI card shows the enforced-posture count (3 for a state
+    mixing all three enforced_* postures)."""
+    st = _mk_report_state_with_postures([
+        "enforced_no_creds", "enforced_handshake_failed",
+        "enforced_logon_failed", "none", "reachable_auth",
+    ])
+    html = build_html_report(st)
+    # Find the KPI card by its label and assert its value == 3.
+    m = re.search(
+        r'<div class="kpi-v">\s*3\s*</div>\s*'
+        r'<div class="kpi-l">\s*SNC-enforced systems',
+        html)
+    assert m, "SNC-enforced KPI card missing or wrong count"
+
+
+def test_report_pin_never_rendered_even_with_posture_surfaced():
+    """Issue #167 adds snc_posture + snc_info['last_probe_*'] to report.
+    The PIN invariant from #137 must still hold: no PSE PIN appears in
+    the MD or HTML report, even when both are populated."""
+    st = SAPMAPState()
+    # One node with snc_info carrying a 'last_probe_error' that happens
+    # to contain the active cred's PIN — contrived but shows the
+    # scrubber has to cover the report surface too.
+    node = SAPNode(sid="S4H", hostname="s4h01",
+                   snc_posture="enforced_logon_failed")
+    node.snc_info = {
+        "last_probe_error": "cred logon failure",
+        "last_probe_phase": "logon",
+    }
+    st.nodes["S4H"] = node
+    # Active looted cred with a PIN — simulates a prior forge.
+    from sapmap_models import SNCCredential
+    cred = SNCCredential(
+        cred_id="S4H:SAPSYS", source_sid="S4H",
+        pse_path="/loot/pse/S4H/SAPSYS.pse",
+        pin="PINSECRET_167", snc_identity="p:CN=S4H",
+    )
+    st.snc_credentials[cred.cred_id] = cred
+    st.active_snc_cred_id = cred.cred_id
+
+    md = build_markdown_report(st)
+    html = build_html_report(st)
+    # PIN must never appear in either surface.
+    assert "PINSECRET_167" not in md
+    assert "PINSECRET_167" not in html

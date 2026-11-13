@@ -54,6 +54,46 @@ def _stat_table(rows) -> list:
     return out
 
 
+# Issue #167 — SNC posture classifier verdict labels for report rendering.
+# The empty string is "never classified"; the others map 1:1 to the
+# SAPNode.snc_posture taxonomy in sapmap_models.
+_SNC_POSTURE_LABEL = {
+    "":                          "—",
+    "no_sap_signal":             "No SAP signal",
+    "none":                      "No SNC",
+    "optional":                  "SNC optional",
+    "enforced_no_creds":         "SNC enforced (no creds)",
+    "enforced_handshake_failed": "SNC handshake failed",
+    "enforced_logon_failed":     "SNC logon failed",
+    "reachable_auth":            "SNC reachable (authed)",
+}
+
+# HTML badge class suffix per verdict.  warning-amber flags the three
+# enforced_* postures (operator needs to loot a PSE or get creds);
+# success-green flags reachable_auth (operator has working SNC);
+# neutral/info for benign states.
+_SNC_POSTURE_BADGE = {
+    "":                          "neutral",
+    "no_sap_signal":             "neutral",
+    "none":                      "neutral",
+    "optional":                  "info",
+    "enforced_no_creds":         "warning",
+    "enforced_handshake_failed": "warning",
+    "enforced_logon_failed":     "warning",
+    "reachable_auth":            "success",
+}
+
+
+def _count_snc_enforced(state: SAPMAPState) -> int:
+    """Count SAPNodes whose classifier verdict is one of the three
+    enforced_* postures — the KPI-card number operators scan when
+    hunting for SNC-only targets they can't yet reach."""
+    enforced_values = ("enforced_no_creds", "enforced_handshake_failed",
+                        "enforced_logon_failed")
+    return sum(1 for n in (state.nodes or {}).values()
+               if getattr(n, "snc_posture", "") in enforced_values)
+
+
 def _esc(s) -> str:
     """Escape a value for Markdown table-cell use.  Collapses pipes
     + newlines + backticks: a backtick inside a backtick-code-span
@@ -770,18 +810,22 @@ def _blast_radius_section(state: SAPMAPState) -> list:
 def _per_system_table(state: SAPMAPState) -> list:
     """One-row-per-node landscape inventory."""
     out = ["## Landscape inventory", ""]
-    out.append("| SID | Type | OS | DB | Host | Pwned | PRD | "
+    out.append("| SID | Type | OS | DB | Host | SNC posture | Pwned | PRD | "
                "Critical | RFC creds |")
-    out.append("| --- | --- | --- | --- | --- | --- | --- | --- | --- |")
+    out.append("| --- | --- | --- | --- | --- | --- | --- | --- | "
+               "--- | --- |")
     for sid, n in sorted(state.nodes.items()):
         crit_count = sum(1 for f in (n.findings or [])
                           if getattr(f, "severity", None) == Severity.CRITICAL)
         rfc_creds = sum(1 for c in (n.credentials or []) if c.verified)
         pwned = "⚡" if n.pwned else ""
         prd = "✓" if n.is_production else ""
+        posture = getattr(n, "snc_posture", "")
+        posture_label = _SNC_POSTURE_LABEL.get(posture, posture or "—")
         out.append(
             f"| {sid} | {_esc(n.system_type)} | {_esc(n.os_type)} | "
             f"{_esc(n.db_type)} | {_esc(n.hostname or n.ip)} | "
+            f"{_esc(posture_label)} | "
             f"{pwned} | {prd} | {crit_count} | {rfc_creds} |"
         )
     out.append("")
@@ -4911,6 +4955,16 @@ def build_html_report(state: SAPMAPState,
         crit_pill = (f'<span class="num-pill num-pill-bad">{crit_count}</span>'
                       if crit_count else
                       '<span class="num-pill num-pill-ok">0</span>')
+        # Issue #167 — SNC posture classifier cell
+        posture = getattr(n, "snc_posture", "")
+        posture_label = _SNC_POSTURE_LABEL.get(posture, posture or "—")
+        posture_sev = _SNC_POSTURE_BADGE.get(posture, "neutral")
+        if posture and posture != "none" and posture != "no_sap_signal":
+            posture_cell = (
+                f'<span class="badge badge-{posture_sev}">'
+                f'{_hesc(posture_label)}</span>')
+        else:
+            posture_cell = f'<span class="muted">{_hesc(posture_label)}</span>'
         inv_rows += (
             f'<tr>'
             f'<td class="mono"><b>{_hesc(sid)}</b></td>'
@@ -4918,6 +4972,7 @@ def build_html_report(state: SAPMAPState,
             f'<td>{_hesc(n.os_type or "—")}</td>'
             f'<td>{_hesc(n.db_type or "—")}</td>'
             f'<td class="mono">{_hesc(n.hostname or n.ip or "—")}</td>'
+            f'<td>{posture_cell}</td>'
             f'<td>{pwned_badge}</td>'
             f'<td>{prd_badge}</td>'
             f'<td>{crit_pill}</td>'
@@ -4951,6 +5006,7 @@ def build_html_report(state: SAPMAPState,
             f'<td>—</td>'
             f'<td>—</td>'
             f'<td class="mono">{_hesc(host)}</td>'
+            f'<td><span class="muted">n/a</span></td>'
             f'<td>{pwned_badge}</td>'
             f'<td title="SCC version">{_hesc(version)}</td>'
             f'<td>{crit_pill}</td>'
@@ -4994,6 +5050,7 @@ def build_html_report(state: SAPMAPState,
             f'<td>—</td>'
             f'<td>—</td>'
             f'<td class="mono">{_hesc(sub_label)}</td>'
+            f'<td><span class="muted">n/a</span></td>'
             f'<td>{pwned_badge}</td>'
             f'<td title="BTP region">'
             f'{_hesc(getattr(sub, "region", "") or "?")}</td>'
@@ -5335,6 +5392,11 @@ def build_html_report(state: SAPMAPState,
   .badge-bad{{background:#fbe5e5;color:#b51c1c}}
   .badge-ok{{background:#dafbe1;color:#1a7f37}}
   .badge-mid{{background:#fff8c5;color:#9a6700}}
+  /* Issue #167 — SNC posture classifier badges */
+  .badge-success{{background:#dafbe1;color:#1a7f37;border:1px solid #b7e4c7}}
+  .badge-warning{{background:#fff8c5;color:#9a6700;border:1px solid #f0d986}}
+  .badge-info{{background:#dbeafe;color:#1e40af;border:1px solid #b6d0f7}}
+  .badge-neutral{{background:#eef2f6;color:#6b7280;border:1px solid #d7dde3}}
   .sid-pill{{display:inline-block;padding:2px 8px;border-radius:4px;
         background:#0f1729;color:#fff;font-family:'SF Mono',Menlo,monospace;
         font-size:11px;font-weight:700;margin-right:8px}}
@@ -5418,6 +5480,12 @@ def build_html_report(state: SAPMAPState,
                   else "none in scope")),
                 "#f85149" if btp_pwned else
                 ("#0969da" if btp_subs else "#d0d7de"))}
+    {_kpi_card("SNC-enforced systems",
+                str(_count_snc_enforced(state)),
+                ("needs looted PSE or operator SNC posture"
+                 if _count_snc_enforced(state) else
+                 "none observed"),
+                "#d29922" if _count_snc_enforced(state) else "#3fb950")}
     {_kpi_card(
         "Cloud → on-prem laterals",
         f"{sum(1 for _c in conns if (_c.source_sid or '').startswith('BTP:') and _c.has_sap_all)}",
@@ -5483,6 +5551,7 @@ def build_html_report(state: SAPMAPState,
     <h2>🗺️ Landscape inventory</h2>
     <table class="grid"><thead><tr>
       <th>SID</th><th>Type</th><th>OS</th><th>DB</th><th>Host</th>
+      <th title="SNC posture classifier verdict (issue #167) — see README SNC Posture Classification">SNC posture</th>
       <th>Status</th><th>Tier</th><th>Critical</th><th>RFC creds</th>
     </tr></thead><tbody>{inv_rows}</tbody></table>
   </section>
