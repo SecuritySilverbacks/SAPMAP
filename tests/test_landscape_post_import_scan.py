@@ -59,14 +59,20 @@ def _default_liveness_alive(monkeypatch):
 
 def _mk_enrich_mock(return_info=None):
     """Return (fn, calls) — fn mimics sapmap_scanner.enrich_system_info,
-    calls is a list the test can inspect afterwards."""
+    calls is a list the test can inspect afterwards.
+
+    Accepts **kwargs to tolerate signature evolution — issue #167 added
+    snc_partnername / creds / state — without every caller needing to
+    update this fake."""
     calls = []
     info = return_info or {}
     def fn(host, gw_port, timeout=10, instance_nrs=None,
-            sid_hint="", saprouter=""):
-        calls.append({"host": host, "gw_port": gw_port,
-                       "timeout": timeout, "instance_nrs": instance_nrs,
-                       "sid_hint": sid_hint, "saprouter": saprouter})
+            sid_hint="", saprouter="", **kwargs):
+        rec = {"host": host, "gw_port": gw_port,
+                "timeout": timeout, "instance_nrs": instance_nrs,
+                "sid_hint": sid_hint, "saprouter": saprouter}
+        rec.update(kwargs)
+        calls.append(rec)
         return dict(info)
     return fn, calls
 

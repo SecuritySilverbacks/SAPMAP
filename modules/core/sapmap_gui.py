@@ -3628,12 +3628,24 @@ def landscape_post_import_discover(state, sid: str,
 
     # Step 1 — RFC_SYSTEM_INFO (promotes placeholder SID; fills
     # hostname / os_type / db_type / kernel / sap_release).
+    #
+    # Issue #167: pass the node's SNC partner name + best creds +
+    # state so the enrich can run the SNC-posture classifier and
+    # attempt an authenticated SNC RFC_SYSTEM_INFO when the plain
+    # path is blocked but 4800 is open.
+    try:
+        _creds_for_enrich = node.best_credentials()
+    except Exception:
+        _creds_for_enrich = None
     try:
         info = enrich_fn(
             host, gw_port, timeout=10,
             instance_nrs=[inst_nr],
             sid_hint=node.sid,
-            saprouter=node.saprouter)
+            saprouter=node.saprouter,
+            snc_partnername=(getattr(node, "snc_partnername", "") or ""),
+            creds=_creds_for_enrich,
+            state=state)
     except Exception as e:
         print(f"[-] {sid}: Post-import RFC_SYSTEM_INFO error: "
               f"{type(e).__name__}: {e}")
@@ -3651,6 +3663,24 @@ def landscape_post_import_discover(state, sid: str,
     if new_source and not node.sysinfo_source:
         node.sysinfo_source = new_source
         result["enrich_source"] = new_source
+
+    # Issue #167: mirror SNC posture classifier onto the node (truthy-only
+    # so a transient failure can never clobber a prior reachable_auth).
+    _posture = info.get("snc_posture", "")
+    if _posture:
+        node.snc_posture = _posture
+    _pe = info.get("snc_probe_error", "")
+    _pp = info.get("snc_probe_phase", "")
+    _pa = info.get("snc_last_probe_at")
+    if _pe or _pp or _pa:
+        if not isinstance(node.snc_info, dict):
+            node.snc_info = {}
+        if _pe:
+            node.snc_info["last_probe_error"] = _pe
+        if _pp:
+            node.snc_info["last_probe_phase"] = _pp
+        if _pa:
+            node.snc_info["last_probe_at"] = _pa
 
     # system_type override from SAPControl stack detection.  Parser
     # defaults every XML-imported node to ABAP (SAP Logon describes
@@ -8403,20 +8433,36 @@ def create_app(api: SAPMAPApi) -> Bottle:
             # Pass known instance numbers so SAPControl queries the right one
             inst_nrs = [inst.instance_nr for inst in node.instances
                         if inst.instance_nr is not None]
+            # Issue #167: pass the node's SNC partner name + best creds
+            # + state.  enrich_system_info is now the single SNC-aware
+            # path — when the plain probe is blocked and 4800 is open,
+            # it attempts an authenticated SNC RFC_SYSTEM_INFO and
+            # merges the returned SID/host/kernel into ``info``.
+            try:
+                _creds_for_enrich = node.best_credentials()
+            except Exception:
+                _creds_for_enrich = None
             info = sapmap_scanner.enrich_system_info(
                 host, gw_port, instance_nrs=inst_nrs,
                 sid_hint=node.sid, saprouter=node.saprouter,
-                include_web_ports=True)
+                include_web_ports=True,
+                snc_partnername=(getattr(node, "snc_partnername", "")
+                                 or ""),
+                creds=_creds_for_enrich,
+                state=api.state)
             # Update node with retrieved info.  The user asked for a
             # refresh, so we normally overwrite existing fields.  BUT:
-            # if the node already has data from an authoritative Stage 0
-            # RFCSI probe (rfcsi_anon) and this rerun's info dict came
+            # if the node already has data from an authoritative source
+            # (rfcsi_anon from Stage 0, or rfcsi_snc_auth from the
+            # SNC-authed path #167) and this rerun's info dict came
             # from a less-authoritative source (legacy leak / SAPControl
             # banner), preserve the existing authoritative values.  When
-            # the rerun's data is also from rfcsi_anon we simply refresh.
+            # the rerun's data is also from an authoritative source we
+            # simply refresh.
+            _AUTHORITATIVE = ("rfcsi_anon", "rfcsi_snc_auth")
             new_source = info.get("sysinfo_source", "")
-            node_was_authoritative = (node.sysinfo_source == "rfcsi_anon")
-            new_is_authoritative   = (new_source == "rfcsi_anon")
+            node_was_authoritative = (node.sysinfo_source in _AUTHORITATIVE)
+            new_is_authoritative   = (new_source in _AUTHORITATIVE)
             _keep_existing = (node_was_authoritative and not new_is_authoritative)
 
             if info.get("sid") and not node.sid.startswith("UNK"):
@@ -8474,41 +8520,32 @@ def create_app(api: SAPMAPApi) -> Bottle:
                 if not node.db_type:
                     print(f"[*] No database ports detected on {host}")
 
-            # Issue #167: when this node has working credentials AND an SNC
-            # name is set, additionally read RFC_SYSTEM_INFO over the
-            # AUTHENTICATED SNC path (sapmap_rfc.get_rfc_system_info →
-            # saprfclib → 48XX).  The anonymous enrich above cannot traverse
-            # SNC, so on an SNC-secured system this authenticated read is the
-            # only way the "RFC System Info" refresh yields data.  Its result
-            # is authoritative, so it takes precedence over the anon fields.
-            try:
-                _creds = node.best_credentials()
-            except Exception:
-                _creds = None
-            _snc_name = (getattr(node, "snc_partnername", "") or "").strip()
-            if _creds and _snc_name:
-                print(f"[*] {node.sid}: trying authenticated SNC "
-                      f"RFC_SYSTEM_INFO (48XX)...")
-                si = sapmap_rfc.get_rfc_system_info(node, _creds)
-                if si.get("error"):
-                    print(f"[*] {node.sid}: authenticated SNC system info "
-                          f"unavailable: {si['error']}")
-                else:
-                    if si.get("sid") and node.sid.startswith("UNK"):
-                        node.sid = si["sid"]
-                    node.hostname = si.get("hostname") or node.hostname
-                    node.os_type = si.get("os_type") or node.os_type
-                    node.db_type = si.get("db_type") or node.db_type
-                    node.kernel = si.get("kernel") or node.kernel
-                    node.sap_release = si.get("sap_release") or node.sap_release
-                    if si.get("ip"):
-                        node.ip = si["ip"]
-                    if si.get("source"):
-                        node.sysinfo_source = si["source"]
-                    print(f"[+] {node.sid}: RFC_SYSTEM_INFO over SNC "
-                          f"(authenticated) — SID={node.sid}, "
-                          f"kernel={node.kernel or '?'}, "
-                          f"host={node.hostname or '?'}")
+            # Issue #167: mirror the SNC posture classifier result onto
+            # the node.  snc_posture is truthy-only — a '' from a
+            # transient failure can never clobber a prior reachable_auth
+            # verdict; a decisive new verdict (enforced_no_creds, etc.)
+            # DOES overwrite.  The authenticated SNC RFC_SYSTEM_INFO
+            # that previously lived here as a separate post-enrich block
+            # is now owned by enrich_system_info itself, so it runs
+            # exactly once per refresh click (not twice).
+            _posture = info.get("snc_posture", "")
+            if _posture:
+                node.snc_posture = _posture
+            _probe_error = info.get("snc_probe_error", "")
+            _probe_phase = info.get("snc_probe_phase", "")
+            _last_at     = info.get("snc_last_probe_at")
+            if _probe_error or _probe_phase or _last_at:
+                try:
+                    if not isinstance(node.snc_info, dict):
+                        node.snc_info = {}
+                except Exception:
+                    node.snc_info = {}
+                if _probe_error:
+                    node.snc_info["last_probe_error"] = _probe_error
+                if _probe_phase:
+                    node.snc_info["last_probe_phase"] = _probe_phase
+                if _last_at:
+                    node.snc_info["last_probe_at"] = _last_at
 
         _bg(f"{sid}:rfc_system_info", "RFC System Info", _run)
         return json.dumps({"status": "started"})
@@ -19470,6 +19507,24 @@ def create_app(api: SAPMAPApi) -> Bottle:
                 _set("db_type", info.get("db_type"))
                 _set("kernel", info.get("kernel"))
                 _set("sap_release", info.get("sap_release"))
+                # Issue #167: mirror SNC posture classifier result.
+                # snc_posture is truthy-only so a '' from a transient
+                # failure can never clobber a prior reachable_auth.
+                _posture = info.get("snc_posture", "")
+                if _posture and (not fill_only or not node.snc_posture):
+                    node.snc_posture = _posture
+                _pe = info.get("snc_probe_error", "")
+                _pp = info.get("snc_probe_phase", "")
+                _pa = info.get("snc_last_probe_at")
+                if _pe or _pp or _pa:
+                    if not isinstance(node.snc_info, dict):
+                        node.snc_info = {}
+                    if _pe:
+                        node.snc_info["last_probe_error"] = _pe
+                    if _pp:
+                        node.snc_info["last_probe_phase"] = _pp
+                    if _pa:
+                        node.snc_info["last_probe_at"] = _pa
                 sc_abap = info.get("_is_abap", False)
                 sc_java = info.get("_is_java", False)
                 if sc_abap or sc_java:
@@ -19485,11 +19540,22 @@ def create_app(api: SAPMAPApi) -> Bottle:
                     print(f"[+] {sid}: qualified web port {_p} as {_lbl} "
                           f"(HTTP service present)")
 
+            # Issue #167: pass SNC partner + creds + state so the
+            # enrich can attempt an SNC-authenticated RFC_SYSTEM_INFO
+            # on an SNC-secured target.
+            try:
+                _creds_for_enrich = node.best_credentials()
+            except Exception:
+                _creds_for_enrich = None
             try:
                 info = sapmap_scanner.enrich_system_info(
                     host, gw_port, instance_nrs=inst_nrs,
                     sid_hint=sid, saprouter=saprouter,
-                    include_web_ports=True)
+                    include_web_ports=True,
+                    snc_partnername=(getattr(node, "snc_partnername", "")
+                                     or ""),
+                    creds=_creds_for_enrich,
+                    state=api.state)
                 _apply(info)
 
                 # For Java-only systems the user often provides the Java
@@ -19517,7 +19583,11 @@ def create_app(api: SAPMAPApi) -> Bottle:
                         sweep_info = sapmap_scanner.enrich_system_info(
                             host, try_port,
                             instance_nrs=[f"{try_inst:02d}"],
-                            sid_hint=sid, saprouter=saprouter)
+                            sid_hint=sid, saprouter=saprouter,
+                            snc_partnername=(getattr(
+                                node, "snc_partnername", "") or ""),
+                            creds=_creds_for_enrich,
+                            state=api.state)
                         _apply(sweep_info, fill_only=True)
                         # Track the discovered gateway instance on the node
                         have_inst = any(i.instance_nr == f"{try_inst:02d}"

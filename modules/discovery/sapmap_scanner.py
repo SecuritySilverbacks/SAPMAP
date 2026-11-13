@@ -378,6 +378,41 @@ def _scan_port(host: str, port: int, timeout: float = 3.0,
         return False
 
 
+def _tcp_reach(host: str, port: int, *, timeout: float = 3.0,
+               saprouter: str = "") -> bool:
+    """Lightweight TCP SYN-ACK reachability check for the SNC-aware
+    RFC_SYSTEM_INFO classifier (issue #167).
+
+    Semantics are identical to :func:`_scan_port` (``True`` iff a TCP
+    handshake completes, ``False`` on any error — refused, reset,
+    timeout, SAProuter deny, exception), but the timeout is clamped at
+    4s regardless of the caller's budget: we fire one of these per
+    gateway per scan pass, and a slow dark host would otherwise stall
+    the enrich loop while contributing no information.  Named distinct
+    from ``_scan_port`` so grep-callers can distinguish the two.
+
+    ``saprouter`` is a plain router string (``"host:port"``, same shape
+    the rest of the scanner uses), not a tuple — we route the probe
+    through the operator's SAProuter when one is set, matching the
+    design decision that a router'd SNC-only target should still
+    classify truthfully.
+    """
+    capped = min(timeout, 4.0)
+    try:
+        if saprouter:
+            from sap_saprouter import (
+                connect_through_saprouter, build_route_for_port)
+            route = build_route_for_port(saprouter, host, port)
+            sock = connect_through_saprouter(route, capped)
+            sock.close()
+            return True
+        sock = socket.create_connection((host, port), timeout=capped)
+        sock.close()
+        return True
+    except Exception:
+        return False
+
+
 # SAP DIAG init probe (from nmap-sap / SAPology) — used to verify dispatcher
 import re as _re
 _SAP_DIAG_PROBE = bytes.fromhex(
@@ -3184,12 +3219,173 @@ def check_cve_2022_22536(node: SAPNode, timeout: float = 12.0,
 # System info enrichment (unauthenticated)
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# SNC posture classifier helpers (issue #167)
+# ---------------------------------------------------------------------------
+
+_SNC_POSTURE_RATE_LIMIT_S = 300   # skip SNC-auth probe within 5 min of a
+                                  # prior probe on the same node — account
+                                  # lockout risk capped per-node.
+
+
+def _cred_user(c) -> str:
+    """Read a Credentials object's username, tolerating both the
+    dataclass's canonical ``username`` attribute and the loose ``user``
+    attribute some legacy call sites expose on duck-typed stubs."""
+    return (getattr(c, "username", "") or getattr(c, "user", "") or "")
+
+
+def _pick_cred_for_node(node):
+    """Pick the best Credentials for a node when the classifier wants
+    to try an SNC-authenticated RFC_SYSTEM_INFO.  Prefers SAPMAP00
+    (verified-foothold convention) over any other credential, else
+    returns the first with a non-empty user+password.  Returns None
+    when the node has no usable credential.
+
+    This is a lightweight picker for the classifier specifically — the
+    full per-instance resolver still lives in sapmap_rfc._get_connection
+    and runs for real operator flows."""
+    try:
+        creds = list(getattr(node, "credentials", []) or [])
+    except Exception:
+        return None
+    if not creds:
+        return None
+
+    def _usable(c):
+        return bool(_cred_user(c)) and bool(getattr(c, "password", ""))
+
+    for c in creds:
+        if _cred_user(c).upper() == "SAPMAP00" and _usable(c):
+            return c
+    for c in creds:
+        if _usable(c):
+            return c
+    return None
+
+
+def _try_snc_auth_classify(*, host, inst_nr, snc_partnername, creds,
+                           saprouter, timeout, state, info, sid_hint):
+    """Attempt an SNC-authenticated RFC_SYSTEM_INFO probe and return
+    the matching posture verdict (issue #167).
+
+    Decision table:
+      * No partner, no creds, no SNC posture on SAPMAP host, no
+        backend, reach-hint blocked      → 'enforced_no_creds'
+      * Rate-limited (<300s since last)   → '' (sticky — don't write)
+      * SNC-auth succeeded                → 'reachable_auth' (also merges
+                                            SID/host/kernel into ``info``
+                                            and promotes ``sysinfo_source``
+                                            to 'rfcsi_snc_auth')
+      * phase=='logon'                    → 'enforced_logon_failed'
+      * phase=='snc_handshake'            → 'enforced_handshake_failed'
+      * phase=='transport'                → '' (sticky — don't downgrade
+                                            on a transient reset/timeout)
+
+    Our-side gaps (no creds, no backend, reach-hint) route to
+    ``enforced_no_creds`` so the operator sees a clean "I need creds
+    or a looted PSE" signal; verdicts that start with ``enforced_*_failed``
+    are reserved for errors that prove the TARGET rejected us.
+    """
+    # Local imports — avoid a scanner→rfc import cycle at module load.
+    import sapmap_rfc
+
+    if not (snc_partnername or "").strip():
+        return "enforced_no_creds"
+    if not creds or not _cred_user(creds) \
+            or not getattr(creds, "password", ""):
+        return "enforced_no_creds"
+
+    # SAPMAP host gating — operator posture OR active looted cred must
+    # be configured for SNC to be emittable at all.
+    try:
+        _snc_params = sapmap_rfc._snc_params_for(snc_partnername)
+    except Exception:
+        _snc_params = {}
+    if not _snc_params:
+        return "enforced_no_creds"
+
+    # Rate-limit — prevent a classifier-driven lockout storm.  Looks up
+    # the node via state+sid_hint; harmless no-op if either is absent.
+    node = None
+    if state is not None and sid_hint:
+        try:
+            node = state.nodes.get(sid_hint)
+        except Exception:
+            node = None
+    if node is not None:
+        last_at = (getattr(node, "snc_info", {}) or {}).get("last_probe_at")
+        try:
+            last_at_f = float(last_at) if last_at else 0.0
+        except (TypeError, ValueError):
+            last_at_f = 0.0
+        if last_at_f and (time.time() - last_at_f) < _SNC_POSTURE_RATE_LIMIT_S:
+            info["snc_probe_phase"] = "rate_limited"
+            return ""   # sticky — _apply skips a falsy posture write
+
+    # Reach-hint gate — looted cred against a target NOT in its
+    # STRUSTSSO2 reach would always fail the SNC ACL at the server,
+    # mislabelling the box as 'enforced_handshake_failed'.  Skip and
+    # route to 'enforced_no_creds' instead.
+    active = getattr(sapmap_rfc, "_snc_active_cred", None)
+    if active and state is not None and sid_hint:
+        src_sid = (active.get("source_sid") or "").strip()
+        if src_sid and hasattr(state, "reach_targets_for_snc_identity"):
+            try:
+                reach = set(state.reach_targets_for_snc_identity(src_sid))
+            except Exception:
+                reach = set()
+            if reach and sid_hint not in reach:
+                info["snc_probe_phase"] = "reach_hint_blocked"
+                return "enforced_no_creds"
+
+    # Normalise sysnr; fall back to the gw-port derived value.
+    try:
+        _sysnr = str(int(inst_nr)).zfill(2)
+    except (TypeError, ValueError):
+        _sysnr = "00"
+
+    snc_info = sapmap_rfc.rfc_system_info_over_snc(
+        host, _sysnr, snc_partnername,
+        client=getattr(creds, "client", "001") or "001",
+        user=_cred_user(creds),
+        password=getattr(creds, "password", ""),
+        saprouter=saprouter,
+        timeout=int(timeout))
+
+    info["snc_probe_error"] = snc_info.get("error", "")
+    info["snc_probe_phase"] = snc_info.get("phase", "")
+    info["snc_last_probe_at"] = time.time()
+
+    if snc_info.get("source") == "rfcsi_snc_auth":
+        for k in ("sid", "hostname", "os_type", "db_type",
+                  "kernel", "sap_release", "ip"):
+            v = snc_info.get(k, "")
+            if v and not info.get(k):
+                info[k] = v
+        info["sysinfo_source"] = "rfcsi_snc_auth"
+        return "reachable_auth"
+
+    phase = snc_info.get("phase", "")
+    if phase == "logon":
+        return "enforced_logon_failed"
+    if phase == "snc_handshake":
+        return "enforced_handshake_failed"
+    if phase == "transport":
+        return ""   # sticky — _apply skips the falsy posture write
+
+    return "enforced_no_creds"
+
+
 def enrich_system_info(host: str, gw_port: int, timeout: float = 10,
                        verbose: bool = False,
                        instance_nrs: list = None,
                        sid_hint: str = "",
                        saprouter: str = "",
-                       include_web_ports: bool = False) -> dict:
+                       include_web_ports: bool = False,
+                       snc_partnername: str = "",
+                       creds=None,
+                       state=None) -> dict:
     """Call RFC_SYSTEM_INFO (unauthenticated) to get OS, DB, kernel, hostname, SID.
 
     Args:
@@ -3411,47 +3607,122 @@ def enrich_system_info(host: str, gw_port: int, timeout: float = 10,
             result = {"status": "error", "methods_tried": [], "methods_success": []}
             status = "error"
 
-    # --- Issue #167: SNC-secured systems can't be probed anonymously ---
-    # When the anonymous RFC probes returned no system info AND the SNC
-    # gateway port (48XX) is open, the gateway is SNC-secured: the raw-NI
-    # RFC_SYSTEM_INFO on 33XX can't traverse the SNC layer, and SNC
-    # transport still requires an application-layer logon (verified live —
-    # SNC comes up, but an anonymous logon is rejected).  Classify cleanly
-    # instead of leaving a silent blank, and point the operator at the
-    # authenticated SNC path (sapmap_rfc.get_rfc_system_info, which runs
-    # once SNC is configured and credentials exist).  Discovery stays
-    # unauthenticated — this only probes the SNC port and labels the node.
-    if (not info.get("sid") and not saprouter
-            and 3300 <= gw_port <= 3399):
+    # --- Issue #167: SNC posture classifier --------------------------------
+    # 8-value taxonomy written to info['snc_posture'] (the shipping layer
+    # then mirrors it onto SAPNode.snc_posture via _apply).  Values:
+    #   ''                          — classifier did not run (out-of-gate)
+    #   'no_sap_signal'             — classifier ran; plain blank + 4800 closed
+    #   'none'                      — plain RFCSI SID; 4800 closed (no SNC)
+    #   'optional'                  — plain RFCSI SID; 4800 open
+    #   'enforced_no_creds'         — plain blocked; 4800 open; our-side can't
+    #                                  attempt SNC-auth (no creds, no partner,
+    #                                  no SNC posture, reach-hint blocks,
+    #                                  rate-limited after a prior failure)
+    #   'enforced_handshake_failed' — SNC-auth tried; crypto/handshake rejected
+    #   'enforced_logon_failed'     — SNC-auth tried; app-layer logon rejected
+    #   'reachable_auth'            — SNC-auth succeeded with real creds
+    #                                  (SID/host/kernel merged into info,
+    #                                   sysinfo_source promoted to
+    #                                   'rfcsi_snc_auth')
+    #
+    # Gated on gw_port in the canonical gateway range (3300-3399) — non-
+    # gateway ports (80/443/4800 themselves) are left at posture=''.
+    # SAProuter is handled by _tcp_reach's own tunnel path, so we no
+    # longer skip the classifier when a router is set (the previous
+    # block did, which left router'd SNC-only targets permanently
+    # mislabelled as "dead").
+    info["snc_posture"] = ""
+    info["snc_port_open"] = False
+    info["snc_gw_port"] = None
+
+    if 3300 <= gw_port <= 3399:
         snc_gw_port = 4800 + (gw_port - 3300)
-        snc_open = False
-        try:
-            import socket as _snc_sock
-            _s = _snc_sock.socket(_snc_sock.AF_INET, _snc_sock.SOCK_STREAM)
-            _s.settimeout(min(timeout, 4))
-            _s.connect((host, snc_gw_port))
-            _s.close()
-            snc_open = True
-        except Exception:
-            snc_open = False
-        if snc_open:
-            info["snc_required"] = True
-            if not info.get("sysinfo_source"):
+        info["snc_gw_port"] = snc_gw_port
+
+        # Skip the 4800 probe when the gateway itself is dark — saves N*M
+        # wasted probes on a /24 of silent IPs.  "Gateway alive" is
+        # already implied by anything in info (a SID or hostname means
+        # a probe answered); otherwise a cheap _tcp_reach on gw_port
+        # confirms.
+        gateway_alive = bool(info.get("sid") or info.get("hostname")) or \
+            _tcp_reach(host, gw_port, timeout=timeout, saprouter=saprouter)
+
+        if gateway_alive:
+            snc_port_open = _tcp_reach(
+                host, snc_gw_port, timeout=timeout, saprouter=saprouter)
+            info["snc_port_open"] = snc_port_open
+            sid_found = bool(info.get("sid"))
+
+            if sid_found and not snc_port_open:
+                posture = "none"
+            elif sid_found and snc_port_open:
+                posture = "optional"
+            elif not sid_found and not snc_port_open:
+                posture = "no_sap_signal"
+            else:
+                # Plain probe blocked, 4800 open — try SNC-auth if we can.
+                posture = _try_snc_auth_classify(
+                    host=host,
+                    inst_nr=(gw_port - 3300),
+                    snc_partnername=snc_partnername,
+                    creds=creds,
+                    saprouter=saprouter,
+                    timeout=timeout,
+                    state=state,
+                    info=info,
+                    sid_hint=sid_hint,
+                )
+
+            info["snc_posture"] = posture
+
+            # Preserve the legacy 'snc_required' sysinfo_source marker for
+            # the enforced-no-creds / enforced-*-failed branches so
+            # downstream consumers that pin this string stay green.  The
+            # 'reachable_auth' branch promoted to 'rfcsi_snc_auth' already
+            # inside _try_snc_auth_classify.
+            if (posture in ("enforced_no_creds",
+                            "enforced_handshake_failed",
+                            "enforced_logon_failed")
+                    and not info.get("sysinfo_source")):
                 info["sysinfo_source"] = "snc_required"
-            print(f"[!] {tag}: RFC_SYSTEM_INFO not reachable anonymously — SNC "
-                  f"gateway open on {host}:{snc_gw_port}; system is SNC-secured. "
-                  f"An authenticated SNC probe is required (configure SNC + "
-                  f"credentials; see 'SNC Configuration').")
-            try:
-                emit_finding(
-                    "INFO", tag,
-                    f"RFC_SYSTEM_INFO not reachable anonymously — {host} is "
-                    f"SNC-secured (SNC gateway open on :{snc_gw_port}); "
-                    f"authenticated SNC RFC is required to read system info.",
-                    ref="rfc.system_info.snc_required",
-                    attack_capability="recon.rfc_system_info_leak")
-            except Exception:
-                pass
+                info["snc_required"] = True
+
+            # Operator-facing one-liner.
+            if posture == "enforced_no_creds":
+                print(f"[!] {tag}: SNC posture = enforced_no_creds — plain "
+                      f"RFCSI blocked, SNC gateway open on {host}:{snc_gw_port}; "
+                      f"configure SNC + credentials or activate a looted PSE "
+                      f"to attempt an SNC-authed probe.")
+            elif posture == "enforced_handshake_failed":
+                print(f"[!] {tag}: SNC posture = enforced_handshake_failed — "
+                      f"SNC transport refused on {host}:{snc_gw_port} "
+                      f"(crypto/PSE/GSS mismatch).")
+            elif posture == "enforced_logon_failed":
+                print(f"[!] {tag}: SNC posture = enforced_logon_failed — "
+                      f"SNC transport OK on {host}:{snc_gw_port}; app-layer "
+                      f"logon rejected (wrong credentials).")
+            elif posture == "reachable_auth":
+                print(f"[+] {tag}: SNC posture = reachable_auth — "
+                      f"RFC_SYSTEM_INFO via SNC on {host}:{snc_gw_port} "
+                      f"returned SID={info.get('sid','?')}, "
+                      f"Host={info.get('hostname','?')}, "
+                      f"Kernel={info.get('kernel','?')}.")
+
+            # One INFO finding per classifier pass — never two.  The
+            # previous rfc.system_info.snc_required emit is subsumed here
+            # with the posture encoded in the ref slug so filters can
+            # distinguish the sub-cases.
+            if posture:
+                try:
+                    emit_finding(
+                        "INFO", tag,
+                        f"SNC posture: {posture} on {host}:{snc_gw_port} "
+                        f"(gw={gw_port}) — see README SNC Posture "
+                        f"Classification for operator action.",
+                        ref=f"rfc.system_info.snc_posture.{posture}",
+                        attack_capability="recon.rfc_system_info_leak")
+                except Exception:
+                    pass
 
     # Build ordered instance number list for SAPControl queries
     _seen = set()
@@ -6692,6 +6963,44 @@ def _sapology_system_to_node(sys_obj, target_ip: str) -> SAPNode:
             node.kernel, node.system_type)
     except Exception:
         node.dpmon_sap_star_available = False
+
+    # Issue #167 — SNC posture classifier, TCP-only path for SAPology-
+    # sourced nodes.  Deep-scan delegates to SAPology for the heavy
+    # fingerprinting and does its own RFC_SYSTEM_INFO; we DON'T re-run
+    # the SNC-auth probe here.  Instead we run only the TCP probe
+    # branch — enough to label 'none' / 'optional' / 'enforced_no_creds'
+    # so the engagement report, GUI tooltip, and MCP schema don't show
+    # '—' for the deep-scan half of a discovery.  A full 'reachable_auth'
+    # upgrade for these nodes requires a sibling kloris/SAPology PR and
+    # is deliberately out of scope here.
+    try:
+        gw_port = None
+        for inst in node.instances:
+            for p, lbl in (inst.ports or {}).items():
+                if isinstance(p, int) and 3300 <= p <= 3399:
+                    gw_port = p
+                    break
+            if gw_port:
+                break
+        if gw_port:
+            _snc_gw = 4800 + (gw_port - 3300)
+            # Reuse the shared _tcp_reach helper so SAProuter tunneling
+            # works for deep-scan-sourced nodes too.
+            _snc_open = _tcp_reach(target_ip, _snc_gw,
+                                   timeout=3.0, saprouter="")
+            sid_found = bool(node.sid) and not node.sid.startswith("UNK_")
+            if sid_found and not _snc_open:
+                node.snc_posture = "none"
+            elif sid_found and _snc_open:
+                node.snc_posture = "optional"
+            elif not sid_found and _snc_open:
+                node.snc_posture = "enforced_no_creds"
+            # else: leave empty (not SAP / dark) — matches fast-scan
+    except Exception:
+        # Classifier is advisory — a probe failure must NEVER break
+        # the SAPology bridge.
+        pass
+
     return node
 
 

@@ -745,6 +745,19 @@ class SAPNode:
     # authenticated SNC connections to this node.  Set via the GUI
     # (/api/node/<sid>/set_snc_name); empty string = not configured.
     snc_partnername: str = ""
+    # SNC reachability classifier verdict (issue #167).  Values:
+    #   ""                          -> never classified (default; older .sapmap)
+    #   "no_sap_signal"             -> classifier ran; 3300 blank + 4800 closed
+    #   "none"                      -> plain RFCSI SID; 4800 closed
+    #   "optional"                  -> plain RFCSI SID; 4800 open
+    #   "enforced_no_creds"         -> plain blocked; 4800 open; our-side can't
+    #                                   attempt SNC-auth (no creds / no partner /
+    #                                   no SNC posture / looted PSE not staged)
+    #   "enforced_handshake_failed" -> SNC-auth tried; crypto/handshake rejected
+    #   "enforced_logon_failed"     -> SNC-auth tried; app-layer logon rejected
+    #   "reachable_auth"            -> SNC-auth succeeded with real creds
+    # See modules/core/sapmap_report._SNC_POSTURE_LABEL for display labels.
+    snc_posture: str = ""
     # MS text/dump info-disclosure results (issue #48).  Populated by
     # sapmap_scanner.check_ms_info_disclosure — the Message Server HTTP
     # port (81NN) exposes /msgserver/text/dump?<section>=1 to any
@@ -1146,6 +1159,7 @@ class SAPNode:
             "saprouter_info": self.saprouter_info,
             "snc_info": dict(self.snc_info or {}),
             "snc_partnername": self.snc_partnername,
+            "snc_posture": self.snc_posture,
             "ms_info_leak": dict(self.ms_info_leak or {}),
             "scc_links": list(self.scc_links),
             "rfcsysacl_entries": list(self.rfcsysacl_entries),
@@ -1296,6 +1310,7 @@ class SAPNode:
             saprouter_info=d.get("saprouter_info", {}),
             snc_info=dict(d.get("snc_info", {})),
             snc_partnername=d.get("snc_partnername", ""),
+            snc_posture=d.get("snc_posture", ""),
             ms_info_leak=dict(d.get("ms_info_leak", {})),
             scc_links=list(d.get("scc_links", [])),
             rfcsysacl_entries=list(d.get("rfcsysacl_entries", [])),
