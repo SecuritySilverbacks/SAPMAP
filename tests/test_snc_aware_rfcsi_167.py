@@ -589,3 +589,260 @@ def test_helper_coerces_integer_sysnr(_snc_reset, _backend, _native):
     sapmap_rfc.rfc_system_info_over_snc(
         "10.0.0.1", 0, "p:CN=S4H", user="u", password="pw" * 6)
     assert _backend.last_params.get("sysnr") == "00"
+
+
+# ------------------------------------------------------------------
+# Phase D — enrich_system_info classifier + _pick_cred_for_node +
+# _try_snc_auth_classify
+# ------------------------------------------------------------------
+
+
+from sapmap_models import Credentials, SAPMAPState, TrustRelation  # noqa: E402
+
+
+# ---- _pick_cred_for_node (direct helper tests) ----
+
+class _MinimalNode:
+    """Minimal duck-typed node for the credential-picker tests."""
+    def __init__(self, credentials):
+        self.credentials = credentials
+
+
+def test_pick_cred_for_node_returns_none_when_no_creds():
+    assert sapmap_scanner._pick_cred_for_node(_MinimalNode([])) is None
+
+
+def test_pick_cred_for_node_prefers_sapmap00_over_others():
+    other = Credentials(username="TMSADM", password="x", client="000")
+    sapmap = Credentials(username="SAPMAP00", password="y", client="001")
+    n = _MinimalNode([other, sapmap])
+    picked = sapmap_scanner._pick_cred_for_node(n)
+    assert picked is sapmap
+
+
+def test_pick_cred_for_node_returns_first_usable_when_no_sapmap00():
+    unusable = Credentials(username="", password="", client="000")
+    other = Credentials(username="TMSADM", password="x", client="000")
+    n = _MinimalNode([unusable, other])
+    picked = sapmap_scanner._pick_cred_for_node(n)
+    assert picked is other
+
+
+# ---- _try_snc_auth_classify (direct helper tests) ----
+
+def _make_classify_info():
+    return {"sid": "", "hostname": ""}
+
+
+def test_try_snc_auth_empty_partner_returns_enforced_no_creds():
+    info = _make_classify_info()
+    out = sapmap_scanner._try_snc_auth_classify(
+        host="10.0.0.1", inst_nr=0, snc_partnername="",
+        creds=Credentials(username="u", password="p", client="001"),
+        saprouter="", timeout=3, state=None, info=info, sid_hint="S4H")
+    assert out == "enforced_no_creds"
+
+
+def test_try_snc_auth_no_creds_returns_enforced_no_creds():
+    info = _make_classify_info()
+    out = sapmap_scanner._try_snc_auth_classify(
+        host="10.0.0.1", inst_nr=0, snc_partnername="p:CN=S4H",
+        creds=None, saprouter="", timeout=3,
+        state=None, info=info, sid_hint="S4H")
+    assert out == "enforced_no_creds"
+
+
+def test_try_snc_auth_no_snc_posture_returns_enforced_no_creds(_snc_reset):
+    """SAPMAP host has no operator SNC config and no active looted cred
+    → _snc_params_for returns {} → enforced_no_creds (our-side gap,
+    not enforced_*_failed)."""
+    sapmap_rfc.set_snc_config(secudir="", sapcryptolib="", identity="")
+    sapmap_rfc.set_snc_identity(None)
+    info = _make_classify_info()
+    out = sapmap_scanner._try_snc_auth_classify(
+        host="10.0.0.1", inst_nr=0, snc_partnername="p:CN=S4H",
+        creds=Credentials(username="u", password="p", client="001"),
+        saprouter="", timeout=3, state=None, info=info, sid_hint="S4H")
+    assert out == "enforced_no_creds"
+
+
+def test_try_snc_auth_rate_limited_returns_empty_posture(
+        _snc_reset, monkeypatch):
+    """A node that has been probed within the last 300s is skipped —
+    returns '' so _apply leaves the prior posture intact."""
+    sapmap_rfc.set_snc_config(secudir="/s", sapcryptolib="/lib.so",
+                              identity="p:CN=lab")
+
+    st = SAPMAPState()
+    node = SAPNode(sid="S4H", snc_posture="reachable_auth")
+    node.snc_info = {"last_probe_at": time.time() - 60}   # 60s ago
+    st.nodes["S4H"] = node
+
+    called = {"n": 0}
+
+    def _spy(*a, **kw):
+        called["n"] += 1
+        return {"source": "rfcsi_snc_auth", "error": "", "phase": ""}
+
+    monkeypatch.setattr(sapmap_rfc, "rfc_system_info_over_snc", _spy)
+
+    info = _make_classify_info()
+    out = sapmap_scanner._try_snc_auth_classify(
+        host="10.0.0.1", inst_nr=0, snc_partnername="p:CN=S4H",
+        creds=Credentials(username="u", password="p", client="001"),
+        saprouter="", timeout=3, state=st, info=info, sid_hint="S4H")
+    assert out == ""                                 # sticky
+    assert called["n"] == 0                          # helper NOT called
+    assert info["snc_probe_phase"] == "rate_limited"
+
+
+def test_try_snc_auth_reach_hint_blocks_route_to_enforced_no_creds(
+        _snc_reset, monkeypatch):
+    """Active looted cred's source_sid does NOT reach the target per
+    STRUSTSSO2 trust graph → skip with enforced_no_creds + phase."""
+    sapmap_rfc.set_snc_config(secudir="/s", sapcryptolib="/lib.so",
+                              identity="p:CN=lab")
+    sapmap_rfc.set_snc_identity({
+        "cred_id": "A4H:SAPSYS", "source_sid": "A4H",
+        "pse_path": "/loot/pse/A4H/SAPSYS.pse", "cred_v2_path": "",
+        "pin": "", "snc_identity": "p:CN=A4H",
+        "key_is_rsa": True, "path_pref": "auto",
+    })
+
+    st = SAPMAPState()
+    st.nodes["S4H"] = SAPNode(sid="S4H")
+    st.nodes["A4H"] = SAPNode(sid="A4H")
+    # A4H's reach via STRUSTSSO2 only includes OTH, NOT S4H.
+    st.trust_relations = [TrustRelation(trusting_sid="OTH",
+                                        issuer_sid="A4H")]
+
+    called = {"n": 0}
+
+    def _spy(*a, **kw):
+        called["n"] += 1
+        return {"source": "", "error": "", "phase": ""}
+
+    monkeypatch.setattr(sapmap_rfc, "rfc_system_info_over_snc", _spy)
+
+    info = _make_classify_info()
+    out = sapmap_scanner._try_snc_auth_classify(
+        host="10.0.0.1", inst_nr=0, snc_partnername="p:CN=S4H",
+        creds=Credentials(username="u", password="p", client="001"),
+        saprouter="", timeout=3, state=st, info=info, sid_hint="S4H")
+    assert out == "enforced_no_creds"
+    assert called["n"] == 0
+    assert info["snc_probe_phase"] == "reach_hint_blocked"
+
+
+def test_try_snc_auth_success_merges_fields_and_returns_reachable_auth(
+        _snc_reset, monkeypatch):
+    sapmap_rfc.set_snc_config(secudir="/s", sapcryptolib="/lib.so",
+                              identity="p:CN=lab")
+
+    monkeypatch.setattr(sapmap_rfc, "rfc_system_info_over_snc",
+                        lambda *a, **kw: {
+                            "source": "rfcsi_snc_auth",
+                            "sid": "S4H", "hostname": "s4h01",
+                            "os_type": "Linux", "db_type": "HDB",
+                            "kernel": "793", "sap_release": "758",
+                            "ip": "10.0.0.1",
+                            "error": "", "phase": "",
+                        })
+
+    info = _make_classify_info()
+    out = sapmap_scanner._try_snc_auth_classify(
+        host="10.0.0.1", inst_nr=0, snc_partnername="p:CN=S4H",
+        creds=Credentials(username="SAPMAP00", password="pw", client="001"),
+        saprouter="", timeout=3, state=None, info=info, sid_hint="S4H")
+    assert out == "reachable_auth"
+    assert info["sid"] == "S4H"
+    assert info["hostname"] == "s4h01"
+    assert info["kernel"] == "793"
+    assert info["sysinfo_source"] == "rfcsi_snc_auth"
+
+
+def test_try_snc_auth_logon_failure_returns_enforced_logon_failed(
+        _snc_reset, monkeypatch):
+    sapmap_rfc.set_snc_config(secudir="/s", sapcryptolib="/lib.so",
+                              identity="p:CN=lab")
+
+    monkeypatch.setattr(sapmap_rfc, "rfc_system_info_over_snc",
+                        lambda *a, **kw: {
+                            "source": "", "error": "logon rejected",
+                            "phase": "logon",
+                        })
+
+    info = _make_classify_info()
+    out = sapmap_scanner._try_snc_auth_classify(
+        host="10.0.0.1", inst_nr=0, snc_partnername="p:CN=S4H",
+        creds=Credentials(username="u", password="pw", client="001"),
+        saprouter="", timeout=3, state=None, info=info, sid_hint="S4H")
+    assert out == "enforced_logon_failed"
+    assert info["snc_probe_error"] == "logon rejected"
+
+
+def test_try_snc_auth_handshake_failure_returns_enforced_handshake_failed(
+        _snc_reset, monkeypatch):
+    sapmap_rfc.set_snc_config(secudir="/s", sapcryptolib="/lib.so",
+                              identity="p:CN=lab")
+
+    monkeypatch.setattr(sapmap_rfc, "rfc_system_info_over_snc",
+                        lambda *a, **kw: {
+                            "source": "", "error": "GSS_S_FAILURE",
+                            "phase": "snc_handshake",
+                        })
+
+    info = _make_classify_info()
+    out = sapmap_scanner._try_snc_auth_classify(
+        host="10.0.0.1", inst_nr=0, snc_partnername="p:CN=S4H",
+        creds=Credentials(username="u", password="pw", client="001"),
+        saprouter="", timeout=3, state=None, info=info, sid_hint="S4H")
+    assert out == "enforced_handshake_failed"
+
+
+def test_try_snc_auth_transport_phase_returns_empty_sticky(
+        _snc_reset, monkeypatch):
+    """Transient transport-class error (reset/timeout) MUST NOT downgrade
+    a prior posture.  Helper returns '' so _apply leaves the node
+    untouched."""
+    sapmap_rfc.set_snc_config(secudir="/s", sapcryptolib="/lib.so",
+                              identity="p:CN=lab")
+
+    monkeypatch.setattr(sapmap_rfc, "rfc_system_info_over_snc",
+                        lambda *a, **kw: {
+                            "source": "", "error": "connection reset",
+                            "phase": "transport",
+                        })
+
+    info = _make_classify_info()
+    out = sapmap_scanner._try_snc_auth_classify(
+        host="10.0.0.1", inst_nr=0, snc_partnername="p:CN=S4H",
+        creds=Credentials(username="u", password="pw", client="001"),
+        saprouter="", timeout=3, state=None, info=info, sid_hint="S4H")
+    assert out == ""                                 # sticky
+
+
+# ---- enrich_system_info wiring ----
+
+def test_enrich_signature_declares_snc_partnername_creds_state():
+    """Keyword-only kwargs — present with defaults empty/None."""
+    import inspect
+    params = inspect.signature(sapmap_scanner.enrich_system_info).parameters
+    assert "snc_partnername" in params
+    assert params["snc_partnername"].default == ""
+    assert "creds" in params
+    assert params["creds"].default is None
+    assert "state" in params
+    assert params["state"].default is None
+
+
+# NOTE: The eight-verdict classifier branches are exercised by the
+# ``_try_snc_auth_classify`` direct helper tests above.  Running
+# ``enrich_system_info`` end-to-end would also exercise the ~400-line
+# SAPControl / DIAG / client-enumeration tail that follows the
+# classifier, which does real HTTP/socket I/O against the target host
+# and requires a sprawling fixture set to monkey-patch away — out of
+# scope for a unit test of the classifier.  Live verification happens
+# in Phase K's lab run (NPL + SNC-only box); the signature test below
+# proves the kwargs are wired, and Phase E's GUI route tests pin that
+# enrich is called with them.
