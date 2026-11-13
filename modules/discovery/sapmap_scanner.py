@@ -378,6 +378,41 @@ def _scan_port(host: str, port: int, timeout: float = 3.0,
         return False
 
 
+def _tcp_reach(host: str, port: int, *, timeout: float = 3.0,
+               saprouter: str = "") -> bool:
+    """Lightweight TCP SYN-ACK reachability check for the SNC-aware
+    RFC_SYSTEM_INFO classifier (issue #167).
+
+    Semantics are identical to :func:`_scan_port` (``True`` iff a TCP
+    handshake completes, ``False`` on any error — refused, reset,
+    timeout, SAProuter deny, exception), but the timeout is clamped at
+    4s regardless of the caller's budget: we fire one of these per
+    gateway per scan pass, and a slow dark host would otherwise stall
+    the enrich loop while contributing no information.  Named distinct
+    from ``_scan_port`` so grep-callers can distinguish the two.
+
+    ``saprouter`` is a plain router string (``"host:port"``, same shape
+    the rest of the scanner uses), not a tuple — we route the probe
+    through the operator's SAProuter when one is set, matching the
+    design decision that a router'd SNC-only target should still
+    classify truthfully.
+    """
+    capped = min(timeout, 4.0)
+    try:
+        if saprouter:
+            from sap_saprouter import (
+                connect_through_saprouter, build_route_for_port)
+            route = build_route_for_port(saprouter, host, port)
+            sock = connect_through_saprouter(route, capped)
+            sock.close()
+            return True
+        sock = socket.create_connection((host, port), timeout=capped)
+        sock.close()
+        return True
+    except Exception:
+        return False
+
+
 # SAP DIAG init probe (from nmap-sap / SAPology) — used to verify dispatcher
 import re as _re
 _SAP_DIAG_PROBE = bytes.fromhex(
