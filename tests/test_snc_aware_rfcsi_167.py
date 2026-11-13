@@ -1134,6 +1134,122 @@ def test_report_html_kpi_card_counts_enforced_systems():
     assert m, "SNC-enforced KPI card missing or wrong count"
 
 
+def test_mcp_get_system_detail_schema_declares_snc_posture():
+    """Source-pin the MCP tool's return schema + docstring so clients
+    know snc_posture + snc_posture_last_probe are part of the surface."""
+    import sapmap_mcp_server
+    with open(sapmap_mcp_server.__file__, "r", encoding="utf-8") as fh:
+        mcp_src = fh.read()
+    m = re.search(
+        r'def get_system_detail\(sid: str\)\s*->\s*str:(.+?)(?=@mcp\.tool\(|\Z)',
+        mcp_src, re.S)
+    assert m, "get_system_detail not found in MCP module"
+    body = m.group(1)
+    for key in ("snc_posture", "snc_partnername",
+                "snc_posture_last_probe"):
+        assert f'"{key}"' in body, (
+            f"MCP get_system_detail must surface {key!r}")
+
+
+def test_readme_references_snc_posture_classification():
+    """Source-pin the README's SNC Posture mention."""
+    import os.path as _op
+    repo_root = _op.dirname(_op.dirname(_op.abspath(__file__)))
+    readme_path = _op.join(repo_root, "README.md")
+    with open(readme_path, "r", encoding="utf-8") as fh:
+        readme = fh.read()
+    assert "SNC posture" in readme or "SNC Posture" in readme, (
+        "README must mention the SNC Posture classifier (#167)")
+    # The wiki link must point at the new SNC-Posture page.
+    assert "SNC-Posture" in readme, (
+        "README must link to the SNC-Posture wiki page")
+
+
+def test_sapology_bridge_writes_snc_posture_tcp_only(monkeypatch):
+    """SAPology-sourced nodes get a TCP-only classifier verdict (none/
+    optional/enforced_no_creds) WITHOUT invoking rfc_system_info_over_snc
+    — the full SNC-auth probe lives in a future kloris/SAPology sibling
+    PR, not this one."""
+    # Fake a minimal SAPology SAPSystem object the bridge understands.
+    class _FakeInst:
+        instance_nr = "00"
+        ip = "10.0.0.1"
+        ports = {3300: "gateway"}
+        services = {}
+        info = {}
+        findings = []
+
+    class _FakeSys:
+        sid = "NPL"
+        hostname = "npl01"
+        os_type = "Linux"
+        db_type = "ORA"
+        kernel = "753"
+        sap_release = "753"
+        system_type = "ABAP"
+        clients = []
+        instances = [_FakeInst()]
+        has_hana = False
+        has_maxdb = False
+        has_mssql = False
+        has_oracle = True
+        has_db2 = False
+
+    # Record _tcp_reach calls; monkeypatch rfc_system_info_over_snc to
+    # explode (must NOT be called from the SAPology path).
+    tcp_calls = []
+
+    def _fake_tcp(host, port, *, timeout, saprouter=""):
+        tcp_calls.append((host, port))
+        return True       # SNC port open
+
+    monkeypatch.setattr(sapmap_scanner, "_tcp_reach", _fake_tcp)
+    monkeypatch.setattr(sapmap_rfc, "rfc_system_info_over_snc",
+                        lambda *a, **kw: (_ for _ in ()).throw(
+                            AssertionError("SNC RFC must not fire on "
+                                           "the SAPology bridge path")))
+
+    node = sapmap_scanner._sapology_system_to_node(_FakeSys(), "10.0.0.1")
+    assert node.snc_posture == "optional"      # SID + 4800 open
+    assert tcp_calls == [("10.0.0.1", 4800)]
+
+
+def test_sapology_bridge_writes_enforced_no_creds_when_sid_unknown(
+        monkeypatch):
+    """SAPology-sourced node with UNK_ synthetic SID + 4800 open →
+    'enforced_no_creds' per the SNC-only classification."""
+    class _FakeInst:
+        instance_nr = "00"
+        ip = "10.0.0.1"
+        ports = {3300: "gateway"}
+        services = {}
+        info = {}
+        findings = []
+
+    class _FakeSys:
+        sid = "UNKNOWN"             # bridge normalises to UNK_<ip>
+        hostname = ""
+        os_type = ""
+        db_type = ""
+        kernel = ""
+        sap_release = ""
+        system_type = "SAP"
+        clients = []
+        instances = [_FakeInst()]
+        has_hana = False
+        has_maxdb = False
+        has_mssql = False
+        has_oracle = False
+        has_db2 = False
+
+    monkeypatch.setattr(sapmap_scanner, "_tcp_reach",
+                        lambda h, p, **kw: True)
+
+    node = sapmap_scanner._sapology_system_to_node(_FakeSys(), "10.0.0.1")
+    assert node.snc_posture == "enforced_no_creds"
+    assert node.sid.startswith("UNK_")
+
+
 def test_report_pin_never_rendered_even_with_posture_surfaced():
     """Issue #167 adds snc_posture + snc_info['last_probe_*'] to report.
     The PIN invariant from #137 must still hold: no PSE PIN appears in

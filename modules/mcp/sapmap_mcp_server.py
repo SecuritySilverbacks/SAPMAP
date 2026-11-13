@@ -238,7 +238,23 @@ def get_landscape() -> str:
 @mcp.tool()
 def get_system_detail(sid: str) -> str:
     """Get detailed information about a specific SAP system by SID.
-    Includes instances, credentials (masked), findings, and RFC connections."""
+
+    Includes instances, credentials (masked), findings, RFC
+    connections, and (issue #167) the SNC posture classifier verdict:
+
+    * ``snc_posture`` — one of the 8 values documented in the README
+      SNC Posture Classification section.  Values that carry operator
+      signal: ``enforced_no_creds`` (SAPMAP can see SNC is enforced
+      but can't yet attempt an authenticated probe), the two
+      ``enforced_*_failed`` postures (credential vs. handshake
+      mismatch), ``reachable_auth`` (SAPMAP is logged in via SNC).
+    * ``snc_partnername`` — the target's SNC partner name
+      (``p:CN=...``), either operator-set or harvested unauth from
+      the Message Server's access-point list.
+    * ``snc_posture_last_probe`` — snapshot of
+      ``node.snc_info['last_probe_*']`` with the SNC-aware probe's
+      error message, classified phase (``snc_handshake``/``logon``/
+      ``transport``), and timestamp for operator triage."""
     state = _api("GET", "/api/state")
     nodes = state.get("nodes", {})
     node = nodes.get(sid)
@@ -258,6 +274,14 @@ def get_system_detail(sid: str) -> str:
     connections = [c for c in state.get("connections", [])
                    if c.get("source_sid") == sid or c.get("target_sid") == sid]
 
+    # Issue #167 — SNC posture snapshot for the MCP client.
+    _snc_info = node.get("snc_info") or {}
+    snc_posture_last_probe = {
+        "last_probe_error": _snc_info.get("last_probe_error", ""),
+        "last_probe_phase": _snc_info.get("last_probe_phase", ""),
+        "last_probe_at":    _snc_info.get("last_probe_at"),
+    }
+
     return json.dumps({
         "sid": sid,
         "ip": node.get("ip"),
@@ -273,6 +297,9 @@ def get_system_detail(sid: str) -> str:
         "findings": node.get("findings", []),
         "clients": node.get("clients", []),
         "connections": len(connections),
+        "snc_posture": node.get("snc_posture", ""),
+        "snc_partnername": node.get("snc_partnername", ""),
+        "snc_posture_last_probe": snc_posture_last_probe,
     }, indent=2)
 
 

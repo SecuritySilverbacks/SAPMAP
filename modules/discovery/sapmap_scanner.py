@@ -6963,6 +6963,44 @@ def _sapology_system_to_node(sys_obj, target_ip: str) -> SAPNode:
             node.kernel, node.system_type)
     except Exception:
         node.dpmon_sap_star_available = False
+
+    # Issue #167 — SNC posture classifier, TCP-only path for SAPology-
+    # sourced nodes.  Deep-scan delegates to SAPology for the heavy
+    # fingerprinting and does its own RFC_SYSTEM_INFO; we DON'T re-run
+    # the SNC-auth probe here.  Instead we run only the TCP probe
+    # branch — enough to label 'none' / 'optional' / 'enforced_no_creds'
+    # so the engagement report, GUI tooltip, and MCP schema don't show
+    # '—' for the deep-scan half of a discovery.  A full 'reachable_auth'
+    # upgrade for these nodes requires a sibling kloris/SAPology PR and
+    # is deliberately out of scope here.
+    try:
+        gw_port = None
+        for inst in node.instances:
+            for p, lbl in (inst.ports or {}).items():
+                if isinstance(p, int) and 3300 <= p <= 3399:
+                    gw_port = p
+                    break
+            if gw_port:
+                break
+        if gw_port:
+            _snc_gw = 4800 + (gw_port - 3300)
+            # Reuse the shared _tcp_reach helper so SAProuter tunneling
+            # works for deep-scan-sourced nodes too.
+            _snc_open = _tcp_reach(target_ip, _snc_gw,
+                                   timeout=3.0, saprouter="")
+            sid_found = bool(node.sid) and not node.sid.startswith("UNK_")
+            if sid_found and not _snc_open:
+                node.snc_posture = "none"
+            elif sid_found and _snc_open:
+                node.snc_posture = "optional"
+            elif not sid_found and _snc_open:
+                node.snc_posture = "enforced_no_creds"
+            # else: leave empty (not SAP / dark) — matches fast-scan
+    except Exception:
+        # Classifier is advisory — a probe failure must NEVER break
+        # the SAPology bridge.
+        pass
+
     return node
 
 
