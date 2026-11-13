@@ -11729,26 +11729,46 @@ function showDetails(sid, opts) {
     ${(() => {
       const s = n.snc_info || {};
       const sncName = (n.snc_partnername || '').trim();
-      if (!s.checked && !sncName) return '';
+      const posture = (n.snc_posture || '').trim();
+      if (!s.checked && !sncName && !posture) return '';
       const sid = n.sid;
       const nameRow = sncName
         ? '<div class="detail-row"><span class="detail-key" title="SNC partner identity (snc_partnername). Harvested unauthenticated from the Message Server /msgserver/text/logon access-point list, or operator-set. Used as the partner name for authenticated SNC RFC.">SNC name</span><span class="detail-val" style="font-family:monospace;font-size:11px;color:#58a6ff">' + escHtml(sncName) + '</span></div>'
+        : '';
+      // Issue #167 — SNC posture classifier verdict
+      const POSTURE_LABELS = {
+        'no_sap_signal':             'No SAP signal',
+        'none':                      'No SNC',
+        'optional':                  'SNC optional',
+        'enforced_no_creds':         'SNC enforced (no creds)',
+        'enforced_handshake_failed': 'SNC handshake failed',
+        'enforced_logon_failed':     'SNC logon failed',
+        'reachable_auth':            'SNC reachable (authed)',
+      };
+      const POSTURE_COLORS = {
+        'enforced_no_creds':         '#d29922',
+        'enforced_handshake_failed': '#d29922',
+        'enforced_logon_failed':     '#d29922',
+        'reachable_auth':            '#3fb950',
+      };
+      const postureRow = posture
+        ? '<div class="detail-row"><span class="detail-key" title="Reachability of this target over RFC-over-SNC (SAPMAP issue #167). See the README SNC Posture Classification section for operator action per verdict.">SNC posture</span><span class="detail-val" style="color:' + (POSTURE_COLORS[posture] || '#8b949e') + '">' + escHtml(POSTURE_LABELS[posture] || posture) + '</span></div>'
         : '';
       let title, color, body;
       if (!s.checked) {
         // SNC name harvested, but full posture (QoP / enforcement) not probed yet.
         title = '&#128274; SNC: name discovered';
         color = '#58a6ff';
-        body = nameRow +
+        body = nameRow + postureRow +
           '<div style="color:#8b949e;font-size:11px;margin:4px 0">SNC partner identity harvested unauthenticated from the Message Server. Click <b>Re-probe SNC</b> for the full posture (protocol / QoP / enforcement).</div>';
       } else if (s.error && !s.enabled) {
         title = '&#128274; SNC: probe failed';
         color = '#8b949e';
-        body = nameRow + '<div class="detail-row"><span class="detail-key">Error</span><span class="detail-val">' + escHtml(s.error) + '</span></div>';
+        body = nameRow + postureRow + '<div class="detail-row"><span class="detail-key">Error</span><span class="detail-val">' + escHtml(s.error) + '</span></div>';
       } else if (!s.enabled) {
         title = '&#128275; SNC: not enabled';
         color = '#d29922';
-        body = nameRow + '<div style="color:#8b949e;font-size:11px;margin:4px 0">DIAG/Router traffic is unencrypted on the wire. SAP recommends snc/enabled=1 + snc/data_protection/min=3 for production.</div>';
+        body = nameRow + postureRow + '<div style="color:#8b949e;font-size:11px;margin:4px 0">DIAG/Router traffic is unencrypted on the wire. SAP recommends snc/enabled=1 + snc/data_protection/min=3 for production.</div>';
       } else {
         title = '&#128274; SNC: enabled';
         color = '#3fb950';
@@ -11757,7 +11777,7 @@ function showDetails(sid, opts) {
           const c = val === 3 ? '#3fb950' : '#d29922';
           return '<div class="detail-row"><span class="detail-key">' + label + '</span><span class="detail-val" style="color:' + c + '">' + val + ' (' + lvl + ')</span></div>';
         };
-        body = nameRow +
+        body = nameRow + postureRow +
           '<div class="detail-row"><span class="detail-key">Protocol</span><span class="detail-val">' + escHtml(s.protocol || '') + '</span></div>' +
           (s.mech_label ? '<div class="detail-row"><span class="detail-key">Mechanism</span><span class="detail-val">' + escHtml(s.mech_label) + '</span></div>' : '') +
           (s.cryptolib ? '<div class="detail-row"><span class="detail-key">CryptoLib</span><span class="detail-val" style="font-family:monospace;font-size:11px">' + escHtml(s.cryptolib) + '</span></div>' : '') +

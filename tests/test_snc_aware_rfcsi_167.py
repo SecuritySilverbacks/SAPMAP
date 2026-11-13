@@ -11,6 +11,7 @@ route wiring, report rendering, autopwn skip) is added in later phases.
 
 import json
 import os
+import re
 import socket
 import threading
 import time
@@ -843,6 +844,210 @@ def test_enrich_signature_declares_snc_partnername_creds_state():
 # classifier, which does real HTTP/socket I/O against the target host
 # and requires a sprawling fixture set to monkey-patch away — out of
 # scope for a unit test of the classifier.  Live verification happens
-# in Phase K's lab run (NPL + SNC-only box); the signature test below
-# proves the kwargs are wired, and Phase E's GUI route tests pin that
-# enrich is called with them.
+# in Phase K's lab run (NPL + SNC-only box); the signature test above
+# proves the kwargs are wired, and Phase E's landscape-post-import
+# test below proves enrich is called with them.
+
+
+# ------------------------------------------------------------------
+# Phase E — GUI call-site wiring + consolidation
+# ------------------------------------------------------------------
+
+
+from sapmap_gui import landscape_post_import_discover   # noqa: E402
+from sapmap_models import InstanceInfo                   # noqa: E402
+
+
+def _mk_recording_enrich(return_info=None):
+    """Mimic sapmap_scanner.enrich_system_info; record every call for
+    inspection.  Accepts **kwargs so issue-#167's snc_partnername /
+    creds / state survive signature evolution."""
+    info = dict(return_info or {})
+    calls = []
+
+    def fn(host, gw_port, timeout=10, instance_nrs=None,
+            sid_hint="", saprouter="", **kwargs):
+        rec = {"host": host, "gw_port": gw_port, "timeout": timeout,
+                "instance_nrs": instance_nrs, "sid_hint": sid_hint,
+                "saprouter": saprouter}
+        rec.update(kwargs)
+        calls.append(rec)
+        return dict(info)
+
+    return fn, calls
+
+
+def _mk_client_enum_mock():
+    calls = []
+
+    def fn(host, disp_port, saprouter="", sid_hint=""):
+        calls.append({"host": host, "disp_port": disp_port,
+                       "saprouter": saprouter, "sid_hint": sid_hint})
+        return []
+
+    return fn, calls
+
+
+def _mk_node_state_with_snc(sid="NPL", host="10.0.0.1",
+                             snc_partnername="p:CN=NPL",
+                             credentials=None):
+    """State + node pre-populated with SNC partner name and optional
+    credentials — the operator-driven shape landscape_post_import_discover
+    is supposed to forward."""
+    state = SAPMAPState()
+    inst = InstanceInfo(instance_nr="00", ip=host,
+                        ports={3200: "dispatcher", 3300: "gateway"})
+    node = SAPNode(sid=sid, hostname=host, ip=host,
+                   instances=[inst],
+                   snc_partnername=snc_partnername,
+                   credentials=list(credentials or []))
+    state.add_node(node)
+    return state, node
+
+
+def test_landscape_post_import_discover_passes_snc_kwargs_to_enrich(
+        monkeypatch):
+    """Issue #167 — landscape post-import must forward snc_partnername
+    + creds + state kwargs to enrich_system_info so an SNC-only
+    imported system can be fingerprinted via the SNC-auth path."""
+    import sapmap_scanner
+    # Short-circuit the liveness probe so the enrich_fn is actually
+    # called (L3486 default's _scan_port would otherwise block).
+    monkeypatch.setattr(sapmap_scanner, "_scan_port",
+                        lambda h, p, timeout=2.0, saprouter="": True)
+
+    creds = Credentials(username="SAPMAP00", password="pw", client="001")
+    state, _ = _mk_node_state_with_snc(credentials=[creds])
+    enrich_fn, enrich_calls = _mk_recording_enrich({"sid": "NPL"})
+    client_fn, _ = _mk_client_enum_mock()
+
+    landscape_post_import_discover(
+        state, "NPL", enrich_fn=enrich_fn, client_enum_fn=client_fn)
+
+    assert len(enrich_calls) == 1
+    call = enrich_calls[0]
+    assert call.get("snc_partnername") == "p:CN=NPL"
+    assert call.get("creds") is creds
+    assert call.get("state") is state
+
+
+def test_landscape_post_import_discover_mirrors_posture_onto_node(
+        monkeypatch):
+    """Classifier's ``snc_posture`` return bubbles onto node.snc_posture
+    + mirrors snc_probe_error/phase/at into node.snc_info."""
+    import sapmap_scanner
+    monkeypatch.setattr(sapmap_scanner, "_scan_port",
+                        lambda h, p, timeout=2.0, saprouter="": True)
+
+    creds = Credentials(username="SAPMAP00", password="pw", client="001")
+    state, node = _mk_node_state_with_snc(credentials=[creds])
+    enrich_fn, _ = _mk_recording_enrich({
+        "sid": "NPL", "hostname": "npl01",
+        "snc_posture": "reachable_auth",
+        "sysinfo_source": "rfcsi_snc_auth",
+    })
+    client_fn, _ = _mk_client_enum_mock()
+
+    landscape_post_import_discover(
+        state, "NPL", enrich_fn=enrich_fn, client_enum_fn=client_fn)
+
+    assert node.snc_posture == "reachable_auth"
+
+
+def test_landscape_post_import_discover_records_probe_error_phase(
+        monkeypatch):
+    """Classifier's snc_probe_error / snc_probe_phase / snc_last_probe_at
+    land on node.snc_info['last_probe_*'] for operator triage."""
+    import sapmap_scanner
+    monkeypatch.setattr(sapmap_scanner, "_scan_port",
+                        lambda h, p, timeout=2.0, saprouter="": True)
+
+    creds = Credentials(username="SAPMAP00", password="pw", client="001")
+    state, node = _mk_node_state_with_snc(credentials=[creds])
+    now = time.time()
+    enrich_fn, _ = _mk_recording_enrich({
+        "snc_posture": "enforced_logon_failed",
+        "snc_probe_error": "RFC_LOGON_FAILURE",
+        "snc_probe_phase": "logon",
+        "snc_last_probe_at": now,
+    })
+    client_fn, _ = _mk_client_enum_mock()
+
+    landscape_post_import_discover(
+        state, "NPL", enrich_fn=enrich_fn, client_enum_fn=client_fn)
+
+    assert node.snc_info.get("last_probe_error") == "RFC_LOGON_FAILURE"
+    assert node.snc_info.get("last_probe_phase") == "logon"
+    assert node.snc_info.get("last_probe_at") == now
+    assert node.snc_posture == "enforced_logon_failed"
+
+
+def test_refresh_route_body_dropped_duplicate_snc_authed_block():
+    """Source-pin: the standalone ``get_rfc_system_info(node, _creds)``
+    probe inside the refresh route body is GONE.  enrich_system_info
+    is now the single SNC-aware path per issue #167, and the previous
+    double-probe is an account-lockout bug the consolidation fixes."""
+    import inspect
+    import sapmap_gui
+    # Find the refresh route's function text — a module-level inspect
+    # via getsource on the route function would only return the
+    # decorator-bound wrapper, so grep the file text directly.
+    src_path = inspect.getsourcefile(sapmap_gui)
+    with open(src_path, "r", encoding="utf-8") as fh:
+        source = fh.read()
+    # Isolate the /api/node/<sid>/rfc_system_info route body.
+    m = re.search(
+        r'@app\.route\("/api/node/<sid>/rfc_system_info", method="POST"\)'
+        r'(.+?)(?=@app\.route|\Z)',
+        source, re.S)
+    assert m, "refresh route not found in sapmap_gui.py"
+    route_body = m.group(1)
+    # The standalone post-enrich SNC probe would call
+    # get_rfc_system_info(node, _creds) — if any such call survives
+    # inside the route body, the consolidation regressed.
+    assert "get_rfc_system_info(node" not in route_body, (
+        "refresh route still carries the duplicate SNC-authed probe — "
+        "enrich_system_info is supposed to own that path now (#167).")
+
+
+def test_refresh_route_widens_authoritative_source_to_include_snc_auth():
+    """Source-pin: the sysinfo-authoritative rule must include
+    rfcsi_snc_auth so a reachable_auth result can promote over an
+    earlier empty or lower-confidence source."""
+    import inspect
+    import sapmap_gui
+    src_path = inspect.getsourcefile(sapmap_gui)
+    with open(src_path, "r", encoding="utf-8") as fh:
+        source = fh.read()
+    m = re.search(
+        r'@app\.route\("/api/node/<sid>/rfc_system_info", method="POST"\)'
+        r'(.+?)(?=@app\.route|\Z)',
+        source, re.S)
+    assert m
+    route_body = m.group(1)
+    assert "rfcsi_snc_auth" in route_body, (
+        "refresh route's authoritative-source rule must list "
+        "rfcsi_snc_auth alongside rfcsi_anon (#167).")
+    # And it must be matched via `in _AUTHORITATIVE` or equivalent,
+    # not a bare equality that would miss the new source.
+    assert ("_AUTHORITATIVE" in route_body
+            or 'in ("rfcsi_anon", "rfcsi_snc_auth")' in route_body), (
+        "authoritative check must use a set/tuple containing both "
+        "rfcsi_anon AND rfcsi_snc_auth (#167).")
+
+
+def test_html_renders_snc_posture_row_when_set():
+    """Source-pin: sapmap_html.py carries the POSTURE_LABELS mapping
+    + a postureRow emitter so the GUI node-details panel surfaces
+    the classifier verdict to the operator."""
+    import sapmap_html
+    with open(sapmap_html.__file__, "r", encoding="utf-8") as fh:
+        html_src = fh.read()
+    assert "POSTURE_LABELS" in html_src
+    # Every verdict label must be present in the HTML source so the
+    # GUI never silently fails to label a verdict.
+    for verdict in SNC_POSTURE_VALUES:
+        if not verdict:
+            continue        # '' default — no label needed
+        assert verdict in html_src, (
+            f"verdict {verdict!r} missing from GUI postureRow labels")
