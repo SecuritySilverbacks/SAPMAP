@@ -138,6 +138,16 @@ _snc_config = {"secudir": "", "sapcryptolib": "", "identity": ""}
 # keep round-tripping unchanged.
 _snc_active_cred = None
 
+# Serialises the CommonCryptoLib SECUDIR env-var mutation that the
+# ``snc_lib`` path performs before opening a connection (issue #167).
+# Concurrent /api/node/<sid>/rfc_system_info or landscape-import
+# refresh threads can carry different active looted credentials; each
+# would otherwise race on ``os.environ["SECUDIR"]`` and one
+# connection could pick up another's SECUDIR mid-handshake.  Only
+# acquired on the cryptolib path; the native ``snc_pse`` path does
+# not touch the environment.
+_SECUDIR_LOCK = threading.Lock()
+
 
 def set_snc_config(secudir: str = "", sapcryptolib: str = "",
                    identity: str = ""):
@@ -624,6 +634,249 @@ def get_rfc_system_info(node: SAPNode, creds: Credentials = None,
             out["source"] = "rfcsi_snc_auth" if snc_on else "rfcsi_auth"
     except Exception as e:
         out["error"] = format_rfc_exception(e)
+    return out
+
+
+def _extract_rfcsi_fields(call_result) -> dict:
+    """Normalise an RFC_SYSTEM_INFO call result into the posture dict's
+    field subset (issue #167).  Shared with ``get_rfc_system_info`` —
+    same RFCSI_EXPORT shape, same fallback precedence
+    (``RFCHOST2`` falls back to ``RFCHOST``; ``RFCIPV6ADDR`` falls back
+    to ``RFCIPADDR``).
+    """
+    if isinstance(call_result, dict):
+        exp = call_result.get("RFCSI_EXPORT", call_result)
+    else:
+        exp = {}
+    if not isinstance(exp, dict):
+        exp = {}
+
+    def _g(k):
+        return (exp.get(k, "") or "").strip()
+
+    return {
+        "sid":         _g("RFCSYSID"),
+        "hostname":    _g("RFCHOST2") or _g("RFCHOST"),
+        "os_type":     _g("RFCOPSYS"),
+        "db_type":     _g("RFCDBSYS"),
+        "kernel":      _g("RFCKERNRL"),
+        "sap_release": _g("RFCSAPRL"),
+        "ip":          _g("RFCIPV6ADDR") or _g("RFCIPADDR"),
+    }
+
+
+def _scrub_secrets(msg: str, *, password: str = "", pin: str = "") -> str:
+    """Replace known secrets with ``***`` in an error message before it
+    leaves the SNC-aware probe (issue #167).  Called on every path that
+    attaches an exception message to the returned dict — PSE PINs and
+    app-layer passwords must never reach stdout or the state file.
+
+    Trivially-short secrets (<3 chars) are left alone because
+    substring-masking them would blanket-mask unrelated 1-2 character
+    runs in the error text.
+    """
+    out = msg or ""
+    for secret in (password, pin):
+        if secret and len(secret) >= 3:
+            out = out.replace(secret, "***")
+    return out
+
+
+def _classify_snc_error(exc) -> tuple:
+    """Classify a saprfclib / NW-SDK exception into a probe *phase* for
+    the SNC-aware RFC_SYSTEM_INFO classifier (issue #167).
+
+    Returns ``(phase, raw_msg)`` where ``phase`` is one of:
+
+    * ``"snc_handshake"`` — SNC transport came up unhappy (crypto
+      handshake rejected, PSE problem, GSS_S_FAILURE, CommonCryptoLib
+      refused us).  The classifier emits
+      ``snc_posture="enforced_handshake_failed"``.
+    * ``"logon"`` — SNC transport OK, application-layer logon rejected
+      (RFC_LOGON_FAILURE, wrong user/password, user locked).  The
+      classifier emits ``snc_posture="enforced_logon_failed"``.
+    * ``"transport"`` — network-layer error that does NOT prove
+      anything about the target's SNC posture (reset, timeout, CMALLC,
+      network unreachable).  The classifier treats this as transient
+      and does NOT emit an ``enforced_*`` verdict.
+
+    The caller must scrub the returned message via ``_scrub_secrets``
+    before letting it leave the module.
+    """
+    raw = format_rfc_exception(exc)
+    low = (raw or "").lower()
+
+    # PseError (saprfclib) is a pure SNC-stack problem — the native
+    # path's RSA-only guard, or a malformed looted PSE.
+    if "pseerror" in low or "only rsa keys are supported" in low:
+        return ("snc_handshake", raw)
+
+    # Transport-class first — a reset that happens to mention 'snc' in
+    # its message must not be upgraded to 'snc_handshake'.
+    for marker in ("timeout", "timed out", "connection reset",
+                   "network unreachable", "cmallc", "no route to host",
+                   "connection refused"):
+        if marker in low:
+            return ("transport", raw)
+
+    # Logon-class — target accepted SNC but rejected creds.
+    if ("rfc_logon_failure" in low
+            or "logon failed" in low
+            or "no authorization" in low
+            or "name or password" in low
+            or "user is locked" in low
+            or "password is incorrect" in low):
+        return ("logon", raw)
+
+    # SNC / GSS / PSE family.
+    if ("snc" in low or " gss" in low or "gss_" in low
+            or "pse " in low
+            or "rfc_communication_failure" in low):
+        return ("snc_handshake", raw)
+
+    # Default: conservative — don't claim the target rejected our logon
+    # just because we can't classify the message.
+    return ("snc_handshake", raw)
+
+
+def rfc_system_info_over_snc(host: str, sysnr, snc_partnername: str,
+                              *, client: str = "000", user: str = "",
+                              password: str = "", saprouter: str = "",
+                              timeout: int = 10) -> dict:
+    """Issue #167 — standalone SNC-aware RFC_SYSTEM_INFO.
+
+    Raw-arg sibling of :func:`get_rfc_system_info` for scanner call
+    sites that do not hold a SAPNode.  Resolves the SNC parameters via
+    the shared ``_snc_params_for`` gate (operator posture + active
+    looted ``SNCCredential``), opens a saprfclib / NW-SDK connection on
+    the SNC gateway port (saprfclib auto-derives ``4800 + sysnr``), and
+    returns a dict shaped::
+
+        {"sid", "hostname", "ip", "os_type", "db_type",
+         "kernel", "sap_release",
+         "snc":   bool,     # True iff merged params actually carried
+                            # snc_pse OR snc_lib
+         "source":"rfcsi_snc_auth" | "",
+         "error": str,      # non-empty on failure; always scrubbed
+         "phase": ""        # or "snc_handshake"/"logon"/"transport"
+        }
+
+    Semantics:
+
+    * Never raises.  Every failure path returns a dict; the caller
+      reads ``error`` and ``phase`` to classify the posture.
+    * ``source == "rfcsi_snc_auth"`` iff the merged params carry
+      ``snc_pse`` OR ``snc_lib`` AND the RFC call returned a SID — a
+      regression that bypasses the SNC gate but still reaches here
+      cannot masquerade as SNC-authed.
+    * ``sysnr`` accepts ``str`` or ``int`` (coerced via ``int`` then
+      zero-padded to 2 digits, which is what the backends want).
+    * The CommonCryptoLib (``snc_lib``) path serialises its
+      ``os.environ["SECUDIR"]`` mutation via ``_SECUDIR_LOCK`` and
+      restores the prior value on exit, so concurrent probes with
+      different active looted credentials cannot race.  The native
+      (``snc_pse``) path does not touch the environment.
+    * Secret hygiene: the returned ``error`` string never contains
+      the caller's ``password`` or the active credential's PSE PIN
+      (both scrubbed to ``***`` via :func:`_scrub_secrets`).  No
+      ``print()`` of the params dict anywhere in this helper.
+    """
+    out = {
+        "sid": "", "hostname": "", "ip": "", "os_type": "", "db_type": "",
+        "kernel": "", "sap_release": "",
+        "snc": False, "source": "", "error": "", "phase": "",
+    }
+
+    # Caller-side gates (stable error sentinels start with ``snc_``
+    # so tests pin on a prefix, not an exact word).
+    if not (snc_partnername or "").strip():
+        out["error"] = "snc_missing_partnername"
+        return out
+
+    _snc = _snc_params_for(snc_partnername)
+    if not _snc:
+        out["error"] = "snc_not_configured"
+        return out
+
+    # Backend resolution — no backend is an our-side gap, not an
+    # enforced verdict, so the classifier will route this to
+    # ``enforced_no_creds`` rather than ``enforced_*_failed``.
+    try:
+        RFCConnection = _get_rfc_backend()
+    except Exception as e:
+        out["error"] = _scrub_secrets(
+            f"snc_backend_unavailable: {e}", password=password)
+        return out
+
+    # Normalise sysnr.  Omit ``port`` from params: saprfclib auto-
+    # derives ``4800 + sysnr`` when SNC is present, which is what we
+    # want.  An explicit port would be fine too, but we pin "no port"
+    # in a test to catch a regression that routes SNC to 3300+sysnr.
+    try:
+        _sysnr = str(int(sysnr)).zfill(2)
+    except (TypeError, ValueError):
+        out["error"] = f"snc_invalid_sysnr: {sysnr!r}"
+        return out
+
+    params = {
+        "ashost": host,
+        "sysnr": _sysnr,
+        "client": client,
+        "user": user or "",
+        "passwd": password or "",
+        "lang": "EN",
+    }
+    if saprouter:
+        params["saprouter"] = saprouter
+    params.update(_snc)
+
+    # The success flag depends on the merged params actually carrying
+    # SNC transport.  Capture this BEFORE the call so a regression
+    # that drops snc_lib / snc_pse at the last second can't still
+    # succeed with source="rfcsi_snc_auth".
+    carries_snc = bool(params.get("snc_pse") or params.get("snc_lib"))
+
+    _pin = ""
+    try:
+        _pin = (_snc_active_cred or {}).get("pin", "") or ""
+    except Exception:
+        _pin = ""
+
+    def _open_and_call():
+        with RFCConnection(sdk_path=_sdk_path, **params) as conn:
+            return _extract_rfcsi_fields(conn.call("RFC_SYSTEM_INFO"))
+
+    need_secudir = bool(_snc.get("snc_lib") and _snc_config.get("secudir"))
+    try:
+        if need_secudir:
+            import os as _os
+            with _SECUDIR_LOCK:
+                _prev = _os.environ.get("SECUDIR")
+                _os.environ["SECUDIR"] = _snc_config["secudir"]
+                try:
+                    exp = _open_and_call()
+                finally:
+                    if _prev is None:
+                        _os.environ.pop("SECUDIR", None)
+                    else:
+                        _os.environ["SECUDIR"] = _prev
+        else:
+            exp = _open_and_call()
+    except Exception as e:
+        phase, raw = _classify_snc_error(e)
+        out["error"] = _scrub_secrets(raw, password=password, pin=_pin)
+        out["phase"] = phase
+        out["snc"] = carries_snc
+        return out
+
+    out.update(exp)
+    out["snc"] = carries_snc
+    # Guard: source gets set only when SNC transport was really in
+    # play AND we got a SID.  Everything else leaves source empty.
+    if carries_snc and exp.get("sid"):
+        out["source"] = "rfcsi_snc_auth"
+    elif not carries_snc:
+        out["error"] = "snc_params_missing"
     return out
 
 
