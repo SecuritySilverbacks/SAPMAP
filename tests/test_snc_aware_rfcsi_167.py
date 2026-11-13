@@ -200,17 +200,40 @@ def test_tcp_reach_never_raises_on_arbitrary_exception(monkeypatch):
 
 @pytest.fixture
 def _snc_reset():
-    """Save/restore BOTH SNC module globals and SECUDIR env, so a test
-    that mutates any of them leaves no footprint for later tests."""
-    saved_cfg = dict(sapmap_rfc._snc_config)
-    saved_cred = (dict(sapmap_rfc._snc_active_cred)
-                  if sapmap_rfc._snc_active_cred else None)
+    """Snapshot SNC module globals + SECUDIR env, THEN scrub to a
+    pristine state at setup so a leaked ``_snc_active_cred`` from an
+    earlier test (e.g. test_rfc_snc_looted_pse) doesn't make
+    ``_snc_params_for`` take the looted-cred branch and return ``{}``
+    for an operator-posture test (which would silently route every
+    `_try_snc_auth_*` test's verdict to ``enforced_no_creds``).
+    Restore the snapshot at teardown so OUR tests don't leak either.
+
+    Also re-resolves ``sapmap_rfc`` from ``sys.modules`` on setup:
+    ``tests/test_rfc_auto_fallback.py`` deletes the module from
+    sys.modules and re-imports it to test the backend-selection logic,
+    which leaves our file-level ``import sapmap_rfc`` pointing at a
+    stale module object.  Writes to the stale object don't reach the
+    live one that ``_try_snc_auth_classify`` resolves via its inline
+    ``import sapmap_rfc``, so every operator-config-based test would
+    silently see an empty ``_snc_config`` and route to
+    ``enforced_no_creds``.  Re-binding the module in ``globals()``
+    keeps both sides pointing at the same module object."""
+    import sys
+    live = sys.modules.get("sapmap_rfc", sapmap_rfc)
+    globals()["sapmap_rfc"] = live
+    saved_cfg = dict(live._snc_config)
+    saved_cred = (dict(live._snc_active_cred)
+                  if live._snc_active_cred else None)
     saved_env = os.environ.get("SECUDIR")
+    # Scrub to pristine at setup.
+    live.set_snc_config(secudir="", sapcryptolib="", identity="")
+    live.set_snc_identity(None)
+    os.environ.pop("SECUDIR", None)
     try:
         yield
     finally:
-        sapmap_rfc.set_snc_config(**saved_cfg)
-        sapmap_rfc.set_snc_identity(saved_cred)
+        live.set_snc_config(**saved_cfg)
+        live.set_snc_identity(saved_cred)
         if saved_env is None:
             os.environ.pop("SECUDIR", None)
         else:
