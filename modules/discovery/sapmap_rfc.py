@@ -99,6 +99,18 @@ _sdk_path = None
 # Pure-Python RFC backend preference
 _use_pure_rfc = False
 
+# ABAP-initial DATS and the "valid forever" far-future date, as the internal
+# YYYYMMDD strings SAP expects.  A type-D (DATS) field's ABAP-initial value is
+# "00000000", NOT blanks.  The pure-Python RFC backend (saprfclib) pads an
+# unset/empty DATS structure field with spaces; SAP's BAPI_USER_CREATE1 then
+# rejects the (all-blank) valid-from GLTGV as "Invalid date" (message 00/302).
+# Passing the initial explicitly keeps user-create backend-agnostic: SAP reads
+# "00000000" as "no date set" and defaults valid-from to the creation date —
+# matching the C-SDK behaviour SAPMAP relied on before the saprfclib fallback
+# (issue #215).
+SAP_DATS_INITIAL = "00000000"   # ABAP-initial DATS → SAP defaults the field
+SAP_DATS_FOREVER = "99991231"   # valid-to far future ("no expiry")
+
 
 def set_sdk_path(path: str):
     """Set the NW RFC SDK library path globally."""
@@ -1654,7 +1666,12 @@ def canary_create_user_probe(node: SAPNode,
                     USERNAME=username,
                     PASSWORD={"BAPIPWD": "Sapmap_Canary_1!"},
                     ADDRESS={"LASTNAME": "SAPMAP CANARY"},
-                    LOGONDATA={"USTYP": "A"},
+                    # Explicit valid-from/valid-to — the pure saprfclib
+                    # backend sends blanks for an unset DATS, which SAP
+                    # rejects as "Invalid date" (issue #215).
+                    LOGONDATA={"USTYP": "A",
+                               "GLTGV": SAP_DATS_INITIAL,
+                               "GLTGB": SAP_DATS_FOREVER},
                 )
                 errs = [m for m in (r.get("RETURN") or [])
                         if (m.get("TYPE") or "").upper() in ("E", "A")]
@@ -2128,7 +2145,8 @@ def create_user_via_bapi(node: SAPNode, username: str, password: str,
 
             # Step 1: Create the user
             print(f"[*] {node.sid}: [1/2] calling {BAPI_USER_CREATE} "
-                  f"USERNAME={username} USTYP=S GLTGB=99991231 "
+                  f"USERNAME={username} USTYP=S "
+                  f"GLTGV={SAP_DATS_INITIAL} GLTGB={SAP_DATS_FOREVER} "
                   f"FIRSTNAME=SAPMAP LASTNAME=Security")
             t1 = _time.time()
             create_result = conn.call(
@@ -2137,7 +2155,12 @@ def create_user_via_bapi(node: SAPNode, username: str, password: str,
                 PASSWORD={"BAPIPWD": password},
                 LOGONDATA={
                     "USTYP": "S",      # System/service user
-                    "GLTGB": "99991231",  # Valid to (far future)
+                    # Valid-from: ABAP-initial so SAP defaults it to today.
+                    # MUST be explicit — the pure saprfclib backend would
+                    # otherwise send blanks here and SAP rejects a blank DATS
+                    # as "Invalid date" (issue #215).
+                    "GLTGV": SAP_DATS_INITIAL,
+                    "GLTGB": SAP_DATS_FOREVER,  # Valid to (far future)
                 },
                 ADDRESS={
                     "FIRSTNAME": "SAPMAP",
