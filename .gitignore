@@ -10,6 +10,12 @@ dev_rfc.log
 .mcp.json
 .vsp.json
 vsp
+# Per-engagement netrc credential files operators drop at the repo
+# root during a run (e.g. .s4h_netrc / .npl_netrc / .aba_netrc);
+# never commit.  Both the generic .netrc and the .<sid>_netrc
+# convention are covered.
+.netrc
+.*_netrc
 # Binary files / SDKs
 nwrfcsdk/
 .DS_Store
