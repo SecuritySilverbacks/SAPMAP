@@ -6705,6 +6705,72 @@ def update_node_production_status(node: SAPNode, creds: Credentials = None):
 # TCP/IP destination creation (sapxpg remote test)
 # ---------------------------------------------------------------------------
 
+# Issue #221: when DEST_RFC_TCPIP_CREATE fails, cache the failure on the
+# source node so a looping caller (LPE binary chunk upload, transport-
+# import chunk loop, miniplasma per-command walk) does not re-run the
+# full RFCDES scan plus the doomed create once per loop iteration; the
+# reporter saw 5+ minutes of retries during a single pentest run.
+#
+# Two-tier TTL (adversarial-review mitigation): a persistent policy
+# denial (missing S_RFC_ADM — SAP FL046 — or gateway SDEST refusal) is
+# locked for the full 300 s (matches the SNC posture classifier so per-
+# node short-circuits behave consistently; an operator granting the
+# authority needs a human SAP-admin roundtrip anyway). An unclassified /
+# transient failure (TCP RST, saprouter blip, a connection error inside
+# create_tcpip_destination itself) only caches for 15 s so a flaky link
+# does not silently lock SXPG for the rest of the engagement window.
+_SXPG_CREATE_RETRY_TTL_S = 300
+_SXPG_CREATE_RETRY_TTL_SHORT_S = 15
+
+# Substrings the SAP kernel / NW RFC SDK uses when a policy denial
+# refuses DEST_RFC_TCPIP_CREATE at the application layer. Matched case-
+# insensitively against the failure message returned by
+# create_tcpip_destination. Anything NOT matching is treated as a
+# transient / unknown error and gets the short TTL.
+_SXPG_POLICY_DENIAL_MARKERS = (
+    "fl046",                    # SAP message: no authorization for S_RFC_ADM
+    "no authorization",         # common English rendering
+    "not authorized",
+    "s_rfc_adm",
+    "sdest e 017",              # gateway SNC-refusal on registered program
+    "sdest e",                  # broader SDEST policy family
+    "name or password",         # bad creds — policy, not transport
+    "user is locked",
+)
+
+
+def _classify_sxpg_create_error_ttl(msg: str) -> int:
+    """Pick the negative-cache TTL for a failed DEST_RFC_TCPIP_CREATE.
+
+    Persistent policy denials (missing authority, gateway refusal) get
+    the full window because an operator fix needs a SAP-admin change
+    that will not land inside a one-minute retry. Anything that could
+    plausibly be transient (connection reset, timeout, generic exception
+    string with no known policy marker) gets a short window so a flaky
+    link does not silently lock SXPG for 5 minutes.
+    """
+    lower = (msg or "").lower()
+    for marker in _SXPG_POLICY_DENIAL_MARKERS:
+        if marker in lower:
+            return _SXPG_CREATE_RETRY_TTL_S
+    return _SXPG_CREATE_RETRY_TTL_SHORT_S
+
+
+def clear_sxpg_dest_cache(node) -> None:
+    """Drop both the positive and negative SXPG-dest caches on ``node``.
+
+    Call this when the operator fixed a condition that caused earlier
+    create attempts to fail (granted S_RFC_ADM, restarted the gateway,
+    rotated credentials) and wants the next ``execute_local_command``
+    to retry immediately instead of waiting for the TTL to expire.
+    """
+    for _attr in ("_sxpg_dest_cache", "_sxpg_dest_cache_err"):
+        try:
+            delattr(node, _attr)
+        except Exception:
+            pass
+
+
 def _resolve_gateway_service(node, snc=None) -> str:
     """Pick the gateway service port for a registered-program (sapxpg)
     TCP/IP destination on ``node`` — SNC-aware (issue #172).
@@ -6997,6 +7063,51 @@ def execute_local_command(node: SAPNode, command: str, params: str,
             except Exception:
                 pass
 
+    # Negative cache (issue #221): when a recent DEST_RFC_TCPIP_CREATE
+    # attempt on this node failed (missing S_RFC_ADM / FL046, gateway
+    # refusal, transient network blip, etc.), short-circuit for the
+    # tuple's cached TTL window instead of re-running the full RFCDES
+    # scan plus a doomed create attempt on every call. Without this a
+    # looping caller (LPE chunk upload, transport-import chunk loop,
+    # miniplasma per-command walk) spent 5+ minutes grinding through
+    # the same failure. Operator-visible first short-circuit tells
+    # them we gave up on purpose; subsequent short-circuits are silent
+    # (debug only) so the chunk loop does not spam. Policy denials get
+    # the full TTL, transient failures a short TTL — see
+    # _classify_sxpg_create_error_ttl. The "print once per cache
+    # entry" invariant is approximate under concurrent callers on the
+    # same node — CPython tuple assignment is atomic so the cache
+    # never tears, but two threads can both observe already_printed=
+    # False in the gap before the write and emit the banner twice.
+    cached_err = getattr(node, "_sxpg_dest_cache_err", None)
+    if cached_err is not None:
+        err_msg, err_ts, already_printed, ttl_s = cached_err
+        elapsed = time.time() - err_ts
+        if elapsed < ttl_s:
+            if not already_printed:
+                print(f"[*] {node.sid}: Skipping TCP/IP dest create for "
+                      f"{ttl_s}s — recent failure cached ({err_msg}). "
+                      f"Further calls on this node short-circuit silently "
+                      f"until the TTL expires. Restart SAPMAP to retry "
+                      f"sooner if the cause has been fixed.")
+                try:
+                    node._sxpg_dest_cache_err = (
+                        err_msg, err_ts, True, ttl_s)
+                except Exception:
+                    pass
+            else:
+                logger.debug(
+                    f"{node.sid}: SXPG dest create still in failure "
+                    f"window ({int(elapsed)}s < {ttl_s}s), returning "
+                    f"cached error")
+            result["error"] = f"TCP/IP dest creation (cached): {err_msg}"
+            return result
+        # TTL expired — clear and fall through to a fresh attempt.
+        try:
+            delattr(node, "_sxpg_dest_cache_err")
+        except Exception:
+            pass
+
     # Look for an existing self-referencing TCP/IP destination.  This
     # is critical when the connecting user lacks S_RFC_ADM (FL046 on
     # DEST_RFC_TCPIP_CREATE): if any sapxpg dest pointing at this host
@@ -7093,6 +7204,21 @@ def execute_local_command(node: SAPNode, command: str, params: str,
         )
         if not create_result["success"]:
             result["error"] = f"Could not create TCP/IP dest: {create_result['message']}"
+            # Issue #221: remember the failure on the node so the next
+            # call in a loop short-circuits instead of retrying the
+            # full RFCDES scan + create. Tuple is (message, ts,
+            # already_printed_once, ttl_s) — the "printed" flag keeps
+            # bulk callers from spamming the console with the same
+            # explanation; ttl_s is picked per-error so a transient
+            # network blip clears in 15 s but a persistent policy
+            # denial (FL046 / SDEST refusal / bad creds) holds for the
+            # full 300 s.
+            _msg = create_result["message"]
+            _ttl = _classify_sxpg_create_error_ttl(_msg)
+            try:
+                node._sxpg_dest_cache_err = (_msg, time.time(), False, _ttl)
+            except Exception:
+                pass
             return result
         dest_name = create_result["dest_name"]
 
@@ -7101,6 +7227,14 @@ def execute_local_command(node: SAPNode, command: str, params: str,
     # affect to_dict() because to_dict explicitly lists fields).
     try:
         node._sxpg_dest_cache = dest_name
+        # Success supersedes any stale failure cache from a prior
+        # attempt on this node — otherwise a transient failure that
+        # the operator then resolved would leave _sxpg_dest_cache_err
+        # dangling (harmless but misleading in debug dumps).
+        try:
+            delattr(node, "_sxpg_dest_cache_err")
+        except Exception:
+            pass
     except Exception:
         pass
 
