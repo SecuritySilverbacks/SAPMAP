@@ -10,12 +10,40 @@ The RFC check cache persists across sessions to prevent user lockouts.
 import json
 import os
 import logging
+import sys
+import traceback
 from datetime import datetime
 from pathlib import Path
 
 from sapmap_models import SAPMAPState
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Silent-wipe detection (issue #217)
+#
+# A pentest in 2026-11 lost a looted-PSE wallet entry + forged-ticket bundles
+# between two consecutive autosaves with no operator action.  Code inspection
+# could not find a single call site that explicitly wipes the wallet, so a
+# future-proof defence is to make a destructive diff IMPOSSIBLE to miss:
+# before overwriting state to disk, compare the new state to the MOST RECENT
+# prior autosave.  On populated → empty regression for the fields flagged in
+# #217 (snc_credentials, forged_tickets), write a ``.WIPE_TRACE_<ts>.txt``
+# beside the new file carrying the stack trace at save-time + the per-field
+# diff, and emit a loud stderr banner.  Non-blocking — the operator may have a
+# legitimate reason to clear them; the trace file is diagnostic, not a veto.
+#
+# Scope is narrow on purpose: only #137-wallet + MYSAPSSO2 forgery loot.
+# Both are hard-won loot that has triggered the historical silent-wipe.
+# Node-level fields (``node.sapsys_cert_issuer_dn``, ``node.forged_tickets``)
+# are covered implicitly via the global ``state.forged_tickets`` list the
+# forge chain mirrors into.
+# ---------------------------------------------------------------------------
+
+# Field names in state.to_dict() that are tracked for silent-wipe detection.
+# Each value here is a count; the detector fires when a value was >0 in the
+# most-recent prior autosave and is now 0 in the pending save.
+_WIPE_TRACKED_FIELDS = ("snc_credentials", "forged_tickets")
 
 # Project root — this file now lives in modules/core/, so climb two
 # directory levels to reach the SAPMAP project root.  All session
@@ -54,6 +82,150 @@ def ensure_loot_dir(subdir: str = "") -> str:
     return target
 
 
+def _tracked_field_counts(payload: dict) -> dict:
+    """Return {field_name: count} for every #217-tracked field on a
+    state payload (the dict produced by ``state.to_dict()``).
+
+    Handles the dict-shaped (``snc_credentials``) and list-shaped
+    (``forged_tickets``) variants.  Unknown / missing fields count as 0
+    so a schema older than #137 compares cleanly against a current save.
+    """
+    counts: dict = {}
+    for name in _WIPE_TRACKED_FIELDS:
+        v = payload.get(name)
+        if isinstance(v, dict):
+            counts[name] = len(v)
+        elif isinstance(v, list):
+            counts[name] = len(v)
+        else:
+            counts[name] = 0
+    return counts
+
+
+def _most_recent_autosave(state_dir: str, exclude_path: str = "") -> str:
+    """Return the full path of the most-recent prior .sapmap under
+    ``state_dir`` (excluding ``exclude_path`` — the file we're about to
+    write), or ``""`` when there is none.
+
+    The glob is cheap: a typical states/ directory holds a handful of
+    autosaves per engagement.  Sorted by mtime so a non-autosave file
+    (operator-named save) is still picked up when it's the newest.
+    """
+    try:
+        if not os.path.isdir(state_dir):
+            return ""
+        exclude_abs = os.path.abspath(exclude_path) if exclude_path else ""
+        candidates = []
+        for f in Path(state_dir).glob("*.sapmap"):
+            try:
+                abs_f = os.path.abspath(str(f))
+                if abs_f == exclude_abs:
+                    continue
+                candidates.append((f.stat().st_mtime, abs_f))
+            except Exception:
+                continue
+        if not candidates:
+            return ""
+        candidates.sort(reverse=True)
+        return candidates[0][1]
+    except Exception:
+        return ""
+
+
+def _load_prior_counts(prior_path: str) -> dict:
+    """Read just the tracked field counts off the most-recent prior
+    .sapmap.  Returns ``{}`` on any read / parse failure — detection
+    silently stays off rather than blocking the save.
+    """
+    if not prior_path or not os.path.isfile(prior_path):
+        return {}
+    try:
+        with open(prior_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            return {}
+        return _tracked_field_counts(data)
+    except Exception as e:
+        logger.debug(f"Could not read prior autosave for wipe detection: {e}")
+        return {}
+
+
+def _check_for_silent_wipe(filepath: str,
+                           prior_path: str,
+                           prior_counts: dict,
+                           new_counts: dict,
+                           caller_stack: str) -> str:
+    """When a tracked field went populated → empty between ``prior_path``
+    and the save about to land at ``filepath``, drop a stack-trace file
+    beside it and print a stderr banner.  Returns the trace path or ``""``
+    when nothing fired.
+
+    Non-blocking: the save still completes.  The trace file is the forensic
+    hook #217 asked for — operators attach it to the bug report so the
+    code path that wiped the wallet / forged tickets can be fixed.
+    """
+    wiped = []
+    for name in _WIPE_TRACKED_FIELDS:
+        before = prior_counts.get(name, 0)
+        after = new_counts.get(name, 0)
+        if before > 0 and after == 0:
+            wiped.append((name, before, after))
+    if not wiped:
+        return ""
+
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    # Place the trace file beside the save we're about to write, so an
+    # operator who spots the regression after the fact finds the diagnostic
+    # next to the file whose contents surprised them.  `.WIPE_TRACE` is a
+    # distinctive suffix so `rsync --delete` and autosave-prune scripts
+    # never catch it by mistake.
+    trace_path = f"{filepath}.WIPE_TRACE_{ts}.txt"
+
+    lines = []
+    lines.append(
+        "SAPMAP silent-wipe detection (issue #217)\n"
+        "=========================================\n"
+    )
+    lines.append(f"Save target     : {filepath}\n")
+    lines.append(f"Prior autosave  : {prior_path}\n")
+    lines.append(f"Detected at     : {datetime.now().isoformat()}\n\n")
+    lines.append("Tracked-field regression (populated → empty):\n")
+    for name, before, after in wiped:
+        lines.append(f"  - {name:<20}  {before}  ->  {after}\n")
+    lines.append("\nSave-time stack trace:\n")
+    lines.append(caller_stack)
+    lines.append(
+        "\nWhat to do:\n"
+        "  1. Restore the loot by loading the prior autosave listed above.\n"
+        "  2. Attach THIS file to the SAPMAP GitHub issue (#217) so the\n"
+        "     code path that wiped the fields can be fixed upstream.\n"
+        "  3. The save still completed — this trace is diagnostic, not a veto.\n"
+    )
+    try:
+        with open(trace_path, "w", encoding="utf-8") as f:
+            f.writelines(lines)
+    except Exception as e:
+        logger.warning(f"Could not write silent-wipe trace: {e}")
+        return ""
+
+    # Loud banner — stderr so it's unmissable in a terminal log.
+    banner = (
+        "\n"
+        "============================================================\n"
+        "  [!] SAPMAP silent-wipe detected (issue #217)\n"
+        "      " + ", ".join(
+            f"{n}: {b}->{a}" for n, b, a in wiped) + "\n"
+        f"      trace: {trace_path}\n"
+        "============================================================\n"
+    )
+    try:
+        print(banner, file=sys.stderr)
+    except Exception:
+        pass
+    logger.warning(banner.strip())
+    return trace_path
+
+
 def save_state(state: SAPMAPState, filepath: str) -> str:
     """Save full SAPMAP state to a JSON file.
 
@@ -84,6 +256,27 @@ def save_state(state: SAPMAPState, filepath: str) -> str:
             payload["_findings"] = _sf.snapshot()
         except Exception:
             pass
+
+        # #217 silent-wipe detection — compare the incoming state's
+        # tracked-field counts against the most-recent prior autosave.
+        # Runs BEFORE the write so the trace is anchored to the moment we
+        # noticed the regression, not a later probe.  Capturing the stack
+        # here (via traceback.format_stack()) also pins down WHICH caller
+        # drove the save, which is the forensic signal the issue asked
+        # for.
+        try:
+            prior_path = _most_recent_autosave(
+                os.path.dirname(filepath) or STATE_DIR, exclude_path=filepath)
+            prior_counts = _load_prior_counts(prior_path)
+            if prior_counts:
+                new_counts = _tracked_field_counts(payload)
+                caller_stack = "".join(traceback.format_stack())
+                _check_for_silent_wipe(
+                    filepath, prior_path, prior_counts, new_counts,
+                    caller_stack)
+        except Exception as _e:
+            logger.debug(f"Silent-wipe detection skipped: {_e}")
+
         with open(filepath, "w", encoding="utf-8") as f:
             _json.dump(payload, f, indent=2)
 
