@@ -6863,8 +6863,112 @@ def discover_systems(targets: list, instance_range: tuple = DEFAULT_INSTANCE_RAN
     return nodes
 
 
-def _sapology_system_to_node(sys_obj, target_ip: str) -> SAPNode:
-    """Convert a SAPology SAPSystem object to a SAPMAP SAPNode."""
+def _fn_accepts_kw(fn, name: str) -> bool:
+    """True when callable ``fn`` accepts a keyword parameter ``name``.
+
+    Used to feature-detect whether the imported SAPology is new enough to
+    accept the opt-in creds bundle (issue #220).  Robust across older,
+    un-versioned SAPology checkouts that predate the ``creds`` kwarg —
+    those simply report False and we never pass the bundle (and never
+    attempt the deep-scan SNC-auth upgrade), preserving today's behaviour.
+    """
+    try:
+        import inspect as _inspect
+        return name in _inspect.signature(fn).parameters
+    except Exception:
+        return False
+
+
+def _build_sapology_creds_bundle(snc_partnername, creds, state):
+    """Assemble the opt-in creds bundle SAPMAP hands to SAPology's deep-scan
+    entry points (issue #220), or ``None`` when there is nothing to pass.
+
+    Carries the operator's SNC partner name, the picked node credential's
+    user/password (so a future SAPology can run creds-bearing probes), and a
+    secrets-free snapshot of the operator's active SNC posture.  The actual
+    SNC-auth handshake stays on SAPMAP's side (``_try_snc_auth_classify``);
+    this bundle is the contract that lets SAPology thread the SNC context
+    through discovery and makes the two sibling PRs ship together.
+    """
+    name = (snc_partnername or "").strip()
+    user = _cred_user(creds) if creds is not None else ""
+    pw = (getattr(creds, "password", "") or "") if creds is not None else ""
+    if not (name or (user and pw)):
+        return None
+    bundle = {
+        "user": user,
+        "password": pw,
+        "snc_partnername": name,
+        "snc_config": {},
+    }
+    # Secrets-free snapshot of the operator's active SNC posture — flags
+    # only, never the SECUDIR contents, cryptolib path, PIN or password.
+    try:
+        import sapmap_rfc
+        cfg = dict(getattr(sapmap_rfc, "_snc_config", {}) or {})
+        bundle["snc_config"] = {
+            "secudir_set": bool(cfg.get("secudir")),
+            "sapcryptolib_set": bool(cfg.get("sapcryptolib")),
+            "identity": cfg.get("identity", ""),
+            "active_looted_pse": bool(
+                getattr(sapmap_rfc, "_snc_active_cred", None)),
+        }
+    except Exception:
+        pass
+    return bundle
+
+
+def _merge_snc_sysinfo_into_node(node, info):
+    """Backfill a node from a successful SNC-auth RFC_SYSTEM_INFO probe —
+    upgrade a synthetic ``UNK_`` SID to the real one the probe recovered and
+    fill blank hostname / OS / DB / kernel / release (issue #220; mirrors the
+    shallow enrich path's merge)."""
+    real_sid = (info.get("sid") or "").strip()
+    if real_sid and (not node.sid or node.sid.startswith("UNK_")):
+        node.sid = real_sid
+    for attr, key in (("hostname", "hostname"), ("os_type", "os_type"),
+                      ("db_type", "db_type"), ("kernel", "kernel"),
+                      ("sap_release", "sap_release")):
+        val = (info.get(key) or "").strip()
+        if val and not (getattr(node, attr, "") or ""):
+            setattr(node, attr, val)
+
+
+def _rec_snc_probe_meta(node, info):
+    """Mirror the classifier's probe error / phase / timestamp onto
+    ``node.snc_info`` for operator triage — the same keys the GUI enrich-site
+    records (issue #220)."""
+    if not isinstance(getattr(node, "snc_info", None), dict):
+        node.snc_info = {}
+    pe = info.get("snc_probe_error")
+    pp = info.get("snc_probe_phase")
+    pa = info.get("snc_last_probe_at")
+    if pe:
+        node.snc_info["last_probe_error"] = pe
+    if pp:
+        node.snc_info["last_probe_phase"] = pp
+    if pa:
+        node.snc_info["last_probe_at"] = pa
+
+
+def _sapology_system_to_node(sys_obj, target_ip: str, *,
+                             snc_partnername: str = "", creds=None,
+                             state=None, saprouter: str = "",
+                             snc_auth_enabled: bool = False,
+                             sid_hint: str = "",
+                             timeout: float = DEFAULT_TIMEOUT) -> SAPNode:
+    """Convert a SAPology SAPSystem object to a SAPMAP SAPNode.
+
+    Issue #220 — the keyword-only ``snc_*`` / ``creds`` / ``state`` /
+    ``snc_auth_enabled`` args are the deep-scan SNC context.  They default to
+    the no-op values, so every existing 2-positional-arg caller keeps the
+    original TCP-only SNC classification.  When ``snc_auth_enabled`` is set
+    (the deep-scan caller threaded an operator SNC context AND the imported
+    SAPology accepts the creds bundle), an SNC-enforced node runs the same
+    creds-bearing SNC-auth probe the shallow ``enrich_system_info`` path uses
+    — reach-hint gate, 300 s rate limit and the ``reachable_auth`` promotion
+    all come from the shared ``_try_snc_auth_classify`` helper.
+    """
 
     instances = []
     for inst in sys_obj.instances:
@@ -6964,15 +7068,17 @@ def _sapology_system_to_node(sys_obj, target_ip: str) -> SAPNode:
     except Exception:
         node.dpmon_sap_star_available = False
 
-    # Issue #167 — SNC posture classifier, TCP-only path for SAPology-
-    # sourced nodes.  Deep-scan delegates to SAPology for the heavy
-    # fingerprinting and does its own RFC_SYSTEM_INFO; we DON'T re-run
-    # the SNC-auth probe here.  Instead we run only the TCP probe
-    # branch — enough to label 'none' / 'optional' / 'enforced_no_creds'
-    # so the engagement report, GUI tooltip, and MCP schema don't show
-    # '—' for the deep-scan half of a discovery.  A full 'reachable_auth'
-    # upgrade for these nodes requires a sibling kloris/SAPology PR and
-    # is deliberately out of scope here.
+    # Issue #167 / #220 — SNC posture classifier for SAPology-sourced nodes.
+    # Deep-scan delegates to SAPology for the heavy fingerprinting + its own
+    # RFC_SYSTEM_INFO.  The TCP-only tail labels 'none' / 'optional' /
+    # 'enforced_no_creds' so the report / GUI / MCP never show '—'.
+    #
+    # Issue #220: when the deep-scan caller threaded an operator SNC context
+    # AND the imported SAPology accepts the creds bundle (``snc_auth_enabled``),
+    # the SNC-enforced branch runs the SAME creds-bearing probe the shallow
+    # ``enrich_system_info`` path uses — reach-hint gate, 300 s rate limit and
+    # the 'reachable_auth' promotion all come from ``_try_snc_auth_classify``.
+    # Without that context we stay at the TCP-only verdict (today's behaviour).
     try:
         gw_port = None
         for inst in node.instances:
@@ -6987,14 +7093,42 @@ def _sapology_system_to_node(sys_obj, target_ip: str) -> SAPNode:
             # Reuse the shared _tcp_reach helper so SAProuter tunneling
             # works for deep-scan-sourced nodes too.
             _snc_open = _tcp_reach(target_ip, _snc_gw,
-                                   timeout=3.0, saprouter="")
+                                   timeout=3.0, saprouter=saprouter)
             sid_found = bool(node.sid) and not node.sid.startswith("UNK_")
             if sid_found and not _snc_open:
                 node.snc_posture = "none"
             elif sid_found and _snc_open:
                 node.snc_posture = "optional"
             elif not sid_found and _snc_open:
-                node.snc_posture = "enforced_no_creds"
+                # Plain probe blocked, SNC gateway open → SNC-enforced.
+                # Prefer the operator's per-node partner, else the one
+                # SAPology stamped onto the system from the creds bundle.
+                _partner = ((snc_partnername or "").strip()
+                            or (getattr(sys_obj, "snc_partnername", "")
+                                or "").strip())
+                if snc_auth_enabled and _partner and creds is not None:
+                    _info = {"sid": node.sid if sid_found else "",
+                             "hostname": node.hostname or ""}
+                    _posture = _try_snc_auth_classify(
+                        host=target_ip,
+                        inst_nr=(gw_port - 3300),
+                        snc_partnername=_partner,
+                        creds=creds,
+                        saprouter=saprouter,
+                        timeout=timeout,
+                        state=state,
+                        info=_info,
+                        sid_hint=(sid_hint or (node.sid if sid_found else "")),
+                    )
+                    # '' is sticky (rate-limited / transient transport) —
+                    # fall back to enforced_no_creds so the node is still
+                    # labelled on a first-ever deep-scan classification.
+                    node.snc_posture = _posture or "enforced_no_creds"
+                    if _posture == "reachable_auth":
+                        _merge_snc_sysinfo_into_node(node, _info)
+                    _rec_snc_probe_meta(node, _info)
+                else:
+                    node.snc_posture = "enforced_no_creds"
             # else: leave empty (not SAP / dark) — matches fast-scan
     except Exception:
         # Classifier is advisory — a probe failure must NEVER break
@@ -7190,13 +7324,21 @@ def _deep_scan_with_sapology(targets, instance_range, timeout, threads,
 
 def deep_scan_single(node: SAPNode, timeout: float = DEFAULT_TIMEOUT,
                      threads: int = DEFAULT_THREADS,
-                     cancel_event: threading.Event = None) -> SAPNode:
+                     cancel_event: threading.Event = None,
+                     state=None) -> SAPNode:
     """Perform a deep scan on a single already-discovered system.
 
     This is called from the context menu "Deep Scan" option.
     Uses SAPology discover_systems + assess_vulnerabilities for full
     OS, DB, system type detection and vulnerability checking.
     Updates the node in-place.
+
+    Issue #220 — when ``state`` is supplied and the node carries an SNC
+    partner name + a usable credential, the SNC-posture classification goes
+    through the creds-bearing SNC-auth path (gated on the imported SAPology
+    accepting the opt-in creds bundle), so an SNC-enforced node this deep
+    scan re-imports can reach ``reachable_auth`` instead of stalling at the
+    TCP-only ``enforced_no_creds`` verdict.
     """
     host = node.ip or node.hostname
     if not host:
@@ -7210,6 +7352,33 @@ def deep_scan_single(node: SAPNode, timeout: float = DEFAULT_TIMEOUT,
 
     try:
         import SAPology
+
+        # Issue #220 — opt-in SNC creds bundle for the deep-scan path.
+        # Built from the node's own SNC partner + best credential and the
+        # operator's active SNC posture.  Gated on the imported SAPology
+        # accepting the ``creds`` kwarg (the sibling kloris/SAPology PR):
+        # against an older SAPology we pass nothing and keep today's
+        # TCP-only classification.
+        _node_partner = (getattr(node, "snc_partnername", "") or "").strip()
+        _node_cred = None
+        try:
+            _node_cred = node.best_credentials()
+        except Exception:
+            _node_cred = _pick_cred_for_node(node)
+        _snc_bundle = _build_sapology_creds_bundle(
+            _node_partner, _node_cred, state)
+        _disc_creds = (_snc_bundle
+                       if _fn_accepts_kw(SAPology.discover_systems, "creds")
+                       else None)
+        _assess_creds = (_snc_bundle
+                         if _fn_accepts_kw(
+                             SAPology.assess_vulnerabilities, "creds")
+                         else None)
+        _snc_auth_enabled = bool(_disc_creds)
+        if _snc_bundle and not _snc_auth_enabled:
+            print(f"[!] {node.sid}: imported SAPology predates the opt-in "
+                  f"creds bundle (issue #220) — deep-scan SNC posture stays "
+                  f"TCP-only; update SAPology to enable the SNC-auth upgrade.")
 
         instances = [int(i.instance_nr) for i in node.instances
                      if i.instance_nr.isdigit()]
@@ -7225,12 +7394,15 @@ def deep_scan_single(node: SAPNode, timeout: float = DEFAULT_TIMEOUT,
         # Phase 1: Discovery
         # skip_alive=True because the system is already on the map —
         # cloud hosts may block ICMP and the alive sweep's TCP probes
-        landscape = SAPology.discover_systems(
-            [host], instances, timeout=timeout, threads=threads,
+        _disc_kwargs = dict(
+            timeout=timeout, threads=threads,
             verbose=True, skip_alive=True,
             cancel_check=lambda: cancel_event.is_set() if cancel_event else False,
             client_enum=True,
         )
+        if _disc_creds is not None:
+            _disc_kwargs["creds"] = _disc_creds
+        landscape = SAPology.discover_systems([host], instances, **_disc_kwargs)
 
         if not landscape:
             print(f"[*] {node.sid}: SAPology found no SAP system on {host}")
@@ -7248,15 +7420,27 @@ def deep_scan_single(node: SAPNode, timeout: float = DEFAULT_TIMEOUT,
         print(f"[*] {node.sid}: Phase 2: Vulnerability Assessment")
         print(f"[*] {node.sid}: Gateway SAPXPG, MS ACL, SAPControl, CVEs, SSL/TLS ...")
         print(f"")
-        landscape = SAPology.assess_vulnerabilities(
-            landscape, gw_cmd="whoami", timeout=timeout + 2,
+        _assess_kwargs = dict(
+            gw_cmd="whoami", timeout=timeout + 2,
             verbose=True, url_scan=False,
             cancel_check=lambda: cancel_event.is_set() if cancel_event else False,
         )
+        if _assess_creds is not None:
+            _assess_kwargs["creds"] = _assess_creds
+        landscape = SAPology.assess_vulnerabilities(landscape, **_assess_kwargs)
 
         # Convert the first result and update node in-place
         sys_obj = landscape[0]
-        fresh = _sapology_system_to_node(sys_obj, host)
+        fresh = _sapology_system_to_node(
+            sys_obj, host,
+            snc_partnername=_node_partner,
+            creds=_node_cred,
+            state=state,
+            saprouter=(getattr(node, "saprouter", "") or ""),
+            snc_auth_enabled=_snc_auth_enabled,
+            sid_hint=node.sid,
+            timeout=timeout,
+        )
 
         # Update node fields from the fresh scan.  When the node already
         # carries authoritative sysinfo from Stage 0 RFCSI (Julian's
@@ -7281,6 +7465,17 @@ def deep_scan_single(node: SAPNode, timeout: float = DEFAULT_TIMEOUT,
         node.instances = fresh.instances or node.instances
         node.clients = fresh.clients or node.clients
         node.gw_vulnerable = fresh.gw_vulnerable or node.gw_vulnerable
+        # Issue #220 — carry the deep-scan SNC posture onto the node.
+        # Truthy-only so a transient '' (rate-limited / transport reset)
+        # never clobbers a prior reachable_auth; a decisive verdict
+        # (reachable_auth, enforced_*) always overwrites.
+        if getattr(fresh, "snc_posture", ""):
+            node.snc_posture = fresh.snc_posture
+        _fresh_snc_info = getattr(fresh, "snc_info", None)
+        if isinstance(_fresh_snc_info, dict) and _fresh_snc_info:
+            if not isinstance(getattr(node, "snc_info", None), dict):
+                node.snc_info = {}
+            node.snc_info.update(_fresh_snc_info)
         # Merge findings (avoid duplicates by name)
         existing_names = {f.name for f in node.findings}
         for f in fresh.findings:
