@@ -780,12 +780,6 @@ class SAPNode:
     sapsys_cert_subject_dn: str = ""
     sapsys_cert_issuer_dn: str = ""
     sapsys_cert_serial: str = ""
-    # USREXTID entries — user-level external identity mappings (X.509
-    # DN, LDAP DN, SAML NameID, email) discovered during STRUSTSSO2
-    # trust scan.  Intelligence only — not used for ticket forgery
-    # (that requires system-level trust via TWPSSO2ACL or PSE trustbox).
-    # Each entry: {extid, bname, trusting_client, source}
-    usrextid_entries: list = field(default_factory=list)
     # Read-only OPSEC posture: SAL on/off, integrity, source-IP enforcement,
     # rec/client, stat/level, gw/log_level, rdisp/TRACE.  Populated by
     # ``sapmap_telemetry.read_abap_telemetry`` after SAP_ALL acquisition.
@@ -930,12 +924,17 @@ class SAPNode:
     is_tms_controller: bool = False
     tms_domain: str = ""
 
-    # USREXTID table — on-prem cert-CN → ABAP user mapping.  Populated
-    # by Data Extraction → Read USREXTID.  Each entry is a row dict
-    # with MANDT/BNAME/EXTID/TYPE/SEQNO.  Pairs with the SCC PP
-    # analyser (sapmap_scc_pp_analyzer.analyze_pp_impersonation) to
-    # answer "which ABAP users can a cloud caller impersonate
-    # through this SCC tunnel".
+    # USREXTID external-identity → ABAP user mappings.  Two populate
+    # paths write here (row shape differs per source):
+    #   * Data Extraction → Read USREXTID (download_usrextid): the raw
+    #     USREXTID table rows, dicts with MANDT/BNAME/EXTID/TYPE/SEQNO.
+    #     Pairs with the SCC PP analyser
+    #     (sapmap_scc_pp_analyzer.analyze_pp_impersonation) to answer
+    #     "which ABAP users can a cloud caller impersonate through this
+    #     SCC tunnel".
+    #   * STRUSTSSO2 trust scan, user-kind entries: intelligence-only
+    #     dicts {extid, bname, trusting_client, source} (NOT forgery
+    #     trust edges — that needs system-level trust).
     usrextid_entries: list = field(default_factory=list)
     usrextid_read_at: str = ""   # ISO timestamp — empty = never read
     pp_impersonation: dict = field(default_factory=dict)
@@ -1166,7 +1165,6 @@ class SAPNode:
             "sapsys_cert_subject_dn": self.sapsys_cert_subject_dn,
             "sapsys_cert_issuer_dn": self.sapsys_cert_issuer_dn,
             "sapsys_cert_serial": self.sapsys_cert_serial,
-            "usrextid_entries": list(self.usrextid_entries),
             "telemetry_profile": (self.telemetry_profile.to_dict()
                                    if self.telemetry_profile else None),
             "position": list(self.position) if self.position else None,
@@ -1317,7 +1315,16 @@ class SAPNode:
             sapsys_cert_subject_dn=d.get("sapsys_cert_subject_dn", ""),
             sapsys_cert_issuer_dn=d.get("sapsys_cert_issuer_dn", ""),
             sapsys_cert_serial=d.get("sapsys_cert_serial", ""),
-            usrextid_entries=list(d.get("usrextid_entries", [])),
+            usrextid_entries=list(d.get("usrextid_entries", []) or []),
+            # USREXTID / PP-impersonation cluster — to_dict() has always
+            # serialized these, but from_dict() dropped them, so a reload
+            # lost the "last read" timestamp and the whole PP-impersonation
+            # analysis (which the #167 Phase-F report renders).  Restored
+            # alongside the #218 dedup since the round-trip test surfaced it.
+            usrextid_read_at=d.get("usrextid_read_at", "") or "",
+            pp_impersonation=dict(d.get("pp_impersonation") or {}),
+            pp_verification=dict(d.get("pp_verification") or {}),
+            pp_verification_confirmed=d.get("pp_verification_confirmed", False),
             telemetry_profile=(
                 AbapTelemetryProfile.from_dict(d["telemetry_profile"])
                 if d.get("telemetry_profile") else None),
