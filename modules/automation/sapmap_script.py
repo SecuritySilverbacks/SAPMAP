@@ -58,8 +58,8 @@ Supported actions:
     layout, sleep, verify_pp_impersonation,
     read_usrextid, read_oa2c, analyse_capabilities,
     # Node identity / metadata overrides
-    set_sid, set_instance_nr, set_type, set_db_type, set_os_type,
-    set_telnet_override,
+    set_sid, set_instance_nr, remove_instance, set_type, set_db_type,
+    set_os_type, set_telnet_override,
     # SAProuter
     set_saprouter, check_router_info, router_scan,
     # SNC client identity (looted PSE, issue #137)
@@ -432,6 +432,22 @@ def _map_step(step: dict) -> tuple:
                 f"set_instance_nr: instance_nr must be two digits "
                 f"(got {inst!r})")
         return ("POST", f"/api/node/{target}/set_instance_nr", {
+            "instance_nr": inst,
+        }, False)
+
+    if action == "remove_instance":
+        # Issue #92 — durably remove a wrongly-attributed / irrelevant
+        # instance from a node.  The nr is suppressed so later scans
+        # (this run or future ones) won't re-add it.  A local map edit
+        # that never touches the target → non-destructive.
+        # Usage:  - action: remove_instance
+        #           target: S4H
+        #           instance_nr: "04"
+        inst = (step.get("instance_nr")
+                or step.get("instance") or "").strip()
+        if not inst:
+            raise ValueError("remove_instance: instance_nr required")
+        return ("POST", f"/api/node/{target}/remove_instance", {
             "instance_nr": inst,
         }, False)
 
@@ -1382,6 +1398,7 @@ _ACTION_LABELS = {
     "set_snc_identity":       "Selecting SNC client identity",
     "set_sid":                "Renaming node SID",
     "set_instance_nr":        "Setting instance number",
+    "remove_instance":        "Removing instance",
     "check_router_info":      "Probing SAProuter info leak",
     "check_ms_info_disclosure": "Probing MS text/dump info leak",
     "router_scan":            "Scanning internal net via SAProuter",

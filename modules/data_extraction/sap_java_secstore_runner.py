@@ -1157,10 +1157,14 @@ def extract_java_secstore(node: SAPNode, state: SAPMAPState) -> dict:
             print(f"[+] {node.sid}: auto-plotted downstream ABAP system "
                   f"{tgt_sid}{' @ '+tgt_host if tgt_host else ''}"
                   f"{' sysnr='+tgt_sysnr if tgt_sysnr else ''}")
-        elif tgt_sysnr and tgt_sysnr not in down.instance_nrs():
+        elif (tgt_sysnr and tgt_sysnr not in down.instance_nrs()
+                and not (getattr(down, "is_instance_suppressed", None)
+                         and down.is_instance_suppressed(tgt_sysnr))):
             # Node exists (e.g. auto-plotted earlier from the same SecStore
             # without a sysnr, or from a SAPControl probe that defaulted
             # to 00).  Register the real sysnr so the direct test uses it.
+            # Issue #92 — unless the operator suppressed that nr on the
+            # existing node (then don't re-add it here).
             down.instances.append(InstanceInfo(
                 instance_nr=tgt_sysnr, ip=tgt_host or ""))
 

@@ -1774,6 +1774,11 @@ def _record_instance_port(node, inst_nr, port, label, host="") -> None:
                 matched = inst
                 break
         if matched is None:
+            # Issue #92 — don't re-create an operator-suppressed instance
+            # just because a port probe re-confirmed its MS/ASCS port.
+            if getattr(node, "is_instance_suppressed", None) and \
+                    node.is_instance_suppressed(inst_str):
+                return
             matched = InstanceInfo(instance_nr=inst_str,
                                    ip=(host or node.ip or ""), ports={})
             node.instances.append(matched)
@@ -7463,8 +7468,23 @@ def deep_scan_single(node: SAPNode, timeout: float = DEFAULT_TIMEOUT,
             node.kernel      = fresh.kernel      or node.kernel
             node.sap_release = fresh.sap_release or node.sap_release
         node.instances = fresh.instances or node.instances
+        # Issue #92 — the line above wholesale-replaces the instance list
+        # from the deep-scan result, which would resurrect operator-
+        # removed instances.  Re-apply suppression immediately (``node``
+        # is the live stored node, so it still carries the set).
+        if getattr(node, "prune_suppressed_instances", None):
+            node.prune_suppressed_instances()
         node.clients = fresh.clients or node.clients
         node.gw_vulnerable = fresh.gw_vulnerable or node.gw_vulnerable
+        # Issue #92 — the OR-merge above can re-light gw_vulnerable from a
+        # fresh scan that re-found the (now-suppressed, just-pruned)
+        # instance's gateway, leaving gw_vulnerable=True with no gateway
+        # instance and gw_vulnerable_port=0.  Re-derive the vuln flags
+        # against the pruned instance list so suppression stays durable
+        # for the exploit-targeting bool too (conservative: only clears a
+        # flag with no surviving locus).
+        if getattr(node, "reconcile_vuln_flags", None):
+            node.reconcile_vuln_flags()
         # Issue #220 — carry the deep-scan SNC posture onto the node.
         # Truthy-only so a transient '' (rate-limited / transport reset)
         # never clobbers a prior reachable_auth; a decisive verdict
