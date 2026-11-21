@@ -6893,7 +6893,10 @@ def create_app(api: SAPMAPApi) -> Bottle:
             return json.dumps({"error": f"Node {sid} not found"})
 
         def _run():
-            sapmap_scanner.deep_scan_single(node)
+            # Issue #220 — pass state so the deep-scan SNC-posture
+            # classification can use the operator's active SNC wallet
+            # (reach-hint gate + rate limit + reachable_auth upgrade).
+            sapmap_scanner.deep_scan_single(node, state=api.state)
         _bg(f"{sid}:deep_scan", "Deep Scan", _run)
         return json.dumps({"status": "started"})
 
