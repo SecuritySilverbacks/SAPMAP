@@ -15813,11 +15813,12 @@ async function removeInstance(sid, instNr) {
   await pollUpdates();
 }
 
-// Issue #92 — lift suppression (the 'restore' link); next scan repopulates.
+// Issue #92 — lift suppression (the 'restore' link); the backend re-adds
+// the removed instance row from its undo cache, so it reappears at once.
 async function restoreInstance(sid, instNr) {
   const r = await api('POST', `node/${sid}/unsuppress_instance`, { instance_nr: instNr });
   if (r && r.error) { alert('Restore failed: ' + r.error); return; }
-  flashActivity(`${sid}: restored instance ${instNr} (next scan repopulates it)`, 3000);
+  flashActivity(`${sid}: restored instance ${instNr}`, 3000);
   startPolling();
   await pollUpdates();
 }

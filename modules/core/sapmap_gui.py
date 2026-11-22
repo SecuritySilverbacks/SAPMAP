@@ -8275,8 +8275,9 @@ def create_app(api: SAPMAPApi) -> Bottle:
     @app.route("/api/node/<sid>/unsuppress_instance", method="POST")
     def node_unsuppress_instance(sid):
         """Issue #92 — lift suppression for an instance nr (the panel
-        'restore' link / accidental-removal recovery).  The next scan
-        repopulates the InstanceInfo; this only clears the gate."""
+        'restore' link / accidental-removal recovery).  Re-adds the removed
+        InstanceInfo row from the node's undo cache, so it reappears in
+        System Details immediately (no re-scan)."""
         response.content_type = "application/json"
         data = request.json or {}
         node = api.state.get_node(sid)
@@ -8289,10 +8290,11 @@ def create_app(api: SAPMAPApi) -> Bottle:
             return json.dumps({"error": "invalid instance_nr"})
         was = node.unsuppress_instance(instance_nr)
         print(f"[*] {sid}: restored instance {instance_nr} "
-              f"(was suppressed: {was}; next scan repopulates it)")
+              f"(was suppressed: {was})")
         return json.dumps({
             "ok": True,
             "restored": was,
+            "remaining": len(node.instances),
             "suppressed": sorted(node.suppressed_instance_nrs),
         })
 

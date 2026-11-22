@@ -588,6 +588,13 @@ class SAPNode:
     # (zfill(2)) on write/compare.  Persisted as a sorted list like
     # _pwspray_tested_triples; rehydrated to a set.
     suppressed_instance_nrs: set = field(default_factory=set)
+    # Issue #92 (restore) — per-nr undo cache: the InstanceInfo row(s) that
+    # suppression removed, so the panel 'restore' link re-adds the instance
+    # to System Details immediately with no re-scan.  Keyed by the
+    # normalised 2-digit nr; {nr: [InstanceInfo, ...]}.  Rows only — vuln
+    # scalars are deliberately NOT cached (see suppress_instance).
+    # Round-tripped through to_dict/from_dict so undo survives save/reload.
+    suppressed_instance_cache: dict = field(default_factory=dict)
     os_type: str = ""
     db_type: str = ""                   # HDB, ORA, MSS, ADA, DB6
     kernel: str = ""
@@ -1086,27 +1093,64 @@ class SAPNode:
         """Record ``nr`` as suppressed, drop its InstanceInfo row(s) and
         reconcile now-stale cached ports.  Returns the number of
         InstanceInfo rows removed from ``self.instances``.
+
+        The removed row(s) are stashed in ``suppressed_instance_cache`` so
+        ``unsuppress_instance`` ('restore') can re-add them to System
+        Details immediately — an instant undo that needs no re-scan.  Only
+        the ROW is cached: node-level vuln scalars/flags are shared state,
+        not per-instance, so restoring them per-nr would resurrect a
+        finding owned by a different instance or clobber a newer scan's
+        verdict.  Restore is therefore purely additive; a vuln flag that
+        suppression legitimately cleared is re-confirmed by a re-scan, not
+        by undo (conservative — undo can never materialise a false
+        finding).
         """
         norm = self._norm_inst_nr(nr)
-        before = len(self.instances)
+        removed_rows = [
+            i for i in self.instances
+            if self._norm_inst_nr(getattr(i, "instance_nr", "")) == norm
+        ]
         self.instances = [
             i for i in self.instances
             if self._norm_inst_nr(getattr(i, "instance_nr", "")) != norm
         ]
-        removed = before - len(self.instances)
+        removed = len(removed_rows)
         self.suppressed_instance_nrs.add(norm)
+        # Cache the removed row(s) for restore.  Overwrite ONLY when this
+        # call actually removed rows — a repeat suppress of an already-
+        # suppressed nr (removed_rows == []) must not clobber the rows the
+        # first removal cached (else restore would re-add nothing).
+        if removed_rows:
+            self.suppressed_instance_cache[norm] = removed_rows
         self._reconcile_ports_after_suppress(norm)
         return removed
 
     def unsuppress_instance(self, nr) -> bool:
         """Lift suppression for ``nr`` (operator re-asserting it, e.g. via
-        Set Instance Number or the panel 'restore' link).  Returns True if
-        ``nr`` was previously suppressed.  Does NOT re-create the
-        InstanceInfo row — the next scan repopulates it.
+        Set Instance Number or the panel 'restore' link) and re-add the
+        instance row(s) it removed.  Returns True if ``nr`` was previously
+        suppressed.
+
+        Re-adds the cached InstanceInfo row(s) so the instance reappears in
+        System Details at once.  Purely additive: a scan may already have
+        re-added the row (live lab), so a row whose nr is already present is
+        skipped (no duplicate); node-level vuln scalars/flags are left
+        exactly as they are (see suppress_instance — undo never resurrects
+        or clobbers a finding).
         """
         norm = self._norm_inst_nr(nr)
         was = norm in self.suppressed_instance_nrs
         self.suppressed_instance_nrs.discard(norm)
+        cached = self.suppressed_instance_cache.pop(norm, None)
+        if cached:
+            present = {
+                self._norm_inst_nr(getattr(i, "instance_nr", ""))
+                for i in self.instances
+            }
+            for row in cached:
+                if self._norm_inst_nr(
+                        getattr(row, "instance_nr", "")) not in present:
+                    self.instances.append(row)
         return was
 
     def prune_suppressed_instances(self) -> int:
@@ -1123,6 +1167,42 @@ class SAPNode:
             if not self.is_instance_suppressed(getattr(i, "instance_nr", ""))
         ]
         return before - len(self.instances)
+
+    def _suppressed_cache_to_dict(self) -> dict:
+        """Serialize the Issue #92 restore undo-cache ({nr: [InstanceInfo]}).
+        Kept OUT of ``to_dict``'s own literal so the #218 key-symmetry guard
+        keeps scanning only real constructor keys."""
+        out = {}
+        for k, rows in (self.suppressed_instance_cache or {}).items():
+            out[k] = [r.to_dict() for r in (rows or [])]
+        return out
+
+    @classmethod
+    def _suppressed_cache_from_dict(cls, raw) -> dict:
+        """Rehydrate the Issue #92 restore undo-cache from a .sapmap dict,
+        tolerating legacy / hand-edited / corrupt shapes without ever
+        crashing the whole state load: a non-dict container, a non-list
+        entry, a non-dict row, or an InstanceInfo dict missing/invalid
+        ``instance_nr``/``ports`` are each skipped — matching the
+        robustness of the sibling ``suppressed_instance_nrs`` loader."""
+        out = {}
+        if not isinstance(raw, dict):
+            return out
+        for k, rows in raw.items():
+            # Tolerate the transient {instances, scalars} shape too.
+            if isinstance(rows, dict):
+                rows = rows.get("instances", [])
+            parsed = []
+            if isinstance(rows, list):
+                for r in rows:
+                    if not isinstance(r, dict):
+                        continue
+                    try:
+                        parsed.append(InstanceInfo.from_dict(r))
+                    except (KeyError, ValueError, TypeError):
+                        continue
+            out[cls._norm_inst_nr(k)] = parsed
+        return out
 
     def _reconcile_ports_after_suppress(self, norm: str) -> None:
         """Clear cached scalar ports that were discovered on the just-
@@ -1358,6 +1438,7 @@ class SAPNode:
                 self.logon_banner_findings or []),
             "suppressed_instance_nrs": sorted(
                 self.suppressed_instance_nrs or set()),
+            "suppressed_instance_cache": self._suppressed_cache_to_dict(),
         }
 
     @classmethod
@@ -1526,6 +1607,8 @@ class SAPNode:
             suppressed_instance_nrs=set(
                 cls._norm_inst_nr(x)
                 for x in (d.get("suppressed_instance_nrs", []) or [])),
+            suppressed_instance_cache=cls._suppressed_cache_from_dict(
+                d.get("suppressed_instance_cache", {})),
         )
         return node
 
@@ -2641,10 +2724,20 @@ class SAPMAPState:
         # deep-rescan) keep the stored node object and so carry the set
         # for free — this covers the replace path they don't hit.
         prior = self.nodes.get(key)
-        if prior is not None and getattr(prior, "suppressed_instance_nrs", None):
+        if prior is not None and (
+                getattr(prior, "suppressed_instance_nrs", None)
+                or getattr(prior, "suppressed_instance_cache", None)):
             node.suppressed_instance_nrs = (
                 set(node.suppressed_instance_nrs or set())
-                | set(prior.suppressed_instance_nrs))
+                | set(prior.suppressed_instance_nrs or set()))
+            # Carry the restore-cache forward too, so 'restore' still works
+            # after this wholesale replace (prior's removed rows win; a
+            # fresh scan node has none of its own).
+            merged_cache = dict(
+                getattr(prior, "suppressed_instance_cache", {}) or {})
+            merged_cache.update(
+                getattr(node, "suppressed_instance_cache", {}) or {})
+            node.suppressed_instance_cache = merged_cache
             node.prune_suppressed_instances()
         self.nodes[key] = node
         if is_new:
