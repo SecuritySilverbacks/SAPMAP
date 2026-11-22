@@ -1380,6 +1380,8 @@ def download_and_decrypt(node, creds, key_hex: str = DEFAULT_KEY_HEX,
             ssfs_key = extract_ssfs_key(key_bytes)
         except Exception as e:
             print(f"[-] SecStore {node.sid}: could not extract SSFS key: {format_rfc_exception(e)}")
+    else:
+        ssfs_key = bytes.fromhex (DEFAULT_KEY_HEX)
 
     # Parse SSFS DAT file — decrypt records with SSFS key, and look for
     # the RSECTAB individual key stored as SECSTORE_DB/KEY/...
