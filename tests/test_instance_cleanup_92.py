@@ -120,14 +120,146 @@ def test_suppress_last_instance_leaves_empty_no_throw():
     assert n.instance_nrs() == []
 
 
-def test_unsuppress_lifts_gate_without_recreating_row():
+def test_unsuppress_lifts_gate_and_readds_row():
+    """Issue #92 (restore) — 'restore' re-adds the removed InstanceInfo
+    from the undo cache immediately, no re-scan required."""
     n = _node()
     n.suppress_instance("04")
+    assert "04" not in [i.instance_nr for i in n.instances]
     assert n.unsuppress_instance("04") is True
     assert not n.is_instance_suppressed("04")
     assert n.suppressed_instance_nrs == set()
-    # row is NOT recreated — the next scan repopulates it
-    assert "04" not in [i.instance_nr for i in n.instances]
+    # row IS recreated — with its original ports
+    row = {i.instance_nr: i for i in n.instances}.get("04")
+    assert row is not None and row.ports == {3304: "gateway"}
+    # cache entry is consumed on restore
+    assert "04" not in n.suppressed_instance_cache
+
+
+def test_restore_readds_row_but_does_not_resurrect_cleared_vuln():
+    """Restore is purely additive: removing the sole gateway instance
+    clears the vuln flag; restore brings the ROW back but must NOT re-light
+    the flag (undo can never materialise a finding — a re-scan re-confirms
+    it).  Guards against the scalar-snapshot resurrection class."""
+    n = _node(nrs=(("00", {3300: "gateway"}), ("04", {3204: "dispatcher"})))
+    n.gw_vulnerable = True
+    n.gw_vulnerable_port = 3300
+    n.suppress_instance("00")
+    assert n.gw_vulnerable_port == 0 and n.gw_vulnerable is False
+    n.unsuppress_instance("00")
+    # row IS back…
+    assert "00" in [i.instance_nr for i in n.instances]
+    # …but the cleared flag is NOT resurrected
+    assert n.gw_vulnerable_port == 0 and n.gw_vulnerable is False
+
+
+def test_restore_does_not_resurrect_other_instances_vuln():
+    """Review #3/#5 — restoring one instance must not re-light a vuln
+    owned by a DIFFERENT, still-suppressed instance.  gw vuln is confirmed
+    on inst 01 (port 3301); suppress 00 then 01, restore 00 → the gateway
+    finding (owned by the still-suppressed 01) stays cleared."""
+    n = _node(nrs=(("00", {3200: "dispatcher"}), ("01", {3301: "gateway"})))
+    n.gw_vulnerable = True
+    n.gw_vulnerable_port = 3301          # owned by inst 01
+    n.suppress_instance("00")           # 3301 survives (3301 % 100 == 1 != 0)
+    n.suppress_instance("01")           # now cleared: port→0, flag→False
+    assert n.gw_vulnerable_port == 0 and n.gw_vulnerable is False
+    n.unsuppress_instance("00")         # restore the UNRELATED instance
+    assert "01" in n.suppressed_instance_nrs            # 01 still suppressed
+    assert n.gw_vulnerable_port == 0 and n.gw_vulnerable is False  # not re-lit
+
+
+def test_restore_does_not_clobber_newer_scan_verdict():
+    """Review #4 — a re-scan that found the box patched writes the falsy
+    defaults (gw_vulnerable=False / port 0).  Restore must not overwrite
+    that fresh 'not vulnerable' verdict with the stale pre-suppress one."""
+    n = _node(nrs=(("00", {3300: "gateway"}),))
+    n.gw_vulnerable = True
+    n.gw_vulnerable_port = 3300
+    n.suppress_instance("00")
+    # a later re-scan re-confirms the box is now patched (falsy defaults)
+    n.gw_vulnerable = False
+    n.gw_vulnerable_port = 0
+    n.unsuppress_instance("00")
+    assert n.gw_vulnerable is False and n.gw_vulnerable_port == 0  # kept
+
+
+def test_double_suppress_same_nr_preserves_cached_row():
+    """Review #1/#6 — a second suppress of an already-suppressed nr
+    (removed_rows == []) must NOT clobber the row the first removal cached,
+    or restore would bring back nothing."""
+    n = _node()                                   # 00 + 04
+    n.suppress_instance("04")
+    assert n.suppressed_instance_cache["04"][0].ports == {3304: "gateway"}
+    n.suppress_instance("04")                     # repeat — removed_rows == []
+    # cached row is intact (not overwritten with an empty list)
+    assert n.suppressed_instance_cache["04"][0].ports == {3304: "gateway"}
+    n.unsuppress_instance("04")
+    row = {i.instance_nr: i for i in n.instances}.get("04")
+    assert row is not None and row.ports == {3304: "gateway"}
+
+
+def test_malformed_cache_entry_does_not_crash_load():
+    """Review #2 — a hand-edited / corrupt suppressed_instance_cache must
+    not crash SAPNode.from_dict (which would abort the whole .sapmap load);
+    bad rows are skipped, valid ones survive — matching the robustness of
+    the suppressed_instance_nrs loader."""
+    d = _node().to_dict()
+    d["suppressed_instance_cache"] = {
+        "00": [{"ip": "1.2.3.4"}],                       # missing instance_nr
+        "01": "oops",                                     # not a list
+        "02": [{"instance_nr": "02", "ports": {"xx": "o"}}],  # bad port key
+        "03": 5,                                          # not a list/dict
+        "05": [{"instance_nr": "05", "ports": {3305: "gateway"}}],  # valid
+    }
+    r = SAPNode.from_dict(d)                               # must not raise
+    assert r.suppressed_instance_cache.get("00") == []
+    assert r.suppressed_instance_cache.get("01") == []
+    assert r.suppressed_instance_cache.get("02") == []
+    assert r.suppressed_instance_cache.get("03") == []
+    assert len(r.suppressed_instance_cache.get("05", [])) == 1
+    assert r.suppressed_instance_cache["05"][0].ports == {3305: "gateway"}
+
+
+def test_restore_skips_duplicate_row_if_scan_readded():
+    """If a scan already re-added the row (live lab) before restore, the
+    cached copy must not create a duplicate."""
+    n = _node()
+    n.suppress_instance("04")
+    # simulate a scan re-adding 04 after the gate was lifted elsewhere
+    n.instances.append(InstanceInfo(instance_nr="04", ip="10.0.0.1",
+                                    ports={3304: "gateway"}))
+    n.unsuppress_instance("04")
+    assert [i.instance_nr for i in n.instances].count("04") == 1
+
+
+def test_restore_cache_roundtrips_through_serialization():
+    """The undo cache survives save/reload so restore works after a
+    .sapmap is reloaded."""
+    n = _node()
+    n.suppress_instance("04")
+    r = SAPNode.from_dict(json.loads(json.dumps(n.to_dict())))
+    assert "04" in r.suppressed_instance_cache
+    assert r.unsuppress_instance("04") is True
+    row = {i.instance_nr: i for i in r.instances}.get("04")
+    assert row is not None and row.ports == {3304: "gateway"}
+
+
+def test_add_node_carries_restore_cache_forward():
+    """A wholesale re-scan replace (add_node) must preserve the undo cache
+    so restore still works afterwards."""
+    st = SAPMAPState()
+    n = _node()
+    n.suppress_instance("04")
+    st.add_node(n)
+    # a fresh scan rebuilds the node (no cache of its own) and replaces it
+    fresh = _node()
+    st.add_node(fresh)
+    stored = st.get_node("NPL")
+    assert "04" in stored.suppressed_instance_cache          # carried forward
+    assert "04" not in [i.instance_nr for i in stored.instances]  # still pruned
+    stored.unsuppress_instance("04")
+    assert "04" in [i.instance_nr for i in stored.instances]  # restore works
 
 
 def test_unsuppress_unknown_returns_false():

@@ -154,6 +154,9 @@ class TestFrontend:
     def test_restore_handler_route(self, html):
         body = _js_fn(html, "restoreInstance")
         assert "node/${sid}/unsuppress_instance" in body
+        # Issue #92 (restore) — row is re-added instantly now; the old
+        # "next scan repopulates it" copy must not linger (it was wrong).
+        assert "next scan repopulates" not in body
 
     def test_suppressed_and_empty_rows_rendered(self, html):
         assert "suppressed_instance_nrs" in html                     # restore line
