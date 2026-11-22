@@ -693,6 +693,13 @@ body {
   margin-left: 8px; text-decoration: underline; text-underline-offset: 2px;
 }
 .detail-action-btn:hover { color: #79c0ff; }
+/* Destructive inline 'x' — remove instance (issue #92) */
+.detail-del-btn {
+  display: inline-block; margin-left: 8px; padding: 0 4px;
+  font-size: 11px; line-height: 1; color: #f85149; cursor: pointer;
+  opacity: 0.6; user-select: none;
+}
+.detail-del-btn:hover { opacity: 1; }
 /* Phase-progress indicator (top of details panel) */
 .phase-progress {
   display: flex; align-items: flex-start; justify-content: space-between;
@@ -6640,6 +6647,16 @@ function escHtml(s) {
   return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
 
+// Issue #92 — instance numbers / pseudo-instances are alphanumeric
+// ('00','04','XX','WD').  Strip to [A-Za-z0-9] before embedding a value
+// into an inline onclick JS-string argument, so a crafted instance_nr
+// loaded from a .sapmap can never break out of the single-quoted string
+// literal (escHtml does not escape the single quote).  Lossless for all
+// legitimate values; defence-in-depth behind the route-side validation.
+function instKey(s) {
+  return String(s == null ? '' : s).replace(/[^A-Za-z0-9]/g, '');
+}
+
 // MITRE ATT&CK rendering helpers — pills next to findings, full section
 // in the node detail panel, and cell legends in the heatmap modal.
 // mapState.attack_catalog is populated by /api/attack/catalog (called
@@ -12024,8 +12041,10 @@ function showDetails(sid, opts) {
       <h4>Instances</h4>
       ${(n.instances || []).map(i => {
         const ports = Object.keys(i.ports||{}).sort((a,b)=>a-b).join(', ');
-        return `<div class="detail-row"><span class="detail-key">Inst ${escHtml(i.instance_nr)}</span><span class="detail-val">${escHtml(i.ip)}${ports ? ' — Ports: '+ports : ''}</span></div>`;
+        return `<div class="detail-row"><span class="detail-key">Inst ${escHtml(i.instance_nr)}</span><span class="detail-val">${escHtml(i.ip)}${ports ? ' — Ports: '+ports : ''}<span class="detail-del-btn" title="Remove this instance from the map (durable — re-scans won't re-add it)" onclick="removeInstance('${escHtml(n.sid)}','${instKey(i.instance_nr)}')">&#10005;</span></span></div>`;
       }).join('')}
+      ${(n.instances || []).length === 0 ? '<div class="detail-row"><span class="detail-val" style="color:#d29922">&#9888; No instances — host-level actions unavailable until a re-scan.</span></div>' : ''}
+      ${(n.suppressed_instance_nrs && n.suppressed_instance_nrs.length) ? `<div class="detail-row"><span class="detail-key">Suppressed</span><span class="detail-val" style="color:#8b949e">${n.suppressed_instance_nrs.map(nr => `${escHtml(nr)} <span class="detail-action-btn" onclick="restoreInstance('${escHtml(n.sid)}','${instKey(nr)}')">restore</span>`).join(', ')}</span></div>` : ''}
     </div>
     <div class="detail-section">
       <h4>Open Ports</h4>
@@ -15762,6 +15781,46 @@ async function saveInstanceNr() {
   if (r && r.error) { alert('Set failed: ' + r.error); return; }
   closeModal('instance-nr-modal');
   startPolling();
+}
+
+// Issue #92 — inline per-instance removal from the System Details panel.
+// Takes sid + instance_nr as explicit args (do NOT rely on the global
+// selectedNodeSid: the panel can be open via a live poll-refresh with no
+// fresh right-click).  Routine removals proceed silently; only the two
+// consequential cases prompt (native confirm, the house convention).
+async function removeInstance(sid, instNr) {
+  const n = (mapState.nodes || {})[sid];
+  const insts = (n && n.instances) ? n.instances : [];
+  const inst = insts.find(x => x.instance_nr === instNr);
+  const isLast = insts.length <= 1;
+  const hasGw = !!(inst && Object.entries(inst.ports || {}).some(
+    ([p, s]) => s === 'gateway' || (p >= 3300 && p <= 3399)));
+  if (isLast || hasGw) {
+    let msg = `Remove instance ${instNr} from ${sid}?\n\n` +
+      `This is a local map cleanup — the target system is untouched — and it ` +
+      `is durable: re-scans won't re-add it (use 'restore' to undo).`;
+    if (hasGw) msg += `\n\n⚠ This instance carries the gateway (33${instNr}) ` +
+      `port; GW-gated actions for ${sid} will be disabled until another gateway ` +
+      `instance is discovered.`;
+    if (isLast) msg += `\n\n⚠ This is the node's ONLY instance; removing it ` +
+      `disables all host-level actions until a re-scan.`;
+    if (!confirm(msg)) return;
+  }
+  const r = await api('POST', `node/${sid}/remove_instance`, { instance_nr: instNr });
+  if (r && r.error) { alert('Remove failed: ' + r.error); return; }
+  flashActivity(`${sid}: removed instance ${instNr}`, 3000);
+  startPolling();
+  await pollUpdates();
+}
+
+// Issue #92 — lift suppression (the 'restore' link); the backend re-adds
+// the removed instance row from its undo cache, so it reappears at once.
+async function restoreInstance(sid, instNr) {
+  const r = await api('POST', `node/${sid}/unsuppress_instance`, { instance_nr: instNr });
+  if (r && r.error) { alert('Restore failed: ' + r.error); return; }
+  flashActivity(`${sid}: restored instance ${instNr}`, 3000);
+  startPolling();
+  await pollUpdates();
 }
 
 function showSaprouterModal(sid) {

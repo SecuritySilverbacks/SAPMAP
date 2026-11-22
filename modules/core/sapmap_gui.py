@@ -412,6 +412,12 @@ def _correct_node_from_http(target_node, http_info: dict):
     if not http_info:
         return
     probed = http_info.get("instance_nr", "")
+    # Issue #92 — never reindex the surviving instance back onto an
+    # operator-suppressed nr (that would both resurrect the removed nr
+    # and lose the real one).  Skip the correction entirely when the
+    # probed nr is suppressed.
+    if probed and target_node.is_instance_suppressed(probed):
+        probed = ""
     if probed and target_node.instances:
         cur = target_node.instance_nrs()
         if cur and cur[0] != probed:
@@ -3887,6 +3893,11 @@ def _import_appserver_instances(node, ms_host: str, ms_port) -> int:
         # post-import sweep probes and records the real, reachable gateway
         # via _resolve_gateway_port, so SNC-only app servers (plain 33NN
         # closed) no longer get a phantom gateway port (issue #135).
+        # Issue #92 — skip an operator-suppressed instance nr (this gate
+        # also doubles as the dedupe this unconditional append otherwise
+        # lacks, so a re-import no longer piles up duplicate NNs).
+        if node.is_instance_suppressed(inst_nr):
+            continue
         node.instances.append(InstanceInfo(
             instance_nr=inst_nr, ip=ip,
             ports={3200 + nn: "dispatcher"},
@@ -6967,6 +6978,10 @@ def create_app(api: SAPMAPApi) -> Bottle:
                         match = ei
                         break
                 if match is None:
+                    # Issue #92 — don't resurrect an operator-removed nr
+                    # on a standard rescan.
+                    if existing.is_instance_suppressed(si.instance_nr):
+                        continue
                     existing.instances.append(si)
                 else:
                     for p, lbl in (si.ports or {}).items():
@@ -8192,6 +8207,11 @@ def create_app(api: SAPMAPApi) -> Bottle:
         new_nr = (data.get("instance_nr") or "").strip()
         if not (len(new_nr) == 2 and new_nr.isdigit()):
             return json.dumps({"error": "instance_nr must be two digits, e.g. 00"})
+        # Issue #92 — an operator re-asserting an instance number lifts any
+        # prior suppression of it, so a manual set out-ranks an earlier
+        # removal (otherwise the scan gate would fight this write and the
+        # UI would show the instance then drop it on the next scan).
+        node.unsuppress_instance(new_nr)
         # Conventional SAP per-instance ports — without these on the
         # InstanceInfo, GW-gated actions (RFC System Info, Check GW,
         # Create User via GW) stay greyed out because the front-end
@@ -8215,6 +8235,68 @@ def create_app(api: SAPMAPApi) -> Bottle:
                 ports=dict(canonical_ports)))
         print(f"[*] Instance number for {sid} set to: {new_nr}")
         return json.dumps({"status": "ok", "instance_nr": new_nr})
+
+    @app.route("/api/node/<sid>/remove_instance", method="POST")
+    def node_remove_instance(sid):
+        """Issue #92 — operator removes a wrongly-attributed / irrelevant
+        instance from the System Details panel.  Durable: the nr is added
+        to ``node.suppressed_instance_nrs`` so every scan re-add vector
+        skips it on later scans.  Matches by instance_nr (stable key),
+        never by list index (scans reorder/append).  Like set_instance_nr
+        / set_clients / credentials/remove this is an operator-correction
+        route — it mutates in-memory state only (persisted on autosave /
+        Ctrl+S) and is intentionally NOT in WRITE_ROUTES (not blocked by
+        --read-only)."""
+        response.content_type = "application/json"
+        data = request.json or {}
+        node = api.state.get_node(sid)
+        if not node:
+            return json.dumps({"error": f"Node {sid} not found"})
+        instance_nr = str(data.get("instance_nr") or "").strip()
+        if not instance_nr:
+            return json.dumps({"error": "instance_nr required"})
+        # Issue #92 — instance numbers are 2-digit ('00') or a short
+        # pseudo-instance sentinel ('XX'/'WD').  Reject anything else so a
+        # crafted value can never reach the suppressed set and the panel's
+        # inline onclick (defence-in-depth vs stored-DOM injection).
+        if not (instance_nr.isalnum() and len(instance_nr) <= 4):
+            return json.dumps({"error": "invalid instance_nr"})
+        removed = node.suppress_instance(instance_nr)
+        print(f"[*] {sid}: removed instance {instance_nr} "
+              f"({removed} row(s) dropped, {len(node.instances)} remaining; "
+              f"suppressed so re-scans won't re-add it)")
+        return json.dumps({
+            "ok": True,
+            "removed": removed,
+            "remaining": len(node.instances),
+            "suppressed": sorted(node.suppressed_instance_nrs),
+        })
+
+    @app.route("/api/node/<sid>/unsuppress_instance", method="POST")
+    def node_unsuppress_instance(sid):
+        """Issue #92 — lift suppression for an instance nr (the panel
+        'restore' link / accidental-removal recovery).  Re-adds the removed
+        InstanceInfo row from the node's undo cache, so it reappears in
+        System Details immediately (no re-scan)."""
+        response.content_type = "application/json"
+        data = request.json or {}
+        node = api.state.get_node(sid)
+        if not node:
+            return json.dumps({"error": f"Node {sid} not found"})
+        instance_nr = str(data.get("instance_nr") or "").strip()
+        if not instance_nr:
+            return json.dumps({"error": "instance_nr required"})
+        if not (instance_nr.isalnum() and len(instance_nr) <= 4):
+            return json.dumps({"error": "invalid instance_nr"})
+        was = node.unsuppress_instance(instance_nr)
+        print(f"[*] {sid}: restored instance {instance_nr} "
+              f"(was suppressed: {was})")
+        return json.dumps({
+            "ok": True,
+            "restored": was,
+            "remaining": len(node.instances),
+            "suppressed": sorted(node.suppressed_instance_nrs),
+        })
 
     @app.route("/api/node/<sid>/set_saprouter", method="POST")
     def node_set_saprouter(sid):
@@ -13622,7 +13704,11 @@ def create_app(api: SAPMAPApi) -> Bottle:
                                     if _ii.instance_nr == _real_inst:
                                         _found = True
                                         break
-                                if not _found:
+                                if not _found and not (
+                                        _tgt_node.is_instance_suppressed(
+                                            _real_inst)):
+                                    # Issue #92 — don't re-create an
+                                    # operator-suppressed instance.
                                     from sapmap_models import (
                                         InstanceInfo)
                                     _tgt_node.instances.append(
@@ -19595,7 +19681,9 @@ def create_app(api: SAPMAPApi) -> Bottle:
                         # Track the discovered gateway instance on the node
                         have_inst = any(i.instance_nr == f"{try_inst:02d}"
                                          for i in node.instances)
-                        if not have_inst:
+                        # Issue #92 — don't re-add an operator-suppressed nr.
+                        if not have_inst and not node.is_instance_suppressed(
+                                f"{try_inst:02d}"):
                             node.instances.append(InstanceInfo(
                                 instance_nr=f"{try_inst:02d}", ip=host,
                                 ports={try_port: "gateway"}))

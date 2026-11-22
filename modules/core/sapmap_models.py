@@ -579,6 +579,22 @@ class SAPNode:
                                         # routable — informational, never used to
                                         # connect.  Surfaced only when != ip.
     instances: list = field(default_factory=list)   # [InstanceInfo, ...]
+    # Issue #92 — operator-suppressed instance numbers.  When an operator
+    # removes a wrongly-attributed / irrelevant instance from the System
+    # Details panel, its instance_nr is recorded here so the scan re-add
+    # vectors (fast-merge, deep-rescan wholesale replace, port-probe
+    # find-or-create, HTTP/SAPControl correction, MS app-server import)
+    # skip it on every subsequent scan.  Normalised to the 2-digit form
+    # (zfill(2)) on write/compare.  Persisted as a sorted list like
+    # _pwspray_tested_triples; rehydrated to a set.
+    suppressed_instance_nrs: set = field(default_factory=set)
+    # Issue #92 (restore) — per-nr undo cache: the InstanceInfo row(s) that
+    # suppression removed, so the panel 'restore' link re-adds the instance
+    # to System Details immediately with no re-scan.  Keyed by the
+    # normalised 2-digit nr; {nr: [InstanceInfo, ...]}.  Rows only — vuln
+    # scalars are deliberately NOT cached (see suppress_instance).
+    # Round-tripped through to_dict/from_dict so undo survives save/reload.
+    suppressed_instance_cache: dict = field(default_factory=dict)
     os_type: str = ""
     db_type: str = ""                   # HDB, ORA, MSS, ADA, DB6
     kernel: str = ""
@@ -1056,6 +1072,198 @@ class SAPNode:
                 ips.add(inst.ip)
         return ips
 
+    # ---- Issue #92: per-instance suppression (durable manual cleanup) ----
+    @staticmethod
+    def _norm_inst_nr(nr) -> str:
+        """Canonical compare/key form for an instance number.
+
+        Numeric instance numbers are zero-padded to 2 digits ('4' -> '04')
+        so the suppression gate matches regardless of whether a producer
+        formats via ``%02d`` or passes the raw string; non-numeric
+        sentinels (e.g. 'XX') pass through unchanged.
+        """
+        s = str(nr or "").strip()
+        return s.zfill(2) if s.isdigit() else s
+
+    def is_instance_suppressed(self, nr) -> bool:
+        """True if ``nr`` has been operator-suppressed on this node."""
+        return self._norm_inst_nr(nr) in self.suppressed_instance_nrs
+
+    def suppress_instance(self, nr) -> int:
+        """Record ``nr`` as suppressed, drop its InstanceInfo row(s) and
+        reconcile now-stale cached ports.  Returns the number of
+        InstanceInfo rows removed from ``self.instances``.
+
+        The removed row(s) are stashed in ``suppressed_instance_cache`` so
+        ``unsuppress_instance`` ('restore') can re-add them to System
+        Details immediately — an instant undo that needs no re-scan.  Only
+        the ROW is cached: node-level vuln scalars/flags are shared state,
+        not per-instance, so restoring them per-nr would resurrect a
+        finding owned by a different instance or clobber a newer scan's
+        verdict.  Restore is therefore purely additive; a vuln flag that
+        suppression legitimately cleared is re-confirmed by a re-scan, not
+        by undo (conservative — undo can never materialise a false
+        finding).
+        """
+        norm = self._norm_inst_nr(nr)
+        removed_rows = [
+            i for i in self.instances
+            if self._norm_inst_nr(getattr(i, "instance_nr", "")) == norm
+        ]
+        self.instances = [
+            i for i in self.instances
+            if self._norm_inst_nr(getattr(i, "instance_nr", "")) != norm
+        ]
+        removed = len(removed_rows)
+        self.suppressed_instance_nrs.add(norm)
+        # Cache the removed row(s) for restore.  Overwrite ONLY when this
+        # call actually removed rows — a repeat suppress of an already-
+        # suppressed nr (removed_rows == []) must not clobber the rows the
+        # first removal cached (else restore would re-add nothing).
+        if removed_rows:
+            self.suppressed_instance_cache[norm] = removed_rows
+        self._reconcile_ports_after_suppress(norm)
+        return removed
+
+    def unsuppress_instance(self, nr) -> bool:
+        """Lift suppression for ``nr`` (operator re-asserting it, e.g. via
+        Set Instance Number or the panel 'restore' link) and re-add the
+        instance row(s) it removed.  Returns True if ``nr`` was previously
+        suppressed.
+
+        Re-adds the cached InstanceInfo row(s) so the instance reappears in
+        System Details at once.  Purely additive: a scan may already have
+        re-added the row (live lab), so a row whose nr is already present is
+        skipped (no duplicate); node-level vuln scalars/flags are left
+        exactly as they are (see suppress_instance — undo never resurrects
+        or clobbers a finding).
+        """
+        norm = self._norm_inst_nr(nr)
+        was = norm in self.suppressed_instance_nrs
+        self.suppressed_instance_nrs.discard(norm)
+        cached = self.suppressed_instance_cache.pop(norm, None)
+        if cached:
+            present = {
+                self._norm_inst_nr(getattr(i, "instance_nr", ""))
+                for i in self.instances
+            }
+            for row in cached:
+                if self._norm_inst_nr(
+                        getattr(row, "instance_nr", "")) not in present:
+                    self.instances.append(row)
+        return was
+
+    def prune_suppressed_instances(self) -> int:
+        """Drop any InstanceInfo whose nr is currently suppressed.  Called
+        after a wholesale-replace / overwrite producer path (add_node
+        carry-forward, deep-rescan) rebuilds the list from fresh scan
+        data.  Returns the number of rows pruned.
+        """
+        if not self.suppressed_instance_nrs:
+            return 0
+        before = len(self.instances)
+        self.instances = [
+            i for i in self.instances
+            if not self.is_instance_suppressed(getattr(i, "instance_nr", ""))
+        ]
+        return before - len(self.instances)
+
+    def _suppressed_cache_to_dict(self) -> dict:
+        """Serialize the Issue #92 restore undo-cache ({nr: [InstanceInfo]}).
+        Kept OUT of ``to_dict``'s own literal so the #218 key-symmetry guard
+        keeps scanning only real constructor keys."""
+        out = {}
+        for k, rows in (self.suppressed_instance_cache or {}).items():
+            out[k] = [r.to_dict() for r in (rows or [])]
+        return out
+
+    @classmethod
+    def _suppressed_cache_from_dict(cls, raw) -> dict:
+        """Rehydrate the Issue #92 restore undo-cache from a .sapmap dict,
+        tolerating legacy / hand-edited / corrupt shapes without ever
+        crashing the whole state load: a non-dict container, a non-list
+        entry, a non-dict row, or an InstanceInfo dict missing/invalid
+        ``instance_nr``/``ports`` are each skipped — matching the
+        robustness of the sibling ``suppressed_instance_nrs`` loader."""
+        out = {}
+        if not isinstance(raw, dict):
+            return out
+        for k, rows in raw.items():
+            # Tolerate the transient {instances, scalars} shape too.
+            if isinstance(rows, dict):
+                rows = rows.get("instances", [])
+            parsed = []
+            if isinstance(rows, list):
+                for r in rows:
+                    if not isinstance(r, dict):
+                        continue
+                    try:
+                        parsed.append(InstanceInfo.from_dict(r))
+                    except (KeyError, ValueError, TypeError):
+                        continue
+            out[cls._norm_inst_nr(k)] = parsed
+        return out
+
+    def _reconcile_ports_after_suppress(self, norm: str) -> None:
+        """Clear cached scalar ports that were discovered on the just-
+        removed instance, then re-derive the vuln flags.
+
+        A cached scalar port encodes its instance in the last two digits
+        (gateway 33NN, internal Message Server 39NN), so a match of
+        ``port % 100 == NN`` means the finding belonged to the removed
+        instance and is now stale.  Java / ambiguous CVE ports
+        (VisualComposer 5NN00, RECON, ICMAD) and the dict-shaped
+        icm_ports list are left as-is — their encoding differs and the
+        next scan re-derives them.  The paired ``*_vulnerable`` bool is
+        handled conservatively by reconcile_vuln_flags (never dropped
+        while any locus survives).
+        """
+        if norm.isdigit():
+            nn = int(norm)
+            if self.gw_vulnerable_port and self.gw_vulnerable_port % 100 == nn:
+                self.gw_vulnerable_port = 0
+            if self.ms_port and self.ms_port % 100 == nn:
+                self.ms_port = 0
+            if (self.cve_2026_58240_ms_port
+                    and self.cve_2026_58240_ms_port % 100 == nn):
+                self.cve_2026_58240_ms_port = 0
+        self.reconcile_vuln_flags()
+
+    def reconcile_vuln_flags(self) -> None:
+        """Clear a node-level vuln flag only when NO evidence of it
+        remains — neither its cached scalar port NOR any surviving
+        instance port of the same family.  Conservative by design: a flag
+        with any surviving locus (a non-zero scalar OR a family port on a
+        surviving instance) is KEPT, so neither a manual instance cleanup
+        nor a scan merge can silently drop a still-valid finding.
+
+        The vuln-defining port frequently lives ONLY in the node-level
+        scalar (gw_vulnerable_port / ms_port), never mirrored into any
+        instance.ports — so a flag must not be cleared merely because no
+        surviving instance happens to carry a family port.  Called after
+        suppress (so removing the instance a vuln was confirmed on can
+        disable host-level actions once its scalar is cleared) AND after a
+        wholesale scan merge re-lights the bool (deep-rescan), keeping the
+        flag consistent with the curated instance list.
+
+        Families: gateway = 33NN; Message Server = internal 39NN (plus the
+        external 36NN sapms port that set_instance_nr seeds).
+        """
+        remaining = set()
+        for inst in self.instances:
+            for p in (inst.ports or {}):
+                try:
+                    remaining.add(int(p))
+                except (TypeError, ValueError):
+                    pass
+        if (self.gw_vulnerable and not self.gw_vulnerable_port
+                and not any(3300 <= p <= 3399 for p in remaining)):
+            self.gw_vulnerable = False
+        if (self.ms_vulnerable and not self.ms_port
+                and not any((3600 <= p <= 3699) or (3900 <= p <= 3999)
+                            for p in remaining)):
+            self.ms_vulnerable = False
+
     def all_hostnames(self) -> set:
         names = set()
         if self.hostname:
@@ -1228,6 +1436,9 @@ class SAPNode:
             "logon_banner_scan": dict(self.logon_banner_scan or {}),
             "logon_banner_findings": list(
                 self.logon_banner_findings or []),
+            "suppressed_instance_nrs": sorted(
+                self.suppressed_instance_nrs or set()),
+            "suppressed_instance_cache": self._suppressed_cache_to_dict(),
         }
 
     @classmethod
@@ -1393,6 +1604,11 @@ class SAPNode:
             logon_banner_scan=dict(d.get("logon_banner_scan", {}) or {}),
             logon_banner_findings=list(
                 d.get("logon_banner_findings", []) or []),
+            suppressed_instance_nrs=set(
+                cls._norm_inst_nr(x)
+                for x in (d.get("suppressed_instance_nrs", []) or [])),
+            suppressed_instance_cache=cls._suppressed_cache_from_dict(
+                d.get("suppressed_instance_cache", {})),
         )
         return node
 
@@ -2500,6 +2716,29 @@ class SAPMAPState:
                   f"different host; new instance keyed as '{key}'")
             node.sid = key
         is_new = key not in self.nodes
+        # Issue #92 — carry operator instance-suppressions forward across
+        # the wholesale node replace below.  A full re-discovery builds a
+        # fresh SAPNode (empty suppression set) and REPLACES the stored
+        # one; without this merge+prune a removed instance silently
+        # returns.  The in-place rescan paths (_merge_scan_into_existing,
+        # deep-rescan) keep the stored node object and so carry the set
+        # for free — this covers the replace path they don't hit.
+        prior = self.nodes.get(key)
+        if prior is not None and (
+                getattr(prior, "suppressed_instance_nrs", None)
+                or getattr(prior, "suppressed_instance_cache", None)):
+            node.suppressed_instance_nrs = (
+                set(node.suppressed_instance_nrs or set())
+                | set(prior.suppressed_instance_nrs or set()))
+            # Carry the restore-cache forward too, so 'restore' still works
+            # after this wholesale replace (prior's removed rows win; a
+            # fresh scan node has none of its own).
+            merged_cache = dict(
+                getattr(prior, "suppressed_instance_cache", {}) or {})
+            merged_cache.update(
+                getattr(node, "suppressed_instance_cache", {}) or {})
+            node.suppressed_instance_cache = merged_cache
+            node.prune_suppressed_instances()
         self.nodes[key] = node
         if is_new:
             # Suppress the "New system plotted" finding for the two
