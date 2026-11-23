@@ -661,6 +661,19 @@ class SAPNode:
     # ctx-menu "Set 10KBLAZE Attacker IP..." entry.
     attacker_ip_override: str = ""
     attacker_ip_force: bool = False
+    # Gateway-visible source IP for the GW SAPXPG F_SAP_INIT ncpic_lu
+    # (issue #79 / #232).  DISTINCT from attacker_ip_override above: that
+    # one records the IP the TARGET sees as the TCP peer for the 10KBLAZE
+    # MS-betrusted trust list; THIS one pins the CPIC LU name our side
+    # declares in F_SAP_INIT, which the gateway's reginfo matches against.
+    # When GW SAPXPG is tunnelled through a SAProuter/NAT (saprouter set),
+    # the auto-detected local socket IP is wrong — the gateway sees the
+    # router's IP as the peer — so if reginfo is pinned to that
+    # router-visible IP, F_SAP_INIT silently fails and P3 hangs.  Set this
+    # to the gateway-visible IP (usually the SAProuter's own IP).  Empty =
+    # auto-detect (correct for a direct connection).  Operator sets it via
+    # the per-node ctx-menu "Set GW Source IP (SAProuter/NAT)".
+    gw_source_ip: str = ""
     # kloris/SAPMAP#41 — True when the MS internal port speaks TLS
     # (system/secure_communication = ON).  Detected via a TLS
     # ClientHello probe in sap_ms_betrusted.probe_ms_tls_required.
@@ -1322,6 +1335,7 @@ class SAPNode:
             "ms_acl_protected": self.ms_acl_protected,
             "attacker_ip_override": self.attacker_ip_override,
             "attacker_ip_force":    bool(self.attacker_ip_force),
+            "gw_source_ip":         self.gw_source_ip,
             "ms_secure_comms_required": self.ms_secure_comms_required,
             "cve_2025_31324_checked": self.cve_2025_31324_checked,
             "cve_2026_58240_checked": self.cve_2026_58240_checked,
@@ -1475,6 +1489,7 @@ class SAPNode:
             ms_acl_protected=d.get("ms_acl_protected", False),
             attacker_ip_override=d.get("attacker_ip_override", "") or "",
             attacker_ip_force=bool(d.get("attacker_ip_force", False)),
+            gw_source_ip=d.get("gw_source_ip", "") or "",
             ms_secure_comms_required=d.get("ms_secure_comms_required", False),
             cve_2025_31324_checked=d.get("cve_2025_31324_checked", False),
             cve_2026_58240_checked=d.get("cve_2026_58240_checked", False),

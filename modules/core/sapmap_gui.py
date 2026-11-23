@@ -3954,6 +3954,9 @@ def create_app(api: SAPMAPApi) -> Bottle:
         # NAT escape-hatch override — writes attacker_ip_override on the
         # node, driving the 10KBLAZE betrusted chain's attacker IP.
         "/api/node/<sid>/set_attacker_ip",
+        # GW SAPXPG source-IP override — writes gw_source_ip on the node,
+        # pinning the F_SAP_INIT ncpic_lu for routed runs (issue #79/#232).
+        "/api/node/<sid>/set_gw_source_ip",
         "/api/node/<sid>/dpmon_sapstar",
         # Ticket forgery + fanout
         "/api/node/<sid>/forge_ticket",
@@ -10615,6 +10618,78 @@ def create_app(api: SAPMAPApi) -> Bottle:
             "sid":          sid,
             "attacker_ip":  getattr(node, "attacker_ip_override", "") or "",
             "force":        bool(getattr(node, "attacker_ip_force", False)),
+        })
+
+    @app.route("/api/node/<sid>/set_gw_source_ip", method="POST")
+    def node_set_gw_source_ip(sid):
+        """Pin the gateway-visible source IP used as the GW SAPXPG
+        F_SAP_INIT ncpic_lu (issue #79 / #232).
+
+        DISTINCT from set_attacker_ip: that one records the TCP-peer IP the
+        target sees for the 10KBLAZE MS-betrusted trust list; THIS one pins
+        the CPIC LU name our side declares, which the gateway's reginfo
+        matches against.  Needed when GW SAPXPG is tunnelled through a
+        SAProuter/NAT — the gateway sees the router's IP as the peer, so the
+        auto-detected local socket IP won't match a router-pinned reginfo
+        and F_SAP_INIT silently fails (P3 hangs).
+
+        Body: {"gw_source_ip": "<ipv4>"}   # "" clears it (auto-detect)
+        Returns {ok, gw_source_ip, routed_warning}.
+        """
+        response.content_type = "application/json"
+        node = api.state.get_node(sid)
+        if not node:
+            response.status = 404
+            return json.dumps({"error": "node_not_found",
+                                "message": f"Node {sid} not found"})
+        data = request.json if isinstance(request.json, dict) else {}
+        raw_ip = (data.get("gw_source_ip") or "").strip()
+        # Permissive IPv4 shape check — only when non-empty so a blank
+        # value clears the override cleanly (back to auto-detect).  Guard
+        # with isascii() before int(): str.isdigit() is True for non-decimal
+        # Unicode digits (e.g. superscript '2') that int() cannot parse, which
+        # would otherwise raise ValueError → HTTP 500 instead of a clean 400.
+        if raw_ip:
+            parts = raw_ip.split(".")
+            if (len(parts) != 4
+                    or not all(p.isascii() and p.isdigit() and 0 <= int(p) <= 255
+                                for p in parts)):
+                response.status = 400
+                return json.dumps({
+                    "error": "bad_gw_source_ip",
+                    "message": "gw_source_ip must be an IPv4 address or empty",
+                })
+        node.gw_source_ip = raw_ip
+        # A routed node with no pinned source IP is exactly the #79 failure
+        # setup — surface it without blocking the (clearing) save.
+        warning = ""
+        if not raw_ip and node.saprouter:
+            warning = (
+                "This node is tunnelled through a SAProuter but no GW source "
+                "IP is pinned — F_SAP_INIT may silently fail and P3 hang.  "
+                "Set it to the IP the gateway sees as your peer (usually the "
+                "SAProuter's own IP).")
+        return json.dumps({
+            "ok":             True,
+            "sid":            sid,
+            "gw_source_ip":   node.gw_source_ip,
+            "routed_warning": warning,
+        })
+
+    @app.route("/api/node/<sid>/get_gw_source_ip")
+    def node_get_gw_source_ip(sid):
+        """Return the per-node GW SAPXPG source-IP override (issue #79/#232)."""
+        response.content_type = "application/json"
+        node = api.state.get_node(sid)
+        if not node:
+            response.status = 404
+            return json.dumps({"error": "node_not_found",
+                                "message": f"Node {sid} not found"})
+        return json.dumps({
+            "ok":           True,
+            "sid":          sid,
+            "gw_source_ip": getattr(node, "gw_source_ip", "") or "",
+            "saprouter":    node.saprouter or "",
         })
 
     @app.route("/api/node/<sid>/create_user", method="POST")
