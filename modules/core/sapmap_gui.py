@@ -2363,7 +2363,8 @@ def _detect_python_cmd(node, soap_route: dict = None) -> str:
                 kernel = node.kernel or "742"
                 spec = _probe_python3_via_gw(
                     host, gw_port, instance_str, hostname,
-                    node.sid or "SAP", kernel, node.saprouter or "")
+                    node.sid or "SAP", kernel, node.saprouter or "",
+                    source_ip=getattr(node, "gw_source_ip", "") or "")
                 if spec:
                     node._python_cmd = spec
                     return spec

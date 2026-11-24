@@ -2864,15 +2864,17 @@ def test_purge_via_gw_calls_execute_sql_via_gateway():
     node.gw_vulnerable = True
     node.gw_vulnerable_port = 3300
     node.os_type = "LINUX"
+    node.gw_source_ip = "203.0.113.9"     # issue #237: routed ncpic_lu pin
 
     seen = {}
 
     def _fake_exec(host, gw_port, sid, hostname, sqls, db_type,
-                    os_type, saprouter=""):
+                    os_type, saprouter="", source_ip="", **kw):
         seen["host"] = host
         seen["gw_port"] = gw_port
         seen["sqls"] = sqls
         seen["db_type"] = db_type
+        seen["source_ip"] = source_ip
         return True
 
     with patch.object(sap_db_sql_writers, "_execute_sql_via_gateway",
@@ -2888,6 +2890,7 @@ def test_purge_via_gw_calls_execute_sql_via_gateway():
     assert len(seen["sqls"]) == 1
     assert "RFCDES" in seen["sqls"][0]
     assert "20260626" in seen["sqls"][0]
+    assert seen["source_ip"] == "203.0.113.9"   # routed pin threaded (#237)
 
 
 def test_purge_via_gw_surfaces_gw_failure():

@@ -300,11 +300,13 @@ def test_dbwriter_entrypoints_accept_and_publish_source_ip(dbwriter_src: str):
         assert idx != -1, fn
         sig_end = dbwriter_src.find("):", idx)
         assert "source_ip" in dbwriter_src[idx:sig_end], fn
-    # Each entrypoint publishes the pin to the thread before dispatching —
-    # 3 call sites (exclude the single `def _set_gw_source_ip(...)` line).
+    # Each entrypoint publishes the pin to the thread before dispatching.
+    # 3 DB-writer entrypoints + _probe_python3_via_gw's own conditional
+    # publish (issue #237) = 4 call sites (exclude the single
+    # `def _set_gw_source_ip(...)` line).
     calls = (dbwriter_src.count("_set_gw_source_ip(source_ip)")
              - dbwriter_src.count("def _set_gw_source_ip(source_ip)"))
-    assert calls == 3
+    assert calls == 4
 
 
 def test_exploit_threads_source_ip_into_db_writers(exploit_src: str):
@@ -327,8 +329,9 @@ def test_ncpic_local_ip_honours_and_clears_override():
 
 
 def test_dbwriter_entrypoints_are_scope_guarded(dbwriter_src: str):
-    # All 3 entrypoints carry the scope guard that restores the pin on exit.
-    assert dbwriter_src.count("@_scoped_gw_source_ip") == 3
+    # The 3 DB-writer entrypoints + _probe_python3_via_gw (issue #237) all
+    # carry the scope guard that restores the pin on exit.
+    assert dbwriter_src.count("@_scoped_gw_source_ip") == 4
 
 
 def test_scoped_gw_source_ip_restores_prior_value_no_stale_leak():
