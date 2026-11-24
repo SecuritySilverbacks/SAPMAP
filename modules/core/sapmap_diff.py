@@ -104,6 +104,18 @@ def _scc_summary(s) -> dict:
     }
 
 
+def _hostcontrol_summary(h) -> dict:
+    """SAP(Host)Control / SAP Host Agent entity summary (issue #91)."""
+    return {
+        "host":         getattr(h, "host", ""),
+        "version":      getattr(h, "version", "") or "",
+        "pwned":        bool(getattr(h, "pwned", False)),
+        "ports":        sorted((getattr(h, "ports", {}) or {}).keys()),
+        "linked_sids":  sorted(getattr(h, "linked_sids", []) or []),
+        "os_exec_capable": bool(getattr(h, "os_exec_capable", False)),
+    }
+
+
 def _finding_summary(sid: str, f) -> dict:
     sev = getattr(f, "severity", None)
     sev_name = getattr(sev, "name", str(sev)) if sev else "INFO"
@@ -155,6 +167,17 @@ def _changed_scc_fields(old: dict, new: dict) -> list:
     return out
 
 
+def _changed_hostcontrol_fields(old: dict, new: dict) -> list:
+    out = []
+    for k in ("version", "pwned", "os_exec_capable"):
+        if old.get(k) != new.get(k):
+            out.append((k, old.get(k), new.get(k)))
+    for k in ("ports", "linked_sids"):
+        if set(old.get(k, []) or []) != set(new.get(k, []) or []):
+            out.append((k, old.get(k, []), new.get(k, [])))
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Core diff
 # ---------------------------------------------------------------------------
@@ -178,6 +201,7 @@ def compute_state_diff(baseline: SAPMAPState,
         "findings":    {"added": [], "removed": []},
         "connections": {"added": [], "removed": [], "changed": []},
         "scc_nodes":   {"added": [], "removed": [], "changed": []},
+        "host_control_nodes": {"added": [], "removed": [], "changed": []},
         "trust_chains": {"added": [], "removed": []},
         "created_users": {"added": [], "removed": []},
         # Password-spraying runs (issue #69, PR5).  Added entries
@@ -263,6 +287,29 @@ def compute_state_diff(baseline: SAPMAPState,
         changes = _changed_scc_fields(old, new)
         if changes:
             diff["scc_nodes"]["changed"].append({
+                "host": h,
+                "before": old, "after": new,
+                "changes": [
+                    {"field": f, "before": b, "after": a}
+                    for (f, b, a) in changes
+                ],
+            })
+
+    # --- SAP(Host)Control nodes (issue #91) ---
+    base_hcs = getattr(baseline, "host_control_nodes", {}) or {}
+    curr_hcs = getattr(current, "host_control_nodes", {}) or {}
+    for h in sorted(set(curr_hcs) - set(base_hcs)):
+        diff["host_control_nodes"]["added"].append(
+            _hostcontrol_summary(curr_hcs[h]))
+    for h in sorted(set(base_hcs) - set(curr_hcs)):
+        diff["host_control_nodes"]["removed"].append(
+            _hostcontrol_summary(base_hcs[h]))
+    for h in sorted(set(curr_hcs) & set(base_hcs)):
+        old = _hostcontrol_summary(base_hcs[h])
+        new = _hostcontrol_summary(curr_hcs[h])
+        changes = _changed_hostcontrol_fields(old, new)
+        if changes:
+            diff["host_control_nodes"]["changed"].append({
                 "host": h,
                 "before": old, "after": new,
                 "changes": [
@@ -399,6 +446,8 @@ def compute_state_diff(baseline: SAPMAPState,
         "new_chains_to_prd":   new_chains_to_prd,
         "scc_added":           len(diff["scc_nodes"]["added"]),
         "scc_removed":         len(diff["scc_nodes"]["removed"]),
+        "hostcontrol_added":   len(diff["host_control_nodes"]["added"]),
+        "hostcontrol_removed": len(diff["host_control_nodes"]["removed"]),
         "users_created":       len(diff["created_users"]["added"]),
         "users_removed":       len(diff["created_users"]["removed"]),
         # Password-spraying KPIs (PR5).
@@ -594,6 +643,39 @@ def build_diff_markdown(diff: dict) -> str:
             lines.append(f"### Changed ({len(diff['scc_nodes']['changed'])})")
             lines.append("")
             for c in diff["scc_nodes"]["changed"]:
+                lines.append(f"#### {_md_esc(c['host'])}")
+                lines.append("")
+                for ch in c["changes"]:
+                    lines.append(
+                        f"- `{ch['field']}`: {_md_esc(ch['before'])} → "
+                        f"**{_md_esc(ch['after'])}**"
+                    )
+                lines.append("")
+
+    # SAP(Host)Control (issue #91)
+    if (diff["host_control_nodes"]["added"]
+            or diff["host_control_nodes"]["removed"]
+            or diff["host_control_nodes"]["changed"]):
+        lines += ["---", "", "## SAP(Host)Control (Host Agent)", ""]
+        for label, key in (("Added", "added"), ("Removed", "removed")):
+            if diff["host_control_nodes"][key]:
+                lines.append(
+                    f"### {label} ({len(diff['host_control_nodes'][key])})")
+                lines.append("")
+                for h in diff["host_control_nodes"][key]:
+                    _sids = ", ".join(h.get("linked_sids", []) or [])
+                    lines.append(
+                        f"- {_md_esc(h['host'])} "
+                        f"v{_md_esc(h['version']) or '?'}"
+                        + (f" (manages {_md_esc(_sids)})" if _sids else "")
+                        + (" — ⚡ pwned" if h['pwned'] else "")
+                    )
+                lines.append("")
+        if diff["host_control_nodes"]["changed"]:
+            lines.append(
+                f"### Changed ({len(diff['host_control_nodes']['changed'])})")
+            lines.append("")
+            for c in diff["host_control_nodes"]["changed"]:
                 lines.append(f"#### {_md_esc(c['host'])}")
                 lines.append("")
                 for ch in c["changes"]:
