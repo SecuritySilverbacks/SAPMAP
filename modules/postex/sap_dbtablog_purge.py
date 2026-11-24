@@ -331,7 +331,8 @@ def purge_dbtablog_via_gw_hdbsql(node, base_date: str, base_time: str,
     try:
         ok = _execute_sql_via_gateway(
             host, gw_port, sid, hostname, [sql],
-            db_type="HDB", os_type=os_type, saprouter=saprouter)
+            db_type="HDB", os_type=os_type, saprouter=saprouter,
+            source_ip=getattr(node, "gw_source_ip", "") or "")
     except Exception as e:
         result["error"] = f"GW exec raised: {e!s}"[:200]
         return result
