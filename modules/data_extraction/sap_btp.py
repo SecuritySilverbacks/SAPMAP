@@ -135,13 +135,79 @@ def extract_region_from_token(token: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# TLS context helper (issue #238)
+# ---------------------------------------------------------------------------
+
+def btp_ssl_context(insecure: bool = False) -> ssl.SSLContext:
+    """Build the TLS context used for all BTP HTTPS from this process.
+
+    ``insecure=False`` (default) keeps certificate verification ON.
+    ``ssl.create_default_context()`` loads the system trust store and
+    honours ``SSL_CERT_FILE`` / ``SSL_CERT_DIR``.  When neither is set we
+    additionally graft certifi's CA bundle (if importable); an explicitly
+    configured store is left untouched so the operator can pin / narrow
+    trust.  Grafting *augments* the store (it never replaces it), so
+    corporate roots already present stay
+    trusted while public roots become available even on a stock python.org
+    framework build whose OpenSSL cert dir was never populated by
+    ``Install Certificates.command`` — the exact state that makes verified
+    requests to public ``*.hana.ondemand.com`` endpoints fail with
+    ``CERTIFICATE_VERIFY_FAILED: unable to get local issuer certificate``.
+
+    ``insecure=True`` disables verification (``CERT_NONE``).  Callers use
+    this only as an explicit, logged fallback after a verified attempt
+    raised a certificate-verification error — e.g. XSUAA on training /
+    sandbox tenants fronted by a custom or self-signed CA.
+    """
+    ctx = ssl.create_default_context()
+    if insecure:
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        return ctx
+    # Respect an explicit operator trust store.  create_default_context()
+    # has already loaded SSL_CERT_FILE / SSL_CERT_DIR if set; when the
+    # operator points those at a specific CA they may be NARROWING trust
+    # (e.g. pinning to an engagement CA to detect interception), so grafting
+    # certifi's full public root set on top would silently widen it back.
+    # Only graft certifi when no explicit store is configured — that is the
+    # empty-default-store case issue #238 targets.
+    import os
+    if os.environ.get("SSL_CERT_FILE") or os.environ.get("SSL_CERT_DIR"):
+        return ctx
+    try:
+        import certifi
+        ctx.load_verify_locations(cafile=certifi.where())
+    except Exception:
+        # certifi absent/unreadable — keep whatever the default store has.
+        # A genuine verify failure still surfaces (fail-closed) unless the
+        # caller explicitly opted into the insecure retry.
+        pass
+    return ctx
+
+
+def btp_is_cert_verify_error(reason) -> bool:
+    """True iff *reason* (a ``urllib.error.URLError.reason``) is a TLS
+    certificate-VERIFICATION failure, as opposed to a generic handshake,
+    protocol or network error.  The insecure fallback is taken only for
+    verification failures — downgrading on, say, a connection reset would
+    mask real problems without helping.
+    """
+    if isinstance(reason, ssl.SSLCertVerificationError):
+        return True
+    if isinstance(reason, ssl.SSLError):
+        return "CERTIFICATE_VERIFY_FAILED" in str(reason)
+    return False
+
+
+# ---------------------------------------------------------------------------
 # HTTP helper — rate-limited, logged, JSON-decoding
 # ---------------------------------------------------------------------------
 
 def _btp_get(url: str, token: str, *,
               token_fp: Optional[str] = None,
               timeout: float = 12.0,
-              accept: str = "application/json") -> Tuple[int, dict, bytes]:
+              accept: str = "application/json",
+              insecure: bool = False) -> Tuple[int, dict, bytes]:
     """GET ``url`` with the bearer token.  Returns (status, headers_dict, body_bytes).
 
     HTTPError is captured (its body is returned alongside the error code)
@@ -157,17 +223,52 @@ def _btp_get(url: str, token: str, *,
         "Accept": accept,
         "User-Agent": _UA,
     })
-    ctx = ssl.create_default_context()
-    try:
+    def _fetch(ctx):
         with urllib.request.urlopen(req, timeout=timeout, context=ctx) as r:
-            body = r.read()
-            return (r.status, dict(r.headers), body)
-    except urllib.error.HTTPError as e:
+            return (r.status, dict(r.headers), r.read())
+
+    def _http_error(e):
         try:
             body = e.read()
         except Exception:
             body = b""
         return (e.code, dict(e.headers or {}), body)
+
+    try:
+        return _fetch(btp_ssl_context())
+    except urllib.error.HTTPError as e:
+        return _http_error(e)
+    except urllib.error.URLError as e:
+        if not btp_is_cert_verify_error(getattr(e, "reason", None)):
+            raise
+        reason = getattr(e, "reason", e)
+        if not insecure:
+            # Fail CLOSED: this request carries the Bearer token, so we do
+            # NOT silently drop verification on an attacker-triggerable
+            # signal.  The cert could not be trusted — empty local CA store,
+            # a private/unknown CA, or interception.  Surface it and stop;
+            # the insecure retry is an explicit per-call opt-in (#238).
+            msg = (f"BTP[{fp}] TLS certificate verification FAILED for {url} "
+                   f"({reason}). Not retrying (fail-closed). If this is the "
+                   f"stock-python empty-CA-store case, set "
+                   f"SSL_CERT_FILE=\"$(python3 -m certifi)\"; if the tenant "
+                   f"uses a private CA, point SSL_CERT_FILE at it; otherwise "
+                   f"this may indicate interception. Re-run with the insecure "
+                   f"opt-in only after verifying the endpoint.")
+            logger.warning(msg)
+            print(f"[!] {msg}")
+            raise
+        # Explicit operator opt-in: retry once WITHOUT verification.  The
+        # Bearer token will traverse an unverified channel — logged for audit.
+        warn = (f"BTP[{fp}] TLS verification failed for {url} ({reason}); "
+                f"insecure opt-in set — retrying WITHOUT verification. The "
+                f"Bearer token will be sent over an UNVERIFIED channel.")
+        logger.warning(warn)
+        print(f"[!] {warn}")
+        try:
+            return _fetch(btp_ssl_context(insecure=True))
+        except urllib.error.HTTPError as e2:
+            return _http_error(e2)
 
 
 def _json_or_none(body: bytes):
