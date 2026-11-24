@@ -2254,6 +2254,99 @@ class SCCNode:
         return cls(**clean)
 
 
+@dataclass
+class HostControlNode:
+    """SAP Host Agent / SAP(Host)Control on a host — sibling to SAPNode.
+
+    Issue #91.  The Host Agent (SAPHostControl, TCP 1128 HTTP / 1129 HTTPS)
+    is a HOST-level service: one per box, managing every SAP instance on it.
+    Historically its ports were folded onto whichever SAP SID happened to
+    share the host (the "Inst XX / 1128,1129" symptom), which mis-attributes
+    a host service to an application instance.  This entity gives it its own
+    map box so discovery, topology and vuln attribution stay honest.
+
+    Identifier: ``host`` (string).  Lives in SAPMAPState.host_control_nodes
+    keyed by host.  Deliberately NOT a SAPNode (keeps it out of state.nodes,
+    so no SAP-node iterator, menu, count, chain-BFS or deep-rescan merge
+    touches it).
+    """
+    host: str = ""                              # acts as identifier
+    ip: str = ""
+    http_port: int = 1128                       # SAPHostControl HTTP
+    https_port: int = 1129                      # SAPHostControl HTTPS
+    ports: dict = field(default_factory=dict)   # {1128: "saphost_http", 1129: "saphost_https"}
+    reachable: bool = False
+    # Enrichment from a positive GetSystemInstanceList (query_host_agent_sid).
+    version: str = ""                           # host-agent / kernel patch
+    sid_primary: str = ""                       # SID the agent fronts (informational, never a key)
+    managed_sids: list = field(default_factory=list)   # SIDs the agent reports on this host
+    linked_sids: list = field(default_factory=list)    # co-located SAPNode SIDs — drives the map edge
+    fingerprint_source: str = ""                # "scan" | "hostagent_soap" | "exploit_probe"
+    # The genuine host-agent capability SAPMAP already models: OS shell as
+    # sapadm via /SAPHostControl.CGI (os_access_type on an RFCConnection).
+    os_access_type: str = ""                    # "hostagent_sapadm" | "hostagent_generic" | ""
+    os_exec_capable: bool = False
+    pwned: bool = False
+    cves_confirmed: list = field(default_factory=list)
+    cves_suspected: list = field(default_factory=list)
+    cve_details: list = field(default_factory=list)   # [{cve, severity, headline, ref, status}, ...]
+    findings: list = field(default_factory=list)
+    credentials: list = field(default_factory=list)
+    position: Optional[tuple] = None
+    notes: str = ""
+
+    def to_dict(self) -> dict:
+        return {
+            "host": self.host,
+            "ip": self.ip,
+            "http_port": self.http_port,
+            "https_port": self.https_port,
+            "ports": {str(k): v for k, v in (self.ports or {}).items()},
+            "reachable": self.reachable,
+            "version": self.version,
+            "sid_primary": self.sid_primary,
+            "managed_sids": list(self.managed_sids),
+            "linked_sids": list(self.linked_sids),
+            "fingerprint_source": self.fingerprint_source,
+            "os_access_type": self.os_access_type,
+            "os_exec_capable": self.os_exec_capable,
+            "pwned": self.pwned,
+            "cves_confirmed": list(self.cves_confirmed),
+            "cves_suspected": list(self.cves_suspected),
+            "cve_details": [dict(d) for d in (self.cve_details or [])],
+            "findings": [f.to_dict() if hasattr(f, "to_dict") else f
+                         for f in self.findings],
+            "credentials": [c.to_dict() if hasattr(c, "to_dict") else c
+                            for c in self.credentials],
+            "position": list(self.position) if self.position else None,
+            "notes": self.notes,
+            "kind": "hostcontrol",
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "HostControlNode":
+        known = {f.name for f in fields(cls)}
+        clean = {k: v for k, v in (d or {}).items() if k in known}
+        if isinstance(clean.get("position"), list):
+            clean["position"] = tuple(clean["position"])
+        # Ports round-trip with string keys in JSON — restore int keys.
+        if isinstance(clean.get("ports"), dict):
+            fixed = {}
+            for k, v in clean["ports"].items():
+                try:
+                    fixed[int(k)] = v
+                except (TypeError, ValueError):
+                    fixed[k] = v
+            clean["ports"] = fixed
+        findings_d = clean.get("findings", [])
+        clean["findings"] = [Finding.from_dict(f) if isinstance(f, dict) and "severity" in f else f
+                             for f in findings_d]
+        creds_d = clean.get("credentials", [])
+        clean["credentials"] = [Credentials.from_dict(c) if isinstance(c, dict) else c
+                                for c in creds_d]
+        return cls(**clean)
+
+
 # ---------------------------------------------------------------------------
 # BTP — Subaccount + Destination
 # ---------------------------------------------------------------------------
@@ -2556,6 +2649,7 @@ class SAPMAPState:
     trust_relations: list = field(default_factory=list)  # [TrustRelation, ...]
     scc_nodes: dict = field(default_factory=dict)        # host -> SCCNode (Cloud Connectors)
     btp_subaccounts: dict = field(default_factory=dict)  # uuid -> BTPSubaccountNode
+    host_control_nodes: dict = field(default_factory=dict)  # host -> HostControlNode (SAP Host Agent, #91)
     scan_config: dict = field(default_factory=dict)
     # Tier 2 OPSEC settings (terminal-name spoof, etc.).  Stored as a
     # plain dict on the SAPMAPState boundary to keep import order light
@@ -2936,6 +3030,17 @@ class SAPMAPState:
             for row in (entry.get("locked_on") or []):
                 if row and len(row) >= 1 and row[0] == old_sid:
                     row[0] = new_sid
+
+        # SAP(Host)Control entities (#91) reference the SAP SIDs they
+        # manage by value — keep the host↔agent↔system links correct
+        # across a placeholder → real-SID rename.
+        for hc in (getattr(self, "host_control_nodes", None) or {}).values():
+            hc.linked_sids = [new_sid if s == old_sid else s
+                              for s in (hc.linked_sids or [])]
+            hc.managed_sids = [new_sid if s == old_sid else s
+                               for s in (hc.managed_sids or [])]
+            if getattr(hc, "sid_primary", "") == old_sid:
+                hc.sid_primary = new_sid
 
         return ""
 
@@ -3827,6 +3932,11 @@ class SAPMAPState:
                         if getattr(s, "pwned", False))
         btp_pwned = sum(1 for b in (self.btp_subaccounts or {}).values()
                          if getattr(b, "pwned", False))
+        # SAP(Host)Control entities (#91) are their own map boxes / ⚡
+        # candidates, so they count as "systems" for the status-bar to
+        # match what the operator sees — same treatment as SCC/BTP.
+        hostctrl_pwned = sum(1 for h in (self.host_control_nodes or {}).values()
+                             if getattr(h, "pwned", False))
         dbcon_edges_total = sum(
             len(getattr(n, "dbcon_edges", None) or [])
             for n in self.nodes.values())
@@ -3851,10 +3961,11 @@ class SAPMAPState:
             "systems": (len(visible_sap_nodes)
                         + len(self.scc_nodes)
                         + len(self.btp_subaccounts or {})
+                        + len(self.host_control_nodes or {})
                         + dbcon_edges_total),
             "connections": len(self.connections),
             "pwned": (sum(1 for n in visible_sap_nodes if n.pwned)
-                      + scc_pwned + btp_pwned + dbcon_pwned),
+                      + scc_pwned + btp_pwned + hostctrl_pwned + dbcon_pwned),
             "users_created": len(self.created_users),
             "production_systems": sum(1 for n in self.nodes.values() if n.is_production),
             "critical_connections": sum(1 for c in self.connections
@@ -3881,6 +3992,9 @@ class SAPMAPState:
             "scc_nodes": {h: n.to_dict() for h, n in self.scc_nodes.items()},
             "btp_subaccounts": {
                 u: n.to_dict() for u, n in self.btp_subaccounts.items()
+            },
+            "host_control_nodes": {
+                h: n.to_dict() for h, n in self.host_control_nodes.items()
             },
             "spray_attempts_counter": dict(self.spray_attempts_counter or {}),
             "pwspray_locked_users": dict(self.pwspray_locked_users or {}),
@@ -3924,6 +4038,13 @@ class SAPMAPState:
         state.dedupe_scc_nodes()
         for uuid, sub_d in d.get("btp_subaccounts", {}).items():
             state.btp_subaccounts[uuid] = BTPSubaccountNode.from_dict(sub_d)
+        # SAP(Host)Control entities (#91).  Host-keyed, so the dict itself
+        # dedupes; no alias-fold pass needed (the builder is idempotent per
+        # host).  Old .sapmap files simply have no such key and load with an
+        # empty dict — the mis-attributed 'XX' row stays on the SAP node
+        # until the next scan splits it out (back-compat: no load migration).
+        for host, hc_d in (d.get("host_control_nodes", {}) or {}).items():
+            state.host_control_nodes[host] = HostControlNode.from_dict(hc_d)
         state.spray_attempts_counter = dict(
             d.get("spray_attempts_counter", {}))
         state.pwspray_locked_users = dict(
