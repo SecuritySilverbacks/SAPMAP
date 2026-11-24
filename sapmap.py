@@ -685,10 +685,18 @@ def _cli_scan(api, args):
         sys.exit(1)
 
     fast_mode = not args.deep
+    # Route SCC + SAP(Host)Control (#91) entities into state via callbacks —
+    # they are delivered ONLY through these callbacks, never the return value,
+    # so a CLI scan without them would silently drop them (and, post-#91, lose
+    # the 1128/1129 host-agent fact entirely since it no longer rides on the
+    # SAP node as an 'XX' instance).
     nodes = discover_systems(
         targets,
         fast_mode=fast_mode,
         verbose=args.verbose,
+        scc_callback=lambda scc: api.state.scc_nodes.update({scc.host: scc}),
+        hostcontrol_callback=lambda hc: api.state.host_control_nodes.update(
+            {hc.host: hc}),
     )
 
     for node in nodes:
