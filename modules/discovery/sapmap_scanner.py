@@ -1101,12 +1101,21 @@ def _build_port_list(instance_range, include_hana=False, skip_non_sap=True):
                 ports.append((port, "saprouter", "99"))
                 continue
             ports.append((port, svc_name, inst_str))
-        # HANA SQL ports: 3XX13 (SystemDB) and 3XX15 (first tenant)
+        # HANA SQL ports (issue #249):
+        #   3NN13 = SystemDB (MDC) — the system-database SQL endpoint.
+        #           On a single-container install the port is not used.
+        #   3NN15 = single-container indexserver — the per-host index-
+        #           server's SQL endpoint on a single-container install
+        #           (or the MDC compat endpoint).  This is NOT a tenant
+        #           port: true MDC tenant SQL ports are DYNAMIC (3NN41+,
+        #           assigned by HANA, readable via M_SERVICES) and
+        #           cannot be computed from the instance number — see
+        #           ``sap_port_scheme.hana_indexserver``.
         if include_hana:
             hana_sysdb = 30000 + inst_nr * 100 + 13
-            hana_tenant = 30000 + inst_nr * 100 + 15
+            hana_indexserver = 30000 + inst_nr * 100 + 15
             ports.append((hana_sysdb, "hana_sql", inst_str))
-            ports.append((hana_tenant, "hana_sql", inst_str))
+            ports.append((hana_indexserver, "hana_sql", inst_str))
     return ports
 
 
@@ -1539,6 +1548,11 @@ def fast_scan_host(host: str, instance_range: tuple = DEFAULT_INSTANCE_RANGE,
             # may not echo the signature but stay tagged as gateway_snc.
             pass2_ports.append((4800 + inst_nr, "gateway_snc", inst_str))
             pass2_ports.append((3900 + inst_nr, "ms_internal", inst_str))  # betrusted
+            # HANA SQL:
+            #   3NN13 = SystemDB (MDC) / single-container indexserver mirror
+            #   3NN15 = single-container indexserver (NOT a tenant port —
+            #           see sap_port_scheme.hana_indexserver; MDC tenant
+            #           SQL ports 3NN41+ are DYNAMIC, read via M_SERVICES)
             pass2_ports.append((30000 + inst_nr * 100 + 13, "hana_sql", inst_str))
             pass2_ports.append((30000 + inst_nr * 100 + 15, "hana_sql", inst_str))
             # Java HTTP / HTTPS dispatcher ports (icm) — by SAP convention
@@ -1546,10 +1560,31 @@ def fast_scan_host(host: str, instance_range: tuple = DEFAULT_INSTANCE_RANGE,
             # SAPControl is firewalled or refuses GetInstanceProperties.
             pass2_ports.append((50000 + inst_nr * 100,     "java_http",  inst_str))
             pass2_ports.append((50000 + inst_nr * 100 + 1, "java_https", inst_str))
+            # AS-Java P4 (5NN04, SAP Note 889188) — a strong Java
+            # fingerprint: ABAP instances do not open P4, so a hit on
+            # 5NN04 alone is enough to classify the instance as Java.
+            # Service token matches the SAProuter-indirect scanner's
+            # "java_p4" for back-compat; the canonical name in
+            # ``sap_port_scheme`` is "p4".  Issue #249.
+            pass2_ports.append((50000 + inst_nr * 100 + 4, "java_p4", inst_str))
+            # sapstartsrv HTTPS (5NN14, SAP Note 1014480) — the HTTPS
+            # side of SAPControl SOAP.  The HTTP side (5NN13) is already
+            # swept in Pass 1's quick probe; adding the HTTPS variant
+            # here catches SAPControl listeners that reject the HTTP
+            # probe when ``service/https/enable=1``.  Issue #249.
+            pass2_ports.append((50000 + inst_nr * 100 + 14, "sapstartsrv_s", inst_str))
+            # Enqueue Replication (5NN16, SAP Note 1552925) — the ERS
+            # replica's catch-up stream from the standalone enqueue
+            # server.  Only meaningful on hosts that run an ERS
+            # instance, but the per-instance cost is one extra probe
+            # so we do it for every discovered instance rather than
+            # gating on the (not-yet-known) role.  Issue #249.
+            pass2_ports.append((50000 + inst_nr * 100 + 16, "ers_repl", inst_str))
 
         print(f"[*] {host}: Pass 2: scanning {len(pass2_ports)} ports "
               f"(gateway 33XX, gateway SNC 48XX, HANA 3XX13/3XX15, "
-              f"Java 5NN00/01) for {len(found_instances)} instance(s) ...")
+              f"Java 5NN00/01/04, sapstartsrv HTTPS 5NN14, ERS 5NN16) "
+              f"for {len(found_instances)} instance(s) ...")
         t0 = time.time()
         hits2 = _do_scan(pass2_ports, label="Pass 2")
         if not _cancelled():

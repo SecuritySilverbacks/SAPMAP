@@ -3982,11 +3982,13 @@ const PILL_LABELS = {
   'HANA': 'HANA', 'MAXDB': 'MaxDB', 'MSSQL': 'MSSQL',
   'ORACLE': 'Oracle', 'DB2': 'DB2'
 };
-// SAP instance-role descriptions (#248).  Mirrors INSTANCE_ROLE_LABELS in
-// modules/core/sapmap_models.py — kept in sync by tests/test_instance_roles_248.py.
+// SAP instance-role descriptions (#248 / #249).  Mirrors INSTANCE_ROLE_LABELS
+// in modules/core/sapmap_models.py — kept in sync by the parity test in
+// tests/test_instance_roles_248.py.  ASCS/SCS wording lists the two services
+// the central-services instance runs (Message Server + Enqueue).
 const INSTANCE_ROLE_LABELS = {
-  'ASCS': 'ABAP Central Services',
-  'SCS':  'Java Central Services',
+  'ASCS': 'ABAP Central Services (Message Server + Enqueue)',
+  'SCS':  'Java Central Services (Message Server + Enqueue)',
   'ERS':  'Enqueue Replication Server',
   'PAS':  'Primary Application Server',
   'AAS':  'Additional Application Server',
@@ -3996,6 +3998,49 @@ const INSTANCE_ROLE_LABELS = {
   'HDB':  'HANA Database',
   'SMDA': 'Diagnostics Agent'
 };
+
+// Canonical per-port descriptions (#249).  Mirrors SAP_PORT_SCHEME in
+// modules/core/sap_port_scheme.py — kept in sync by the parity test in
+// tests/test_port_scheme_249.py.  Used to label the pills in the Details
+// panel's Open Ports section so an operator can see at a glance which
+// SAP component each number belongs to.
+const SAP_PORT_SCHEME_JS = [
+  ['dispatcher',      'base+NN', 3200,  0, 'SAP Dispatcher (DIAG, sapdp<NN>)'],
+  ['gateway',         'base+NN', 3300,  0, 'SAP Gateway (plaintext RFC, sapgw<NN>)'],
+  ['gateway_snc',     'base+NN', 4800,  0, 'SAP Gateway (SNC-wrapped RFC, sapgw<NN>s)'],
+  ['sapms',           'base+NN', 3600,  0, 'Message Server — external (sapms<SID>; SAP GUI logon-group broadcast)'],
+  ['ms_internal',     'base+NN', 3900,  0, 'Message Server — internal (rdisp/msserv_internal; betrusted vector)'],
+  ['ms_http',         'base+NN', 8100,  0, 'Message Server HTTP (logon-group browse; /msgserver/*)'],
+  ['icm_http',        'base+NN', 8000,  0, 'ICM HTTP'],
+  ['icm_https',       'base+NN', 44300, 0, 'ICM HTTPS'],
+  ['sapstartsrv',     '5NN',     50000, 13, 'sapstartsrv / SAPControl SOAP (HTTP)'],
+  ['sapstartsrv_s',   '5NN',     50000, 14, 'sapstartsrv / SAPControl SOAP (HTTPS)'],
+  ['j2ee_http',       '5NN',     50000, 0,  'AS Java HTTP (ICM/J2EE)'],
+  ['j2ee_https',      '5NN',     50000, 1,  'AS Java HTTPS (ICM/J2EE)'],
+  ['p4',              '5NN',     50000, 4,  'AS Java P4 (RMI / JNDI)'],
+  ['ers_repl',        '5NN',     50000, 16, 'Enqueue Replication (ERS replica catch-up)'],
+  ['hana_sysdb',      '3NN',     30000, 13, 'HANA SQL — SystemDB (MDC) / indexserver on single-container'],
+  ['hana_indexserver','3NN',     30000, 15, 'HANA SQL — single-container indexserver (or MDC compat endpoint)'],
+];
+
+// Describe a port given the SAP instance number it belongs to.  Returns
+// '' when nothing in the canonical table matches.  The GUI uses this
+// for pill tooltips in the Open Ports section (#249) — an operator
+// hovering 3NN15 sees "single-container indexserver" instead of the
+// previous (wrong) "tenant" label.
+function describeSapPort(port, instNr) {
+  const nn = parseInt(instNr, 10);
+  if (isNaN(nn) || nn < 0 || nn > 99) return '';
+  for (const [, formula, base, offset, desc] of SAP_PORT_SCHEME_JS) {
+    let p;
+    if (formula === 'base+NN') p = base + nn;
+    else if (formula === '5NN') p = 50000 + nn * 100 + offset;
+    else if (formula === '3NN') p = 30000 + nn * 100 + offset;
+    else continue;
+    if (p === port) return desc;
+  }
+  return '';
+}
 
 // --- API helpers ---
 async function api(method, path, body) {
@@ -12306,10 +12351,24 @@ function showDetails(sid, opts) {
     <div class="detail-section">
       <h4>Open Ports</h4>
       ${(() => {
-        const allPorts = new Set();
-        for (const inst of (n.instances || [])) for (const p of Object.keys(inst.ports || {})) allPorts.add(parseInt(p));
-        if (allPorts.size === 0) return '<div style="color:#484f58">None detected</div>';
-        return [...allPorts].sort((a,b)=>a-b).map(p => `<span style="display:inline-block;background:#21262d;border:1px solid #30363d;border-radius:4px;padding:1px 6px;margin:2px;font-size:11px;font-family:monospace">${p}</span>`).join('');
+        // Collect (port -> instance_nr) so each pill can describe the
+        // port's SAP role (#249).  When the same port appears on
+        // multiple instances we keep the first we see — the
+        // description is formula-derived so it doesn't drift.
+        const portInst = new Map();
+        for (const inst of (n.instances || [])) {
+          for (const p of Object.keys(inst.ports || {})) {
+            const pn = parseInt(p);
+            if (!portInst.has(pn)) portInst.set(pn, inst.instance_nr);
+          }
+        }
+        if (portInst.size === 0) return '<div style="color:#484f58">None detected</div>';
+        const ports = [...portInst.keys()].sort((a,b)=>a-b);
+        return ports.map(p => {
+          const desc = describeSapPort(p, portInst.get(p));
+          const titleAttr = desc ? ` title="${escHtml(desc)}"` : '';
+          return `<span style="display:inline-block;background:#21262d;border:1px solid #30363d;border-radius:4px;padding:1px 6px;margin:2px;font-size:11px;font-family:monospace"${titleAttr}>${p}</span>`;
+        }).join('');
       })()}
     </div>
     <div class="detail-section">

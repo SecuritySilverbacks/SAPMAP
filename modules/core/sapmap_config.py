@@ -416,27 +416,41 @@ DEFAULT_TIMEOUT = 3     # seconds
 DEFAULT_POLL_INTERVAL = 3
 DEFAULT_MAX_POLL_ATTEMPTS = 40
 
-# Fast scan: only these port patterns
+# Fast scan: only these port patterns.
+#
+# Derived from the canonical port scheme — the single source of truth
+# for SAP port formulas lives in ``modules/core/sap_port_scheme.py``
+# (issue #249).  ``tests/test_port_scheme_249.py`` asserts the two
+# agree on both base ports and membership, so any drift surfaces as a
+# failing test rather than a silent discovery regression.
+#
+# Pass-1 rationale:
+#   * dispatcher (32NN) — primary SAP fingerprint
+#   * gateway (33NN)    — catches GW-only / SCS-only / minimal installs
+#     that do not expose a 32XX dispatcher on the scanned interface.
+#     Reported on W74 (Windows Server 2008 R2) where the gateway was
+#     reachable on 3340 but no 3240 dispatcher was listening — fast
+#     scan missed the whole system and Pass 2 never fired (gated on a
+#     dispatcher hit).  Doubles the fast-scan port count (~200 → ~300
+#     per host) but catches this real class of target.
+#   * sapms (36NN)      — external Message Server (sapms<SID> in
+#     /etc/services).  CVE-2026-58240 (MS ASCS_GW rogue registration)
+#     is theoretically reachable via this port on unpatched 9.x
+#     kernels — we detect it here so the check module has a target to
+#     probe.  Bind + ACL on modern kernels usually keeps 3600
+#     read-only; the internal port 3900+NN (already covered by Pass 2)
+#     is the primary exploit vector.
+#
+# To add or change a Pass-1 service, edit ``fast_scan_pass1_services``
+# in ``sap_port_scheme.py`` — do not hand-edit this dict.
+from sap_port_scheme import (
+    SAP_PORT_SCHEME as _SAP_PORT_SCHEME,
+    fast_scan_pass1_services as _fast_scan_pass1_services,
+)
+
 FAST_SCAN_PORT_PATTERNS = {
-    "dispatcher": 3200,    # 3200 + instance_nr
-    "gateway":    3300,    # 3300 + instance_nr
-    # Gateway included so GW-only / SCS-only / minimal installs that
-    # don't expose a 32XX dispatcher on the interface we're scanning
-    # still get discovered.  Reported on W74 (Windows Server 2008 R2)
-    # where the gateway was reachable on 3340 but no 3240 dispatcher
-    # was listening — fast scan missed the whole system and Pass 2
-    # (which normally covers 33XX) never fired because Pass 2 is gated
-    # on a dispatcher hit.  Doubles the fast-scan port count (~200 →
-    # ~300 per host) but catches this real class of target.
-    "sapms":      3600,    # 3600 + instance_nr  — sapms<SID> external MS
-    # The external Message Server port (documented as `sapms<SID>` in
-    # /etc/services).  Traditionally used for name lookup / MS HTTP
-    # browsing on 8100+NN.  CVE-2026-58240 (MS ASCS_GW rogue
-    # registration) is theoretically reachable via this port on
-    # unpatched 9.x kernels — we detect it here so the check module
-    # has a target to probe.  Bind + ACL on modern kernels usually
-    # keeps 3600 read-only; the internal port 3900+NN (already covered
-    # by Pass 2) is the primary exploit vector.
+    svc: _SAP_PORT_SCHEME[svc].base
+    for svc in _fast_scan_pass1_services()
 }
 
 # ---------------------------------------------------------------------------
