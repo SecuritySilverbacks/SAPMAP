@@ -136,6 +136,11 @@ def _executive_summary(state: SAPMAPState) -> list:
     btp_pwned = sum(
         1 for b in (getattr(state, "btp_subaccounts", {}) or {}).values()
         if getattr(b, "pwned", False))
+    # SAP(Host)Control / SAP Host Agent entities (issue #91).
+    hostctrl_count = len(getattr(state, "host_control_nodes", {}) or {})
+    hostctrl_pwned = sum(
+        1 for h in (getattr(state, "host_control_nodes", {}) or {}).values()
+        if getattr(h, "pwned", False))
     conns_md = list(state.connections or [])
     conn_total_md = len(conns_md)
     conn_sap_all_md = sum(1 for c in conns_md
@@ -151,8 +156,8 @@ def _executive_summary(state: SAPMAPState) -> list:
                if str(getattr(f, "severity", "")).endswith("HIGH")
                or getattr(f, "severity", None) == Severity.HIGH)
 
-    total_systems_md = len(nodes) + scc_count + btp_count
-    total_pwned_md = len(pwned) + scc_pwned + btp_pwned
+    total_systems_md = len(nodes) + scc_count + btp_count + hostctrl_count
+    total_pwned_md = len(pwned) + scc_pwned + btp_pwned + hostctrl_pwned
     pct_pwned = (100 * total_pwned_md // total_systems_md) if total_systems_md else 0
 
     out = ["## Executive summary", ""]
@@ -164,13 +169,18 @@ def _executive_summary(state: SAPMAPState) -> list:
         ("BTP subaccounts",
          (f"{btp_count} ({btp_pwned} with cleartext destinations)"
           if btp_count else "0")),
+        ("SAP(Host)Control (Host Agent)",
+         (f"{hostctrl_count}" + (f" ({hostctrl_pwned} pwned)"
+                                  if hostctrl_pwned else "")
+          if hostctrl_count else "0")),
         ("Connections (RFC + HTTP destinations)",
          (f"{conn_total_md} total — {conn_sap_all_md} grant SAP_ALL, "
           f"{conn_tested_ok_md} tested OK"
           if conn_total_md else "0")),
         ("Systems pwned",
          f"{total_pwned_md} / {total_systems_md} ({pct_pwned}%) — "
-         f"{len(pwned)} SAP, {scc_pwned} SCC, {btp_pwned} BTP"),
+         f"{len(pwned)} SAP, {scc_pwned} SCC, {btp_pwned} BTP, "
+         f"{hostctrl_pwned} HostCtl"),
         ("**Production systems pwned**",
          f"**{len(pwned_prd)}**" + (
              f" — {', '.join(n.sid for n in pwned_prd)}"
@@ -1136,6 +1146,37 @@ def _capability_section(state: SAPMAPState) -> list:
                     f"{_esc(c.get('capability', ''))} | "
                     f"{_esc(tbls)} |")
             out.append("")
+    return out
+
+
+def _hostcontrol_section(state: SAPMAPState) -> list:
+    """SAP(Host)Control / SAP Host Agent inventory (issue #91).
+
+    One row per host-level management agent discovered on the landscape,
+    so Host-Agent exposure and the OS-shell-via-SAPHostControl capability
+    are attributed to the host service itself rather than buried on a
+    co-located SAP system's instance list.
+    """
+    hcs = (getattr(state, "host_control_nodes", {}) or {})
+    if not hcs:
+        return []
+    out = ["## SAP(Host)Control (Host Agent)", "",
+           "SAP Host Agent (SAPHostControl, TCP 1128/1129) is a host-level "
+           "management service that manages every SAP instance on the box. "
+           "It is surfaced as its own entity so its ports are not "
+           "mis-attributed to a co-located SAP system (issue #91).", "",
+           "| Host | Ports | Version | Manages | OS-exec (sapadm) | Pwned |",
+           "| --- | --- | --- | --- | --- | --- |"]
+    for host, hc in sorted(hcs.items()):
+        ports = ", ".join(str(p) for p in sorted((hc.ports or {}).keys())) \
+            or "1128, 1129"
+        managed = ", ".join(hc.linked_sids or hc.managed_sids or []) or "—"
+        osx = ("**Yes** (/SAPHostControl.CGI)"
+               if getattr(hc, "os_exec_capable", False) else "—")
+        pwned = "⚡ YES" if getattr(hc, "pwned", False) else "No"
+        out.append(f"| {_esc(host)} | {_esc(ports)} | {_esc(hc.version or '?')} "
+                   f"| {_esc(managed)} | {osx} | {pwned} |")
+    out.append("")
     return out
 
 
@@ -3048,6 +3089,11 @@ def build_markdown_report(state: SAPMAPState,
         sections.append("---")
         sections.append("")
         sections.extend(btp_section)
+    hostcontrol_section = _hostcontrol_section(state)
+    if hostcontrol_section:
+        sections.append("---")
+        sections.append("")
+        sections.extend(hostcontrol_section)
     cloud_lat_section = _cloud_lateral_section(state)
     if cloud_lat_section:
         sections.append("---")
@@ -4817,13 +4863,16 @@ def build_html_report(state: SAPMAPState,
     btp_subs = (getattr(state, "btp_subaccounts", {}) or {})
     btp_pwned = sum(1 for b in btp_subs.values()
                      if getattr(b, "pwned", False))
+    hostctls = (getattr(state, "host_control_nodes", {}) or {})
+    hostctl_pwned = sum(1 for h in hostctls.values()
+                        if getattr(h, "pwned", False))
     # KPI totals mirror the GUI status-bar semantics (state.stats()):
-    # every box on the map is a "system", so SAP + SCC + BTP are all
-    # counted.  Reporting SAP-only here made "1/6 pwned" show up while
-    # the operator saw "4/10" in the app — a discrepancy caught in
-    # engagement review.
-    total_systems = len(nodes) + len(sccs) + len(btp_subs)
-    total_pwned = len(pwned) + scc_pwned + btp_pwned
+    # every box on the map is a "system", so SAP + SCC + BTP +
+    # SAP(Host)Control (#91) are all counted.  Reporting SAP-only here
+    # made "1/6 pwned" show up while the operator saw "4/10" in the app
+    # — a discrepancy caught in engagement review.
+    total_systems = len(nodes) + len(sccs) + len(btp_subs) + len(hostctls)
+    total_pwned = len(pwned) + scc_pwned + btp_pwned + hostctl_pwned
     pct_pwned = (100 * total_pwned // total_systems) if total_systems else 0
     # Edge counts.  "Total" includes every RFC / HTTP / synthetic
     # destination on the map; "SAP_ALL" surfaces the biggest-blast-

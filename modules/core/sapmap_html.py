@@ -1323,6 +1323,7 @@ body {
           <div class="legend-row"><span class="swatch-cell"><span class="legend-swatch" style="background:transparent;border:2px solid #8b0000;width:22px;height:14px"></span></span><span class="label"><b>Critical finding</b> — thick red border on any node</span></div>
           <div class="legend-row"><span class="swatch-cell"><span style="display:inline-block;background:#8b0000;color:#fff;font-size:8px;font-weight:bold;letter-spacing:0.5px;padding:1px 4px;border-radius:3px;border:1px solid #0d1117">POWNED</span></span><span class="label"><b>Pwned</b> — SAPMAP has created a user or captured shell</span></div>
           <div class="legend-row"><span class="swatch-cell"><span class="legend-swatch" style="background:#046c7a;width:22px;height:14px;clip-path:polygon(15% 0,85% 0,100% 50%,85% 100%,15% 100%,0 50%)"></span></span><span class="label"><b>SAP Cloud Connector</b> — hexagonal teal node</span></div>
+          <div class="legend-row"><span class="swatch-cell"><span class="legend-swatch" style="background:#1b2330;border:2px solid #5c7a99;width:20px;height:14px;border-radius:4px"></span></span><span class="label"><b>SAP(Host)Control</b> — steel box, SAP Host Agent (1128/1129); dashed link to the SAP systems it manages</span></div>
           <div class="legend-row"><span class="swatch-cell"><span class="legend-swatch" style="background:#4d9eb6;width:22px;height:14px"></span></span><span class="label"><b>Web Dispatcher</b> — cyan node with backend fan-out</span></div>
           <div class="legend-row"><span class="swatch-cell"><span style="color:#a371f7;font-size:16px">&#9729;</span></span><span class="label"><b>BTP subaccount</b> — cloud shape, one per subaccount</span></div>
           <div class="legend-row"><span class="swatch-cell"><span class="legend-swatch" style="background:#1a1a2e;border:3px dashed #484f58;width:22px;height:14px"></span></span><span class="label"><b>Unknown target</b> — placeholder (opt-in via checkbox)</span></div>
@@ -1762,6 +1763,12 @@ body {
     </div>
   </div>
 </div>
+<!-- SAP(Host)Control Context Menu (#91) -->
+<div class="ctx-menu" id="hostcontrol-ctx-menu">
+  <div class="ctx-item" data-action="hostcontrol_details">&#128269; View Host Agent Details</div>
+  <div class="ctx-item" data-action="hostcontrol_copy_host">&#128203; Copy Host</div>
+</div>
+
 <!-- SAP Cloud Connector Context Menu -->
 <div class="ctx-menu" id="scc-ctx-menu">
   <!-- Top-level quick actions -->
@@ -4182,6 +4189,14 @@ async function pollUpdates() {
           state.btp_subaccounts[u]._y = oldBtp[u]._y;
         }
       }
+      // SAP(Host)Control entities (#91) — preserve manual positions.
+      const oldHc = mapState.host_control_nodes || {};
+      for (const h in state.host_control_nodes || {}) {
+        if (oldHc[h] && oldHc[h]._x != null) {
+          state.host_control_nodes[h]._x = oldHc[h]._x;
+          state.host_control_nodes[h]._y = oldHc[h]._y;
+        }
+      }
       // Issue #2 (item 3) — detect a growth in the open panel's
       // persistent findings (arriving via state, not the findings
       // bus) BEFORE mapState is replaced.  Persistent findings show
@@ -4547,6 +4562,8 @@ function updateMap() {
   const sccKeys = Object.keys(sccNodes);
   const btpNodes = mapState.btp_subaccounts || {};
   const btpKeys = Object.keys(btpNodes);
+  const hcNodes = mapState.host_control_nodes || {};   // SAP(Host)Control (#91)
+  const hcKeys = Object.keys(hcNodes);
 
   // Cloud-tier reservation: BTP subaccounts live in a strip above
   // the on-prem layer.  When at least one BTP node exists, on-prem
@@ -4574,6 +4591,11 @@ function updateMap() {
     const ip = getIP(sccNodes[host]);
     if (ip) { (zoneGroups[ip] = zoneGroups[ip] || []).push({kind:'scc', id:host, obj:sccNodes[host]}); }
     else noIPGroup.push({kind:'scc', id:host, obj:sccNodes[host]});
+  });
+  hcKeys.forEach(host => {
+    const ip = getIP(hcNodes[host]);
+    if (ip) { (zoneGroups[ip] = zoneGroups[ip] || []).push({kind:'hostcontrol', id:host, obj:hcNodes[host]}); }
+    else noIPGroup.push({kind:'hostcontrol', id:host, obj:hcNodes[host]});
   });
 
   // Separate zones that are fully-placed (all members have _x) from
@@ -4692,6 +4714,11 @@ function updateMap() {
     const bn = btpNodes[uuid];
     maxX = Math.max(maxX, (bn._x || 0) + BOX_W + MARGIN);
     maxY = Math.max(maxY, (bn._y || 0) + BOX_H + MARGIN);
+  });
+  hcKeys.forEach(host => {
+    const hn = hcNodes[host];
+    maxX = Math.max(maxX, (hn._x || 0) + BOX_W + MARGIN);
+    maxY = Math.max(maxY, (hn._y || 0) + BOX_H + MARGIN);
   });
 
   let html = '';
@@ -4870,6 +4897,9 @@ function updateMap() {
     Object.entries(sccNodes).forEach(([host, sn]) => {
       addToZone(hostKey(sn), sn._x, sn._y, BOX_W, BOX_H, host, 'scc');
     });
+    Object.entries(hcNodes).forEach(([host, hn]) => {
+      addToZone(hostKey(hn), hn._x, hn._y, BOX_W, BOX_H, host, 'hostcontrol');
+    });
 
     const PAD = 28;
     Object.entries(zoneMap).forEach(([key, members]) => {
@@ -4891,6 +4921,7 @@ function updateMap() {
       const allNodes = [
         ...Object.values(nodes).filter(n => hostKey(n) === key),
         ...Object.values(sccNodes).filter(sn => hostKey(sn) === key),
+        ...Object.values(hcNodes).filter(hn => hostKey(hn) === key),
       ];
       const ipHint   = allNodes.map(x => x.ip || '')
                                  .find(v => IP_RE.test(v)) || '';
@@ -4901,7 +4932,9 @@ function updateMap() {
       else if (ipHint)         labelText = ipHint;
       else                     labelText = hostHint || key;
       const typeIcons = [...new Set(members.map(m =>
-        m.nodeType === 'scc' ? '⬡ SCC' : '▣ SAP')
+        m.nodeType === 'scc' ? '⬡ SCC'
+        : m.nodeType === 'hostcontrol' ? '⬢ HostCtl'
+        : '▣ SAP')
       )].join('  ');
 
       html += `<text x="${zx + 12}" y="${zy + 14}" ` +
@@ -5424,6 +5457,24 @@ function updateMap() {
     });
   });
 
+  // --- SAP(Host)Control ↔ managed SAP system edges (#91) ---
+  // Make the host↔Host-Agent↔instances relationship explicit without
+  // re-attributing ports.  Non-exploit edge (chain BFS ignores it).
+  hcKeys.forEach(host => {
+    const hn = hcNodes[host];
+    const hx = (hn._x || 0) + BOX_W / 2;
+    const hy = (hn._y || 0) + BOX_H / 2;
+    (hn.linked_sids || []).forEach(sid => {
+      const tn = nodes[sid];
+      if (!tn || tn._x == null) return;
+      const tx = (tn._x || 0) + BOX_W / 2;
+      const ty = (tn._y || 0) + BOX_H / 2;
+      html += `<line class="edge-line" x1="${hx}" y1="${hy}" x2="${tx}" y2="${ty}" ` +
+        `stroke="#5c7a99" stroke-width="2.5" stroke-dasharray="3,4" fill="none" ` +
+        `pointer-events="none" />`;
+    });
+  });
+
   // --- SCC HA shadow links (master ↔ shadow) ---
   // Draw once per pair: only emit from the host with the lexicographically
   // smaller name to avoid duplicate overlapping segments.
@@ -5906,6 +5957,53 @@ function updateMap() {
            + `<circle cx="${x+cut+10}" cy="${y+BOX_H-14}" r="10" fill="${ppColor}" />`
            + `<text x="${x+cut+10}" y="${y+BOX_H-10}" text-anchor="middle" font-size="11" fill="#fff" font-weight="bold">PP</text>`
            + `</g>`;
+    }
+
+    html += '</g>';
+  });
+
+  // --- Draw SAP(Host)Control nodes (steel rounded box, gear glyph) #91 ---
+  hcKeys.forEach(host => {
+    const hn = hcNodes[host];
+    const x = hn._x || 0, y = hn._y || 0;
+    const dragId = 'hostctl:' + host.replace(/'/g, "\\'");
+    const hcFill = '#1b2330';          // dark steel-slate fill
+    const hcStroke = '#5c7a99';        // steel-blue (distinct from SCC teal / BTP sky)
+    const borderC = hn.pwned ? '#8b0000' : hcStroke;
+    const borderW = hn.pwned ? 6 : 4;
+
+    html += `<g class="node-box" data-hostctl="${escHtml(host)}" `
+         + `onmousedown="startDrag(event,'${dragId}')" `
+         + `oncontextmenu="showHostControlCtxMenu(event,'${escHtml(host)}')" `
+         + `onclick="showHostControlDetail('${escHtml(host)}')">`;
+
+    // Rounded rect with a clipped top-left corner — a plain, distinct shape.
+    html += `<rect x="${x}" y="${y}" width="${BOX_W}" height="${BOX_H}" rx="10" `
+         + `fill="${hcFill}" stroke="${borderC}" stroke-width="${borderW}" />`;
+    // Header band
+    html += `<rect x="${x+2}" y="${y+2}" width="${BOX_W-4}" height="26" rx="8" fill="${hcStroke}" opacity="0.35" />`;
+    html += `<text x="${x+10}" y="${y+19}" fill="#fff" font-size="12" font-weight="bold" font-family="monospace">⚙ HOST AGENT</text>`;
+
+    if (hn.pwned) { html += pwnedTagSvg(x + BOX_W + 8, y); }
+
+    let ty = y + 46;
+    html += `<text x="${x+10}" y="${ty}" fill="#cfd9df" font-size="11" font-weight="bold" font-family="monospace">${escHtml(host)}</text>`;
+    ty += 16;
+    const _hcPorts = Object.keys(hn.ports || {}).sort().join(', ') || '1128, 1129';
+    html += `<text x="${x+10}" y="${ty}" fill="#8b949e" font-size="10" font-family="monospace">SAPHostControl: ${escHtml(_hcPorts)}</text>`;
+    ty += 14;
+    if (hn.version) {
+      html += `<text x="${x+10}" y="${ty}" fill="#8b949e" font-size="10" font-family="monospace">Version: ${escHtml(hn.version)}</text>`;
+      ty += 14;
+    }
+    const _mgd = (hn.linked_sids && hn.linked_sids.length) ? hn.linked_sids : (hn.managed_sids || []);
+    if (_mgd.length) {
+      html += `<text x="${x+10}" y="${ty}" fill="#8b949e" font-size="10" font-family="monospace">Manages: ${escHtml(_mgd.slice(0,6).join(', '))}</text>`;
+      ty += 14;
+    }
+    if (hn.os_exec_capable) {
+      html += `<text x="${x+10}" y="${ty}" fill="#f0883e" font-size="10" font-family="monospace">OS-exec: sapadm (SAPHostControl.CGI)</text>`;
+      ty += 14;
     }
 
     html += '</g>';
@@ -8138,7 +8236,7 @@ function hideCtxMenu() {
   }
   function hide() { tip.classList.remove('visible'); }
   window._hideCtxTooltip = hide;
-  ['ctx-menu', 'scc-ctx-menu', 'btp-ctx-menu', 'tms-ctx-menu', 'dbcon-ctx-menu'].forEach(id => {
+  ['ctx-menu', 'scc-ctx-menu', 'btp-ctx-menu', 'tms-ctx-menu', 'dbcon-ctx-menu', 'hostcontrol-ctx-menu'].forEach(id => {
     const el = document.getElementById(id);
     if (!el) return;
     el.addEventListener('mouseover', show);
@@ -8266,6 +8364,88 @@ function showSCCCtxMenu(e, host) {
 
 function hideSCCCtxMenu() {
   document.getElementById('scc-ctx-menu').classList.remove('visible');
+}
+
+// --- SAP(Host)Control context menu + detail panel (issue #91) ---
+let selectedHcHost = null;
+
+function hideHostControlCtxMenu() {
+  const el = document.getElementById('hostcontrol-ctx-menu');
+  if (el) el.classList.remove('visible');
+}
+
+function showHostControlCtxMenu(e, host) {
+  e.preventDefault();
+  e.stopPropagation();
+  hideCtxMenu(); hideSCCCtxMenu(); hideBTPCtxMenu();
+  hideTMSCtxMenu(); hideDBCONCtxMenu();
+  selectedHcHost = host;
+  const menu = document.getElementById('hostcontrol-ctx-menu');
+  if (!menu) return;
+  menu.classList.add('visible');
+  const w = menu.offsetWidth || 240;
+  const h = menu.offsetHeight || 80;
+  const x = Math.min(e.clientX, window.innerWidth - w - 8);
+  const y = Math.min(e.clientY, window.innerHeight - h - 8);
+  menu.style.left = x + 'px';
+  menu.style.top = y + 'px';
+}
+
+(function () {
+  const menu = document.getElementById('hostcontrol-ctx-menu');
+  if (!menu) return;
+  menu.addEventListener('click', function (e) {
+    const item = e.target.closest('.ctx-item[data-action]');
+    if (!item || item.classList.contains('disabled')) return;
+    const action = item.getAttribute('data-action');
+    hideHostControlCtxMenu();
+    const host = selectedHcHost;
+    if (!host) return;
+    if (action === 'hostcontrol_details') {
+      showHostControlDetail(host);
+    } else if (action === 'hostcontrol_copy_host') {
+      try { navigator.clipboard.writeText(host); } catch (_) {}
+    }
+  });
+})();
+
+function showHostControlDetail(host, opts) {
+  const hn = (mapState.host_control_nodes || {})[host];
+  if (!hn) return;
+  const panel = document.getElementById('detail-panel');
+  const refresh = !!(opts && opts.refresh);
+  if (!refresh && panel.classList.contains('visible')
+      && panel.dataset.sid === 'hostctl:' + host) {
+    _closeDetailPanel();
+    return;
+  }
+  panel.dataset.sid = 'hostctl:' + host;
+  panel.setAttribute('data-view', 'hostcontrol');
+  const ports = Object.keys(hn.ports || {}).sort().join(', ') || '1128, 1129';
+  const managed = (hn.linked_sids && hn.linked_sids.length) ? hn.linked_sids : (hn.managed_sids || []);
+  const findings = (hn.findings || []);
+  panel.innerHTML = `
+    <span class="close-btn" onclick="_closeDetailPanel()">&times;</span>
+    <h3>&#9881; SAP(Host)Control &mdash; ${escHtml(host)}</h3>
+    <div class="detail-section">
+      <div class="detail-row"><span class="detail-key">Host</span><span class="detail-val">${escHtml(hn.host || host)}</span></div>
+      <div class="detail-row"><span class="detail-key">SAPHostControl</span><span class="detail-val">${escHtml(ports)}</span></div>
+      <div class="detail-row"><span class="detail-key">Version</span><span class="detail-val">${escHtml(hn.version || 'unknown')}</span></div>
+      <div class="detail-row"><span class="detail-key">Discovered via</span><span class="detail-val">${escHtml(hn.fingerprint_source || '?')}</span></div>
+      <div class="detail-row"><span class="detail-key">OS-exec (sapadm)</span><span class="detail-val">${hn.os_exec_capable ? '<span style="color:#f0883e">Yes &mdash; /SAPHostControl.CGI</span>' : 'Not confirmed'}</span></div>
+      <div class="detail-row"><span class="detail-key">Pwned</span><span class="detail-val">${hn.pwned ? '<span style="color:#f0883e">&#9889; YES</span>' : 'No'}</span></div>
+    </div>
+    <div class="detail-section">
+      <h4>Manages (co-located SAP systems)</h4>
+      <div class="detail-row"><span class="detail-val">${managed.length ? escHtml(managed.join(', ')) : '<span style="color:#8b949e">none linked</span>'}</span></div>
+    </div>
+    ${findings.length ? `
+    <div class="detail-section">
+      <h4>Findings <span style="color:#8b949e;font-weight:normal;font-size:10px">(${findings.length})</span></h4>
+      ${findings.map(f => `<div style="padding:4px 0;font-size:11px;color:#cfd9df">&bull; ${escHtml(f.name || '')}</div>`).join('')}
+    </div>` : ''}
+  `;
+  panel.classList.add('visible');
 }
 
 document.getElementById('scc-ctx-menu').addEventListener('click', function(e) {
@@ -22199,6 +22379,7 @@ function _getDragTarget(sid) {
   if (sid.startsWith('unk:')) return unkPositions[sid.slice(4)];
   if (sid.startsWith('scc:')) return (mapState.scc_nodes || {})[sid.slice(4)];
   if (sid.startsWith('btp:')) return (mapState.btp_subaccounts || {})[sid.slice(4)];
+  if (sid.startsWith('hostctl:')) return (mapState.host_control_nodes || {})[sid.slice(8)];
   // tms:<source_sid>:<target_sid>:<domain> — CTS/TMS cylinders
   if (sid.startsWith('tms:')) {
     const parts = sid.split(':');
@@ -22729,6 +22910,7 @@ document.addEventListener('mouseup', () => {
       && !dragNode.startsWith('scc:')
       && !dragNode.startsWith('btp:')
       && !dragNode.startsWith('dbcon:')
+      && !dragNode.startsWith('hostctl:')
       && !dragNode.startsWith('tms:')) showDetails(dragNode);
   // Mark drag-targeted DBCON/TMS positions as pinned so the auto-
   // reposition-on-collision logic in the render loop leaves them
@@ -22776,6 +22958,7 @@ document.addEventListener('click', e => {
   hideBTPCtxMenu();
   hideTMSCtxMenu();
   hideDBCONCtxMenu();
+  hideHostControlCtxMenu();
   if (!e.target.closest('.info-panel') && !e.target.closest('.edge-line'))
     document.getElementById('info-panel').classList.remove('visible');
   // Blast-radius flood (#197) clears on a click-away: anywhere that is not a
@@ -22800,6 +22983,7 @@ document.addEventListener('contextmenu', e => {
   hideBTPCtxMenu();
   hideTMSCtxMenu();
   hideDBCONCtxMenu();
+  hideHostControlCtxMenu();
   hideMapCtxMenu();
   if (!nodeBox && (e.target === mapSvg || e.target === mapContainer ||
       mapSvg.contains(e.target) || mapContainer.contains(e.target))) {
