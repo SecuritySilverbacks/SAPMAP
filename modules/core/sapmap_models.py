@@ -190,9 +190,15 @@ _INSTANCE_NAME_ROLE_PREFIXES = (
 )
 
 # Human-readable descriptions for the role codes (for tooltips / reports).
+# ASCS/SCS wording spells out the two services they run (Message Server +
+# Enqueue) — the standalone-enqueue server shares the central-services
+# instance.  No single canonical standalone-enqueue port exists (SAP
+# sources split 32NN vs 39NN by version), so we only surface the
+# component, not a port; ERS replication is modelled as a separate role.
+# Issue #249.
 INSTANCE_ROLE_LABELS = {
-    "ASCS": "ABAP Central Services",
-    "SCS": "Java Central Services",
+    "ASCS": "ABAP Central Services (Message Server + Enqueue)",
+    "SCS": "Java Central Services (Message Server + Enqueue)",
     "ERS": "Enqueue Replication Server",
     "PAS": "Primary Application Server",
     "AAS": "Additional Application Server",
