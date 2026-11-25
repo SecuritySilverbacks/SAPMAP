@@ -3187,6 +3187,54 @@ class SAPMAPState:
             pass
         return None
 
+    def upsert_host_control_node(self, hc) -> "HostControlNode":
+        """Add or MERGE a SAP(Host)Control entity for its host (issue #242).
+
+        A discovery pass (fast scan, SAPology deep scan, deep rescan) carries
+        only discovery fields.  Blindly doing ``host_control_nodes[host] = hc``
+        would clobber an existing entity's enrichment / exploitation state and
+        the operator's map position on the next scan — exactly the clobber the
+        separate HostControl family (#91) exists to avoid.  So merge:
+
+          * refresh/accumulate discovery fields (ports, linked/managed SIDs,
+            reachable, version, sid_primary — fill-only so a blank rescan can't
+            wipe them);
+          * NEVER overwrite pwned / CVE buckets / os-exec capability /
+            credentials / findings / position / notes from a discovery pass.
+
+        Returns the stored node (the merged existing one, or ``hc`` when new).
+        """
+        host = getattr(hc, "host", "") or ""
+        if not host:
+            return hc
+        existing = self.host_control_nodes.get(host)
+        if existing is None:
+            self.host_control_nodes[host] = hc
+            return hc
+        # Discovery fields — accumulate / fill-only.
+        for p, lbl in (getattr(hc, "ports", None) or {}).items():
+            existing.ports[p] = lbl
+        for s in (getattr(hc, "linked_sids", None) or []):
+            if s and s not in existing.linked_sids:
+                existing.linked_sids.append(s)
+        for s in (getattr(hc, "managed_sids", None) or []):
+            if s and s not in existing.managed_sids:
+                existing.managed_sids.append(s)
+        if getattr(hc, "reachable", False):
+            existing.reachable = True
+        if getattr(hc, "version", "") and not existing.version:
+            existing.version = hc.version
+        if getattr(hc, "sid_primary", "") and not existing.sid_primary:
+            existing.sid_primary = hc.sid_primary
+        if getattr(hc, "os_access_type", "") and not existing.os_access_type:
+            existing.os_access_type = hc.os_access_type
+        if getattr(hc, "fingerprint_source", "") and not existing.fingerprint_source:
+            existing.fingerprint_source = hc.fingerprint_source
+        # Carry a fresh discovery finding over if the entity had none.
+        if getattr(hc, "findings", None) and not existing.findings:
+            existing.findings = list(hc.findings)
+        return existing
+
     def dedupe_scc_nodes(self) -> list:
         """Collapse duplicate SCC nodes that reference the same host
         under different aliases (e.g. "s4hanadev" and "192.168.2.209"

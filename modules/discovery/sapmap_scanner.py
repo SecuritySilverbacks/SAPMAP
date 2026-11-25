@@ -7366,13 +7366,15 @@ def _sapology_system_to_node(sys_obj, target_ip: str, *,
         # the SAPology bridge.
         pass
 
-    # Issue #242 — co-located Host Agent: emit the SAP(Host)Control entity
-    # linked to this SAP system (never link a SAProuter — it is a relay, not a
-    # Host-Agent-managed app instance; mirrors the fast-path rule).
-    if hc_ports and hostcontrol_sink and node.system_type != "SAPROUTER":
+    # Issue #242 — co-located Host Agent: emit the SAP(Host)Control entity.
+    # Link it to this SAP system, EXCEPT a SAProuter (a relay, not a
+    # Host-Agent-managed app instance) — still plot the agent, just unlinked,
+    # mirroring the fast-path rule.  The sink merges, so on a multi-SID host
+    # each system contributes its SID to the one host-keyed entity.
+    if hc_ports and hostcontrol_sink:
+        _link = "" if node.system_type == "SAPROUTER" else node.sid
         try:
-            hostcontrol_sink(
-                _deep_hostcontrol_node(target_ip, hc_ports, node.sid))
+            hostcontrol_sink(_deep_hostcontrol_node(target_ip, hc_ports, _link))
         except Exception as e:
             logger.debug("hostcontrol_sink failed for %s: %s", target_ip, e)
 
@@ -7527,6 +7529,16 @@ def _deep_scan_with_sapology(targets, instance_range, timeout, threads,
                 if inst.ip:
                     target_ip = inst.ip
                     break
+            # Issue #242 — a host exposing ONLY the Host Agent has no instances
+            # (SAPology >= 1.2.0), so there is no instance IP; fall back to the
+            # system's hostname (SAPology sets it to the reverse-DNS name or the
+            # target IP) so the HostControl entity gets a real, unique host key
+            # instead of "" (which would collide across such hosts).
+            if not target_ip:
+                target_ip = getattr(sys_obj, "hostname", "") or ""
+            if not target_ip:
+                # No usable host identifier — can't key an entity; skip.
+                continue
 
             node = _sapology_system_to_node(
                 sys_obj, target_ip, hostcontrol_sink=hostcontrol_callback)
@@ -7678,6 +7690,18 @@ def deep_scan_single(node: SAPNode, timeout: float = DEFAULT_TIMEOUT,
 
         # Convert the first result and update node in-place
         sys_obj = landscape[0]
+        def _hc_sink(hc):
+            # Issue #242 — a deep rescan lifts the Host Agent (1128/1129) off
+            # this SAP node into its own SAP(Host)Control entity.  Link it to
+            # the STORED node's SID (SAPology's fresh SID may be blank/UNKNOWN
+            # on a rescan), and MERGE via upsert so the rescan never clobbers an
+            # enriched/pwned entity or the operator's map position.
+            if node.sid and not node.sid.startswith("UNK_"):
+                hc.linked_sids = [node.sid]
+                hc.managed_sids = [node.sid]
+                hc.sid_primary = hc.sid_primary or node.sid
+            state.upsert_host_control_node(hc)
+
         fresh = _sapology_system_to_node(
             sys_obj, host,
             snc_partnername=_node_partner,
@@ -7686,10 +7710,7 @@ def deep_scan_single(node: SAPNode, timeout: float = DEFAULT_TIMEOUT,
             saprouter=(getattr(node, "saprouter", "") or ""),
             snc_auth_enabled=_snc_auth_enabled,
             sid_hint=node.sid,
-            # Issue #242 — a deep rescan lifts the Host Agent (1128/1129) off
-            # this SAP node into its own SAP(Host)Control entity.
-            hostcontrol_sink=((lambda hc: state.host_control_nodes.update(
-                {hc.host: hc})) if state is not None else None),
+            hostcontrol_sink=(_hc_sink if state is not None else None),
             timeout=timeout,
         )
         if fresh is None:
