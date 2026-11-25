@@ -1297,6 +1297,31 @@ class SAPNode:
                     self.instances.append(row)
         return was
 
+    def forget_suppression(self, nr) -> bool:
+        """Issue #92 follow-up — discard the suppression record for ``nr``
+        (both the ban and the cached row) WITHOUT re-adding anything to
+        ``self.instances``.  Returns True iff ``nr`` was previously
+        suppressed.
+
+        The distinction from ``unsuppress_instance`` is deliberate: when
+        an instance was mis-attributed in the first place (e.g. a port on
+        this host that actually belongs to a different SID was folded onto
+        NN 01), the operator wants the ban cleared so a follow-up scan can
+        re-discover NN 01 from scratch, but does NOT want the stale cached
+        row brought back.  Forget is the clean escape hatch for that case.
+
+        Safe to call on a non-suppressed nr (idempotent no-op).  Like
+        unsuppress, this never touches node-level vuln scalars/flags —
+        those are shared state, never per-instance (see suppress_instance).
+        Because ``self.instances`` is untouched, no port reconcile is
+        needed either; forget changes only the suppression bookkeeping.
+        """
+        norm = self._norm_inst_nr(nr)
+        was = norm in self.suppressed_instance_nrs
+        self.suppressed_instance_nrs.discard(norm)
+        self.suppressed_instance_cache.pop(norm, None)
+        return was
+
     def prune_suppressed_instances(self) -> int:
         """Drop any InstanceInfo whose nr is currently suppressed.  Called
         after a wholesale-replace / overwrite producer path (add_node
