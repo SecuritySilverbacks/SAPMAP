@@ -3982,6 +3982,20 @@ const PILL_LABELS = {
   'HANA': 'HANA', 'MAXDB': 'MaxDB', 'MSSQL': 'MSSQL',
   'ORACLE': 'Oracle', 'DB2': 'DB2'
 };
+// SAP instance-role descriptions (#248).  Mirrors INSTANCE_ROLE_LABELS in
+// modules/core/sapmap_models.py — kept in sync by tests/test_instance_roles_248.py.
+const INSTANCE_ROLE_LABELS = {
+  'ASCS': 'ABAP Central Services',
+  'SCS':  'Java Central Services',
+  'ERS':  'Enqueue Replication Server',
+  'PAS':  'Primary Application Server',
+  'AAS':  'Additional Application Server',
+  'J':    'Java Application Server',
+  'G':    'Standalone Gateway',
+  'W':    'Web Dispatcher',
+  'HDB':  'HANA Database',
+  'SMDA': 'Diagnostics Agent'
+};
 
 // --- API helpers ---
 async function api(method, path, body) {
@@ -5739,12 +5753,18 @@ function updateMap() {
         `<animateTransform attributeName="transform" type="rotate" from="0 ${cx} ${y+14}" to="360 ${cx} ${y+14}" dur="1s" repeatCount="indefinite" /></circle>`;
     }
 
-    // Instance info
+    // Instance info — annotate with each instance's SAP role (#248) when
+    // known: "PAS 00, ASCS 01" instead of a bare "00, 01".  Falls back to the
+    // plain instance_nr when role is empty (unknown stack / UI-only entries).
     let ty = y + 38;
     const instances = n.instances || [];
-    const instNrs = instances.map(i => i.instance_nr).filter(i => i !== 'XX').sort();
-    if (instNrs.length > 0) {
-      html += `<text x="${x+10}" y="${ty}" fill="#8b949e" font-size="10" font-family="monospace">Inst: ${escHtml(instNrs.join(', '))}</text>`;
+    const _instLabelled = instances
+      .filter(i => i.instance_nr !== 'XX')
+      .sort((a, b) => String(a.instance_nr).localeCompare(String(b.instance_nr)))
+      .map(i => i.instance_type ? `${i.instance_type} ${i.instance_nr}`
+                                : String(i.instance_nr));
+    if (_instLabelled.length > 0) {
+      html += `<text x="${x+10}" y="${ty}" fill="#8b949e" font-size="10" font-family="monospace">Inst: ${escHtml(_instLabelled.join(', '))}</text>`;
       ty += 14;
     }
 
@@ -12271,7 +12291,14 @@ function showDetails(sid, opts) {
       <h4>Instances</h4>
       ${(n.instances || []).map(i => {
         const ports = Object.keys(i.ports||{}).sort((a,b)=>a-b).join(', ');
-        return `<div class="detail-row"><span class="detail-key">Inst ${escHtml(i.instance_nr)}</span><span class="detail-val">${escHtml(i.ip)}${ports ? ' — Ports: '+ports : ''}<span class="detail-del-btn" title="Remove this instance from the map (durable — re-scans won't re-add it)" onclick="removeInstance('${escHtml(n.sid)}','${instKey(i.instance_nr)}')">&#10005;</span></span></div>`;
+        // #248 — show the SAP instance role (ASCS / PAS / AAS / SCS / ...)
+        const role = i.instance_type || '';
+        const roleLabel = INSTANCE_ROLE_LABELS[role] || role;
+        const srcNote = i.role_source === 'name' ? ' — from SAP instance name'
+                      : (i.role_source === 'inferred' ? ' — inferred from ports' : '');
+        const keyTxt = role ? `${role} ${i.instance_nr}` : `Inst ${i.instance_nr}`;
+        const keyTitle = role ? escHtml(roleLabel + srcNote) : '';
+        return `<div class="detail-row"><span class="detail-key"${keyTitle?` title="${keyTitle}"`:''}>${escHtml(keyTxt)}</span><span class="detail-val">${escHtml(i.ip)}${ports ? ' — Ports: '+ports : ''}<span class="detail-del-btn" title="Remove this instance from the map (durable — re-scans won't re-add it)" onclick="removeInstance('${escHtml(n.sid)}','${instKey(i.instance_nr)}')">&#10005;</span></span></div>`;
       }).join('')}
       ${(n.instances || []).length === 0 ? '<div class="detail-row"><span class="detail-val" style="color:#d29922">&#9888; No instances — host-level actions unavailable until a re-scan.</span></div>' : ''}
       ${(n.suppressed_instance_nrs && n.suppressed_instance_nrs.length) ? `<div class="detail-row"><span class="detail-key">Suppressed</span><span class="detail-val" style="color:#8b949e">${n.suppressed_instance_nrs.map(nr => `${escHtml(nr)} <span class="detail-action-btn" onclick="restoreInstance('${escHtml(n.sid)}','${instKey(nr)}')">restore</span>`).join(', ')}</span></div>` : ''}

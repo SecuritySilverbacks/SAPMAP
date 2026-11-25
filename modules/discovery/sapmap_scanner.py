@@ -3765,6 +3765,10 @@ def enrich_system_info(host: str, gw_port: int, timeout: float = 10,
     # 00-01 and SJ1 at inst 02-03 on the same box) we'd otherwise OR SM1's
     # ABAP flag into SJ1's info dict, mis-labelling SJ1 as ABAP+JAVA.
     info.setdefault("http_ports", {})   # {inst_nr: (http_port, https_port)}
+    # #248 — authoritative SAP INSTANCE_NAME per instance_nr ("ASCS01", etc.).
+    # Threaded through to the node-build site so recompute_instance_roles can
+    # prefer the SAP name over port-fingerprint inference.
+    info.setdefault("instance_names", {})
     sc_to = min(timeout, 5 if saprouter else 3)
 
     # Fire all SAPControl probes in parallel — each is an independent SOAP
@@ -3784,7 +3788,7 @@ def enrich_system_info(host: str, gw_port: int, timeout: float = 10,
     for inst_nr in ordered_nrs:
         sc_port = 50000 + inst_nr * 100 + 13
         try:
-            sid, is_java, is_abap, db_type, icm_http, icm_https = \
+            sid, is_java, is_abap, db_type, icm_http, icm_https, _inst_name = \
                 _sc_futures[inst_nr].result()
         except Exception:
             continue
@@ -3820,6 +3824,9 @@ def enrich_system_info(host: str, gw_port: int, timeout: float = 10,
             if icm_https: bits.append(f"HTTPS:{icm_https}")
             print(f"[+] {tag}: ICM ports for instance {inst_nr:02d} "
                   f"from SAPControl ({host}:{sc_port}): {', '.join(bits)}")
+        if _inst_name and sid_matches:
+            # #248 — authoritative SAP INSTANCE_NAME for this instance.
+            info["instance_names"][inst_nr] = _inst_name
         if (info["sid"] and info["db_type"]
                 and info.get("_is_java") and info.get("_is_abap")):
             break
@@ -4094,11 +4101,12 @@ def _query_sapcontrol_sid(host: str, port: int, timeout: float = 3,
                           saprouter: str = "") -> tuple:
     """Quick SAPControl SOAP query to extract SID, system type, and DB type.
 
-    Returns (sid, is_java, is_abap, db_type, http_port, https_port) tuple.
-    http_port / https_port come from the 'ICM' / 'ICMS' properties which are
-    URLs like 'HTTP://host:50200/...' — parsed and returned as ints, 0 when
-    not present.  Java stacks always publish these; ABAP stacks publish them
-    too when ICM is configured.
+    Returns (sid, is_java, is_abap, db_type, http_port, https_port, inst_name)
+    tuple.  http_port / https_port come from the 'ICM' / 'ICMS' properties
+    (URLs like 'HTTP://host:50200/...'), 0 when not present.  Java stacks
+    always publish these; ABAP stacks publish them too when ICM is configured.
+    inst_name is the raw INSTANCE_NAME (e.g. "ASCS01", "DVEBMGS00"),
+    authoritative for the SAP instance role (#248), empty when not surfaced.
     """
     import re as _re
     sid = ""
@@ -4107,6 +4115,7 @@ def _query_sapcontrol_sid(host: str, port: int, timeout: float = 3,
     db_type = ""
     http_port = 0
     https_port = 0
+    inst_name = ""
 
     # Map SAPControl "Database" values to RFCDBSYS-style codes
     _DB_MAP = {
@@ -4190,7 +4199,8 @@ def _query_sapcontrol_sid(host: str, port: int, timeout: float = 3,
         # because some kernels expose an empty "ABAP WP Table" key on
         # Java-only instances, which used to mis-classify clean Java
         # systems as "ABAP+JAVA" (seen on SJ1: J02 + SCS03 cluster).
-        inst_name = prop_dict.get("INSTANCE_NAME", "")
+        # Also captured for the per-instance SAP role (#248).
+        inst_name = (prop_dict.get("INSTANCE_NAME", "") or "").strip()
         # ABAP-side instance prefixes:
         #   D / DVEBMGS = ABAP application server
         #   ASCS         = ABAP Central Services
@@ -4246,7 +4256,7 @@ def _query_sapcontrol_sid(host: str, port: int, timeout: float = 3,
 
     except Exception:
         pass
-    return (sid, is_java, is_abap, db_type, http_port, https_port)
+    return (sid, is_java, is_abap, db_type, http_port, https_port, inst_name)
 
 
 def query_public_info(host: str, http_port: int,
@@ -5460,7 +5470,8 @@ def quick_probe_sid(host: str, saprouter: str = None,
         soap_info = None
         if not use_ssl:
             try:
-                sid_val, is_java, is_abap, db_type, http_port, https_port = (
+                (sid_val, is_java, is_abap, db_type,
+                 http_port, https_port, inst_name) = (
                     _query_sapcontrol_sid(host, port, timeout=per_port))
                 if sid_val:
                     soap_sid = sid_val
@@ -5472,6 +5483,9 @@ def quick_probe_sid(host: str, saprouter: str = None,
                         "db_type": db_type,
                         "http_port": http_port,
                         "https_port": https_port,
+                        # #248 — authoritative SAP instance name (e.g.
+                        # "ASCS01", "DVEBMGS00"); drives per-instance role.
+                        "instance_name": inst_name,
                     }
             except Exception:
                 pass
@@ -6031,7 +6045,8 @@ def _reconcile_instance_sid(host, inst_nr, rfc_sid, rfc_sysinfo,
         return rfc_sid, rfc_sysinfo
     try:
         sc_port = 50000 + int(inst_nr) * 100 + 13
-        sc_sid, sc_j, sc_a, sc_db, _sc_http, _sc_https = _query_sapcontrol_sid(
+        (sc_sid, sc_j, sc_a, sc_db, _sc_http, _sc_https,
+         _sc_name) = _query_sapcontrol_sid(
             host, sc_port, timeout=min(timeout, 3), saprouter=saprouter)
     except Exception:
         return rfc_sid, rfc_sysinfo
@@ -6151,6 +6166,15 @@ def _build_nodes_from_fast_scan(scan_result: dict, timeout: float = 10,
                     host, inst_nr, sys_info["sid"], sys_info,
                     timeout=timeout, saprouter=saprouter)
                 instance_sid_map[inst_nr] = _sid
+                # #248 — promote this instance's authoritative SAP name
+                # (captured by enrich_system_info's SAPControl fan-out) onto
+                # the per-instance sys_info so the downstream InstanceInfo
+                # construction stamps it.  Without this, the main ABAP path
+                # (gateway-RFC succeeds → SID set → SAPControl fallback at
+                # ~6230 is skipped by `if inst_nr in instance_sid_map:
+                # continue`) would never surface the name.
+                _names_map = sys_info.get("instance_names") or {}
+                sys_info["instance_name"] = _names_map.get(inst_nr, "")
                 instance_sysinfo[inst_nr] = sys_info
                 if not known_host_sid:
                     known_host_sid = _sid
@@ -6179,6 +6203,9 @@ def _build_nodes_from_fast_scan(scan_result: dict, timeout: float = 10,
                         host, inst_nr, sys_info["sid"], sys_info,
                         timeout=timeout, saprouter=saprouter)
                     instance_sid_map[inst_nr] = _sid
+                    # #248 — same instance_name promotion as the gw_port branch.
+                    _names_map = sys_info.get("instance_names") or {}
+                    sys_info["instance_name"] = _names_map.get(inst_nr, "")
                     instance_sysinfo[inst_nr] = sys_info
                     if not known_host_sid:
                         known_host_sid = _sid
@@ -6223,8 +6250,9 @@ def _build_nodes_from_fast_scan(scan_result: dict, timeout: float = 10,
         # so the downstream node-build reads them.
         if inst_nr.isdigit():
             sc_port = 50000 + int(inst_nr) * 100 + 13
-            sc_sid, sc_j, sc_a, sc_db, sc_http, sc_https = \
-                _query_sapcontrol_sid(host, sc_port, timeout=min(timeout, 3))
+            (sc_sid, sc_j, sc_a, sc_db, sc_http, sc_https,
+             sc_inst_name) = _query_sapcontrol_sid(
+                 host, sc_port, timeout=min(timeout, 3))
             if sc_sid:
                 instance_sid_map[inst_nr] = sc_sid
                 sc_os = _query_sapcontrol_os(
@@ -6234,6 +6262,8 @@ def _build_nodes_from_fast_scan(scan_result: dict, timeout: float = 10,
                     "_is_java": sc_j, "_is_abap": sc_a,
                     "db_type": sc_db or "",
                     "os_type": sc_os,
+                    # #248 — authoritative SAP instance name (e.g. ASCS01)
+                    "instance_name": sc_inst_name,
                     "icm_http": sc_http,
                     "icm_https": sc_https,
                 }
@@ -6441,6 +6471,10 @@ def _build_nodes_from_fast_scan(scan_result: dict, timeout: float = 10,
                 instance_nr=inst_nr,
                 ip=host,
                 ports=inst_ports,
+                # #248 — authoritative SAP instance name (e.g. ASCS01).
+                # Empty when SAPControl did not surface it; port inference
+                # then fills the role in SAPNode.recompute_instance_roles().
+                instance_name=(isi.get("instance_name") or ""),
             ))
 
         # Detect HANA from this SID's instance ports
@@ -7186,12 +7220,23 @@ def _sapology_system_to_node(sys_obj, target_ip: str, *,
 
     instances = []
     for inst in sys_obj.instances:
+        # #248 — SAPology stamps the SAP INSTANCE_NAME into inst.info under
+        # the `sc_INSTANCE_NAME` key when SAPControl was reachable.  Thread
+        # it into InstanceInfo.instance_name so the per-instance role resolves
+        # authoritatively (ASCS / SCS / ERS / DVEBMGS) on the deep-scan path
+        # too — without this, dual-stack ABAP+JAVA central services on the
+        # deep path were silently inferred to SCS (adversarial review, #2).
+        _inst_info = dict(inst.info)
+        _sap_name = (_inst_info.get("sc_INSTANCE_NAME")
+                     or _inst_info.get("INSTANCE_NAME")
+                     or "").strip()
         instances.append(InstanceInfo(
             instance_nr=inst.instance_nr,
             ip=inst.ip or target_ip,
             ports=dict(inst.ports),
             services=dict(inst.services),
-            info=dict(inst.info),
+            info=_inst_info,
+            instance_name=_sap_name,
         ))
 
     # Issue #242 — lift the SAP Host Agent (1128/1129) out of the SAP node.

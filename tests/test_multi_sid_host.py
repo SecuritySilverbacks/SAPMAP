@@ -51,14 +51,18 @@ import sapmap_scanner  # noqa: E402
 
 def _stub_sapcontrol(monkeypatch, mapping, record=None):
     """Patch _query_sapcontrol_sid to return canned (sid, j, a, db, http,
-    https) tuples keyed by port.  `mapping` maps port -> that tuple (or a
-    bare sid string, expanded to an ABAP tuple).  Unlisted ports -> empty."""
+    https, inst_name) 7-tuples keyed by port (#248 added inst_name).
+    `mapping` maps port -> that tuple (or a bare sid string, expanded to an
+    ABAP tuple).  Unlisted ports -> empty."""
     def fake(host, port, timeout=3, saprouter=""):
         if record is not None:
             record.append(port)
         val = mapping.get(port, "")
         if isinstance(val, str):
-            return (val, False, bool(val), "", 0, 0)
+            return (val, False, bool(val), "", 0, 0, "")
+        # Allow legacy 6-tuples to keep working — pad inst_name="".
+        if isinstance(val, tuple) and len(val) == 6:
+            return val + ("",)
         return val
     monkeypatch.setattr(sapmap_scanner, "_query_sapcontrol_sid", fake)
 
@@ -195,7 +199,7 @@ def _patch_build_probes(monkeypatch, gw_sid_by_port, sapctl_sid_by_port):
 
     def fake_sapctl(host, port, timeout=3, saprouter=""):
         sid = sapctl_sid_by_port.get(port, "")
-        return (sid, False, bool(sid), "", 0, 0)
+        return (sid, False, bool(sid), "", 0, 0, "")
     monkeypatch.setattr(sapmap_scanner, "_query_sapcontrol_sid", fake_sapctl)
 
     monkeypatch.setattr(sapmap_scanner, "enumerate_system_clients",
