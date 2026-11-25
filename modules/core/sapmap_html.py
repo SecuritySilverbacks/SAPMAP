@@ -1766,7 +1766,6 @@ body {
 <!-- SAP(Host)Control Context Menu (#91) -->
 <div class="ctx-menu" id="hostcontrol-ctx-menu">
   <div class="ctx-item" data-action="hostcontrol_details">&#128269; View Host Agent Details</div>
-  <div class="ctx-item" data-action="hostcontrol_copy_host">&#128203; Copy Host</div>
 </div>
 
 <!-- SAP Cloud Connector Context Menu -->
@@ -8403,8 +8402,6 @@ function showHostControlCtxMenu(e, host) {
     if (!host) return;
     if (action === 'hostcontrol_details') {
       showHostControlDetail(host);
-    } else if (action === 'hostcontrol_copy_host') {
-      try { navigator.clipboard.writeText(host); } catch (_) {}
     }
   });
 })();
