@@ -60,7 +60,7 @@ def _sapcontrol_silent(monkeypatch):
                         lambda *a, **k: {"status": "rfc_success",
                                          "RFCSYSID": "WDX"})
     monkeypatch.setattr(sapmap_scanner, "_query_sapcontrol_sid",
-                        lambda *a, **k: ("", False, False, "", 0, 0))
+                        lambda *a, **k: ("", False, False, "", 0, 0, ""))
     _no_op_diag_ms_os(monkeypatch)
 
 

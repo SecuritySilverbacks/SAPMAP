@@ -211,7 +211,7 @@ def test_enrich_uses_public_info_to_fill_empty_fields(monkeypatch):
                                             "RFCHOST2": "s4hanadev"})
     # SAPControl reports SID + ABAP stack + ICM HTTP 8000, but no DB / kernel
     monkeypatch.setattr(sapmap_scanner, "_query_sapcontrol_sid",
-                         lambda *a, **k: ("S4H", False, True, "", 8000, 0))
+                         lambda *a, **k: ("S4H", False, True, "", 8000, 0, ""))
     _no_op_diag_ms_os(monkeypatch)
 
     calls = []
@@ -249,7 +249,7 @@ def test_enrich_skips_public_info_on_java_only_stack(monkeypatch):
     # SAPControl pins Java-only
     monkeypatch.setattr(sapmap_scanner, "_query_sapcontrol_sid",
                          lambda *a, **k: ("SJ1", True, False, "HDB",
-                                            50000, 50001))
+                                            50000, 50001, ""))
     _no_op_diag_ms_os(monkeypatch)
 
     calls = []
@@ -277,7 +277,7 @@ def test_enrich_falls_back_to_default_icm_ports_when_sapcontrol_silent(
                                             "RFCSYSID": "S4H"})
     # SAPControl returns nothing (no stack flags, no ICM ports)
     monkeypatch.setattr(sapmap_scanner, "_query_sapcontrol_sid",
-                         lambda *a, **k: ("", False, False, "", 0, 0))
+                         lambda *a, **k: ("", False, False, "", 0, 0, ""))
     _no_op_diag_ms_os(monkeypatch)
 
     tried = []
@@ -314,7 +314,7 @@ def test_enrich_does_not_overwrite_rfc_fields(monkeypatch):
                                             "RFCSAPRL": "758"})
     monkeypatch.setattr(sapmap_scanner, "_query_sapcontrol_sid",
                          lambda *a, **k: ("S4H", False, True, "HDB",
-                                            8000, 0))
+                                            8000, 0, ""))
     _no_op_diag_ms_os(monkeypatch)
 
     # public/info returns DIFFERENT values — they must be ignored

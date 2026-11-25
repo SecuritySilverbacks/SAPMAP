@@ -6995,6 +6995,14 @@ def create_app(api: SAPMAPApi) -> Bottle:
                         match.ports.setdefault(p, lbl)
                     if not match.ip and si.ip:
                         match.ip = si.ip
+                    # #248 — adopt a newly-surfaced SAP instance name on a
+                    # rescan.  Previous scan may have missed SAPControl
+                    # (firewall / rate limit) and left instance_name empty;
+                    # a later rescan surfaces it.  Never overwrite a name
+                    # the existing instance already carries (fill-only).
+                    if not getattr(match, "instance_name", "") and getattr(
+                            si, "instance_name", ""):
+                        match.instance_name = si.instance_name
             for attr in ("hostname", "ip", "os_type", "system_type",
                          "sap_release", "kernel", "database"):
                 if not getattr(existing, attr, "") and getattr(

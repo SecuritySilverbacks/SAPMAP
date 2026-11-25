@@ -124,6 +124,19 @@ class InstanceInfo:
     ports: dict = field(default_factory=dict)        # {port_int: "open"/"service_name"}
     services: dict = field(default_factory=dict)      # {service_name: detail}
     info: dict = field(default_factory=dict)           # arbitrary k/v from sapcontrol etc.
+    # SAP instance role (#248): the kind of instance this is, in SAP's own
+    # vocabulary — "ASCS"/"SCS" (ABAP/Java Central Services), "ERS" (Enqueue
+    # Replication), "PAS"/"AAS" (Primary/Additional Application Server), "J"
+    # (Java AS), "G" (standalone Gateway), "W" (Web Dispatcher), "HDB" (HANA),
+    # "SMDA" (Diagnostics Agent), or "" when unknown.  Derived by
+    # SAPNode.recompute_instance_roles(); never hand-set by producers.
+    instance_type: str = ""
+    # How instance_type was obtained: "name" (from the SAP instance name,
+    # authoritative), "inferred" (from the port fingerprint), "" (unknown).
+    role_source: str = ""
+    # Raw SAP instance name when discovered (e.g. "ASCS01", "DVEBMGS00"),
+    # else "".  Preferred over the port fingerprint when present.
+    instance_name: str = ""
 
     def to_dict(self) -> dict:
         return {
@@ -132,6 +145,9 @@ class InstanceInfo:
             "ports": {str(k): v for k, v in self.ports.items()},
             "services": self.services,
             "info": self.info,
+            "instance_type": self.instance_type,
+            "role_source": self.role_source,
+            "instance_name": self.instance_name,
         }
 
     @classmethod
@@ -142,7 +158,116 @@ class InstanceInfo:
             ports={int(k): v for k, v in d.get("ports", {}).items()},
             services=d.get("services", {}),
             info=d.get("info", {}),
+            instance_type=d.get("instance_type", ""),
+            role_source=d.get("role_source", ""),
+            instance_name=d.get("instance_name", ""),
         )
+
+
+# ---------------------------------------------------------------------------
+# SAP instance-role derivation (#248)
+# ---------------------------------------------------------------------------
+#
+# SAPMAP maps a host's ports accurately but SAP (and every admin) names each
+# instance by its ROLE.  These helpers derive that role from the SAP instance
+# name when known, else from the port fingerprint + the node's stack, so the
+# map/details/report can show "PAS 00 / ASCS 01" instead of a bare "00, 01".
+
+# Instance-name prefix -> role code.  Order matters: longer / more specific
+# prefixes first (DVEBMGS before D, JC before J, SMDA is distinct from SCS).
+_INSTANCE_NAME_ROLE_PREFIXES = (
+    ("DVEBMGS", "PAS"),   # legacy ABAP central instance (primary app server)
+    ("ASCS", "ASCS"),     # ABAP Central Services (Message Server + Enqueue)
+    ("SCS", "SCS"),       # Java Central Services
+    ("ERS", "ERS"),       # Enqueue Replication Server
+    ("SMDA", "SMDA"),     # Solution Manager Diagnostics Agent
+    ("HDB", "HDB"),       # SAP HANA database
+    ("JC", "J"),          # legacy Java central instance
+    ("J", "J"),           # Java application server
+    ("W", "W"),           # Web Dispatcher
+    ("G", "G"),           # standalone Gateway
+    ("D", "PAS"),         # ABAP application server (PAS vs AAS resolved by rank)
+)
+
+# Human-readable descriptions for the role codes (for tooltips / reports).
+INSTANCE_ROLE_LABELS = {
+    "ASCS": "ABAP Central Services",
+    "SCS": "Java Central Services",
+    "ERS": "Enqueue Replication Server",
+    "PAS": "Primary Application Server",
+    "AAS": "Additional Application Server",
+    "J": "Java Application Server",
+    "G": "Standalone Gateway",
+    "W": "Web Dispatcher",
+    "HDB": "HANA Database",
+    "SMDA": "Diagnostics Agent",
+}
+
+
+def _role_from_instance_name(name: str) -> str:
+    """Map a SAP instance name (e.g. 'ASCS01', 'DVEBMGS00') to a role code."""
+    n = (name or "").strip().upper()
+    for prefix, role in _INSTANCE_NAME_ROLE_PREFIXES:
+        if n.startswith(prefix):
+            return role
+    return ""
+
+
+def _inst_nr_sort_key(instance_nr: str):
+    """Numeric sort for 2-digit instance numbers; 'XX'/non-numeric sort last."""
+    try:
+        return (0, int(instance_nr))
+    except (TypeError, ValueError):
+        return (1, str(instance_nr))
+
+
+def _instance_port_role(inst, stype: str) -> str:
+    """Infer a role from an instance's open ports + the node's stack.
+
+    Canonical SAP ports (SAP Help "TCP/IP Ports of All SAP Products"):
+    dispatcher 32NN, gateway 33NN / SNC 48NN, Message Server 36NN/39NN/81NN,
+    ICM 80NN/443NN, HANA SQL 3NN13/3NN15, Java HTTP 5NN00.
+    """
+    ports = set()
+    for p in (inst.ports or {}):
+        try:
+            ports.add(int(p))
+        except (TypeError, ValueError):
+            pass
+    has_disp = any(3200 <= p <= 3299 for p in ports)
+    has_gw = any((3300 <= p <= 3399) or (4800 <= p <= 4899) for p in ports)
+    has_ms = any((3600 <= p <= 3699) or (3900 <= p <= 3999)
+                 or (8100 <= p <= 8199) for p in ports)
+    has_icm = any((8000 <= p <= 8099) or (44300 <= p <= 44399) for p in ports)
+    has_hana = any(30000 <= p <= 39999 and (p % 100) in (13, 15) for p in ports)
+    has_j2ee = any(50000 <= p <= 59900 and (p - 50000) % 100 == 0 for p in ports)
+    is_java = "JAVA" in stype
+    if "WEB_DISPATCHER" in stype or "WEBDISP" in stype:
+        return "W"
+    if "HANA" in stype or has_hana:
+        return "HDB"
+    # Central Services: Message Server present, but no dispatcher and no ICM.
+    # Dual-stack ABAP+JAVA systems carry BOTH ASCS and SCS; port shape is
+    # identical for the two, so without the SAP instance name we can't tell
+    # which is which — admit ignorance (empty role, GUI falls back to the
+    # bare instance number) rather than silently defaulting every dual-stack
+    # central-services instance to SCS (#248 adversarial review, finding #2).
+    if has_ms and not has_disp and not has_icm:
+        is_abap_stack = "ABAP" in stype
+        if is_java and is_abap_stack:
+            return ""
+        return "SCS" if is_java else "ASCS"
+    # ABAP application server (a DIAG dispatcher is present).  Whether this is
+    # the Primary or an Additional app server is resolved node-wide by rank.
+    if has_disp:
+        return "PAS"
+    # Java application server.
+    if is_java and has_j2ee:
+        return "J"
+    # Standalone gateway: only a gateway port, no dispatcher / Message Server.
+    if has_gw and not has_disp and not has_ms:
+        return "G"
+    return ""
 
 
 # ---------------------------------------------------------------------------
@@ -1302,6 +1427,61 @@ class SAPNode:
         if self.credentials:
             return self.credentials[0]
         return None
+
+    def recompute_instance_roles(self) -> None:
+        """Derive each instance's SAP role (instance_type / role_source) from
+        its SAP instance name when known, else from its port fingerprint + the
+        node's stack (#248).
+
+        Idempotent and purely derived — safe to call whenever instances change
+        or before serialization.  Producers never hand-set instance_type; this
+        is the single source of truth.
+        """
+        stype = (self.system_type or "").upper()
+        # SAProuter relays carry no SAP application instances / roles.
+        if "SAPROUTER" in stype:
+            for inst in self.instances:
+                inst.instance_type = ""
+                inst.role_source = ""
+            return
+        for inst in self.instances:
+            name_role = _role_from_instance_name(
+                getattr(inst, "instance_name", "") or "")
+            if name_role:
+                inst.instance_type = name_role
+                inst.role_source = "name"
+            else:
+                port_role = _instance_port_role(inst, stype)
+                inst.instance_type = port_role
+                inst.role_source = "inferred" if port_role else ""
+        # Resolve PAS vs AAS node-wide.  Rules, highest-priority first:
+        #   1. A legacy central-instance name (DVEBMGS) is ALWAYS the PAS;
+        #      every other PAS/AAS on the host becomes AAS.  (A `D` prefix
+        #      legitimately applies to either role, but DVEBMGS is the SAP
+        #      central instance — SAP imposes no ordering vs `D` instance_nrs,
+        #      so a `D00` additional app server next to `DVEBMGS01` must not
+        #      demote the central instance by a numeric-rank race (#248
+        #      adversarial review, finding #1).)
+        #   2. Otherwise the lowest-numbered app server is the PAS.
+        #   3. When the rank or the DVEBMGS override demotes a name-derived
+        #      role (e.g. `D00` named PAS → AAS because DVEBMGS exists), mark
+        #      role_source as `inferred` so the GUI tooltip stays honest
+        #      ("Additional Application Server — inferred from ports"
+        #      rather than the misleading "— from SAP instance name")
+        #      (adversarial review, finding #6).
+        app_servers = [i for i in self.instances
+                       if i.instance_type in ("PAS", "AAS")]
+        if app_servers:
+            app_servers.sort(key=lambda i: _inst_nr_sort_key(i.instance_nr))
+            dvebmgs = [i for i in app_servers
+                       if (getattr(i, "instance_name", "") or "").upper()
+                           .startswith("DVEBMGS")]
+            pas = dvebmgs[0] if dvebmgs else app_servers[0]
+            for inst in app_servers:
+                new_role = "PAS" if inst is pas else "AAS"
+                if inst.instance_type != new_role and inst.role_source == "name":
+                    inst.role_source = "inferred"
+                inst.instance_type = new_role
 
     def to_dict(self) -> dict:
         return {
@@ -2849,6 +3029,13 @@ class SAPMAPState:
             node.suppressed_instance_cache = merged_cache
             node.prune_suppressed_instances()
         self.nodes[key] = node
+        # #248 — derive per-instance SAP roles for the (re)added node so any
+        # in-memory reader (autopwn, report, scripting) sees them immediately,
+        # not only after the next serialization.  Idempotent; never fatal.
+        try:
+            node.recompute_instance_roles()
+        except Exception:
+            pass
         if is_new:
             # Suppress the "New system plotted" finding for the two
             # SAP-shipped ec2/s3 CSI Type-G placeholders that the
@@ -4023,6 +4210,16 @@ class SAPMAPState:
     # -- Serialization --
 
     def to_dict(self) -> dict:
+        # #248 — refresh each node's derived instance roles before serializing.
+        # to_dict() is the single chokepoint for both the map payload
+        # (get_state_dict) and the on-disk .sapmap, so recomputing here keeps
+        # roles current no matter which producer last touched the instances.
+        # Purely derived + idempotent; never fails serialization.
+        for _node in self.nodes.values():
+            try:
+                _node.recompute_instance_roles()
+            except Exception:
+                pass
         return {
             "version": self.version,
             "timestamp": self.timestamp,

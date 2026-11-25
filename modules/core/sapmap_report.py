@@ -111,6 +111,42 @@ def _esc(s) -> str:
             .replace("`", ""))
 
 
+def _instance_role_counts(state: SAPMAPState) -> dict:
+    """Aggregate per-instance SAP role counts across the landscape (#248).
+
+    Returns {"ASCS": n, "PAS": n, ...} skipping zero counts.  Reads each
+    node's derived InstanceInfo.instance_type, which to_dict refreshes via
+    SAPNode.recompute_instance_roles so the counts are always current.
+    """
+    counts = {}
+    for n in state.nodes.values():
+        # SAProuter relays carry no application instances / roles (#248).
+        if "SAPROUTER" in (n.system_type or "").upper():
+            continue
+        for inst in (n.instances or []):
+            role = (getattr(inst, "instance_type", "") or "").strip()
+            if not role:
+                continue
+            counts[role] = counts.get(role, 0) + 1
+    return counts
+
+
+def _format_role_counts(counts: dict) -> str:
+    """Render role counts as a sorted summary string: 'ASCS 2 · PAS 3 · AAS 1'.
+
+    Ordered by a landscape-sensible priority (central services first, then
+    app servers, then specialty roles), falling back to alphabetic.
+    """
+    if not counts:
+        return ""
+    _order = ("ASCS", "SCS", "ERS", "PAS", "AAS", "J", "G", "W", "HDB", "SMDA")
+    seen = set(counts)
+    parts = [f"{r} {counts[r]}" for r in _order if r in counts]
+    for r in sorted(seen - set(_order)):
+        parts.append(f"{r} {counts[r]}")
+    return " · ".join(parts)
+
+
 def _executive_summary(state: SAPMAPState) -> list:
     """Top-of-report headline numbers — what to read in 30 seconds."""
     nodes = list(state.nodes.values())
@@ -164,6 +200,12 @@ def _executive_summary(state: SAPMAPState) -> list:
     out.extend(_stat_table([
         ("Total SAP nodes discovered",
          f"{len(nodes)} ({abap} ABAP, {java} Java, {routers} SAProuter)"),
+        # Landscape shape in SAP vocabulary — ASCS / PAS / AAS / SCS / ERS /
+        # J / G / W / HDB counts (#248).  Shown only when at least one role
+        # was derivable so legacy / empty states aren't padded.
+        *([("SAP instance roles",
+            _format_role_counts(_instance_role_counts(state)))]
+          if _instance_role_counts(state) else []),
         ("SAP Cloud Connectors",
          f"{scc_count} ({scc_pwned} with cracked admin)" if scc_count else "0"),
         ("BTP subaccounts",
@@ -5493,6 +5535,11 @@ def build_html_report(state: SAPMAPState,
                 f"{abap} ABAP · {java} Java · {routers} SAProuter · "
                 f"{len(sccs)} SCC · {len(btp_subs)} BTP",
                 "#0969da")}
+    {_kpi_card("SAP instance roles",
+                str(sum(_instance_role_counts(state).values()) or "0"),
+                _format_role_counts(_instance_role_counts(state))
+                  or "no roles derived",
+                "#0969da" if _instance_role_counts(state) else "#d0d7de")}
     {_kpi_card("Systems pwned", f"{total_pwned}/{total_systems}",
                 f"{pct_pwned}% of landscape",
                 "#db6d28" if total_pwned else "#3fb950")}

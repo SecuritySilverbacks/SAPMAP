@@ -556,8 +556,8 @@ def test_quick_probe_sid_hits_first_responsive_port():
     def fake_sid(host, port, timeout=3):
         calls.append(port)
         if port == 50013:
-            return ("SB7", False, True, "HDB", 50000, 50001)
-        return ("", False, False, "", 0, 0)
+            return ("SB7", False, True, "HDB", 50000, 50001, "")
+        return ("", False, False, "", 0, 0, "")
 
     def fake_os(host, port, timeout=3):
         return "Linux"
@@ -593,7 +593,7 @@ def test_quick_probe_sid_uses_host_agent_when_available():
     with patch.object(sapmap_scanner, "_query_host_agent_systems",
                        fake_host_agent), \
          patch.object(sapmap_scanner, "_query_sapcontrol_sid",
-                       lambda *a, **k: ("", False, False, "", 0, 0)):
+                       lambda *a, **k: ("", False, False, "", 0, 0, "")):
         hit = sapmap_scanner.quick_probe_sid("abex1.example")
     assert hit is not None
     assert hit["sid"] == "AED"
@@ -605,7 +605,7 @@ def test_quick_probe_sid_returns_none_when_nothing_answers():
     with patch.object(sapmap_scanner, "_query_host_agent_systems",
                        lambda *a, **k: None), \
          patch.object(sapmap_scanner, "_query_sapcontrol_sid",
-                       lambda *a, **k: ("", False, False, "", 0, 0)):
+                       lambda *a, **k: ("", False, False, "", 0, 0, "")):
         hit = sapmap_scanner.quick_probe_sid("firewalled.example")
     assert hit is None
 
@@ -848,7 +848,7 @@ def test_quick_probe_sid_stops_before_exceeding_total_budget():
         return None
     def empty_sid(host, port, timeout=3):
         _t.sleep(timeout)
-        return ("", False, False, "", 0, 0)
+        return ("", False, False, "", 0, 0, "")
 
     start = _t.monotonic()
     with patch.object(sapmap_scanner, "_query_host_agent_systems",
