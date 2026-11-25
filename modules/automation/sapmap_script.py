@@ -58,8 +58,8 @@ Supported actions:
     layout, sleep, verify_pp_impersonation,
     read_usrextid, read_oa2c, analyse_capabilities,
     # Node identity / metadata overrides
-    set_sid, set_instance_nr, remove_instance, set_type, set_db_type,
-    set_os_type, set_telnet_override,
+    set_sid, set_instance_nr, remove_instance, forget_suppression,
+    set_type, set_db_type, set_os_type, set_telnet_override,
     # SAProuter
     set_saprouter, check_router_info, router_scan,
     # SNC client identity (looted PSE, issue #137)
@@ -448,6 +448,25 @@ def _map_step(step: dict) -> tuple:
         if not inst:
             raise ValueError("remove_instance: instance_nr required")
         return ("POST", f"/api/node/{target}/remove_instance", {
+            "instance_nr": inst,
+        }, False)
+
+    if action == "forget_suppression":
+        # Issue #92 follow-up — clear the suppression record (ban +
+        # cached row) for an instance nr without restoring anything.
+        # After forget, a later scan is free to re-discover this NN
+        # from scratch.  Use this when the original removal was for a
+        # MIS-ATTRIBUTED instance and you want a fresh discovery pass
+        # (as opposed to 'set_instance_nr', which re-asserts the nr
+        # and keeps the cached row).  Local map edit → non-destructive.
+        # Usage:  - action: forget_suppression
+        #           target: S4H
+        #           instance_nr: "01"
+        inst = (step.get("instance_nr")
+                or step.get("instance") or "").strip()
+        if not inst:
+            raise ValueError("forget_suppression: instance_nr required")
+        return ("POST", f"/api/node/{target}/forget_suppression", {
             "instance_nr": inst,
         }, False)
 
@@ -1399,6 +1418,7 @@ _ACTION_LABELS = {
     "set_sid":                "Renaming node SID",
     "set_instance_nr":        "Setting instance number",
     "remove_instance":        "Removing instance",
+    "forget_suppression":     "Forgetting suppression",
     "check_router_info":      "Probing SAProuter info leak",
     "check_ms_info_disclosure": "Probing MS text/dump info leak",
     "router_scan":            "Scanning internal net via SAProuter",

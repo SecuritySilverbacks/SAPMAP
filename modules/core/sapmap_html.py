@@ -12346,7 +12346,7 @@ function showDetails(sid, opts) {
         return `<div class="detail-row"><span class="detail-key"${keyTitle?` title="${keyTitle}"`:''}>${escHtml(keyTxt)}</span><span class="detail-val">${escHtml(i.ip)}${ports ? ' — Ports: '+ports : ''}<span class="detail-del-btn" title="Remove this instance from the map (durable — re-scans won't re-add it)" onclick="removeInstance('${escHtml(n.sid)}','${instKey(i.instance_nr)}')">&#10005;</span></span></div>`;
       }).join('')}
       ${(n.instances || []).length === 0 ? '<div class="detail-row"><span class="detail-val" style="color:#d29922">&#9888; No instances — host-level actions unavailable until a re-scan.</span></div>' : ''}
-      ${(n.suppressed_instance_nrs && n.suppressed_instance_nrs.length) ? `<div class="detail-row"><span class="detail-key">Suppressed</span><span class="detail-val" style="color:#8b949e">${n.suppressed_instance_nrs.map(nr => `${escHtml(nr)} <span class="detail-action-btn" onclick="restoreInstance('${escHtml(n.sid)}','${instKey(nr)}')">restore</span>`).join(', ')}</span></div>` : ''}
+      ${(n.suppressed_instance_nrs && n.suppressed_instance_nrs.length) ? `<div class="detail-row"><span class="detail-key">Suppressed</span><span class="detail-val" style="color:#8b949e">${n.suppressed_instance_nrs.map(nr => `${escHtml(nr)} <span class="detail-action-btn" onclick="restoreInstance('${escHtml(n.sid)}','${instKey(nr)}')">restore</span> <span class="detail-action-btn" title="Clear the deletion record so future scans can re-discover this instance from scratch. The cached row is discarded — restore stops working for this NN after a forget." onclick="forgetSuppression('${escHtml(n.sid)}','${instKey(nr)}')">forget</span>`).join(', ')}</span></div>` : ''}
     </div>
     <div class="detail-section">
       <h4>Open Ports</h4>
@@ -16135,6 +16135,28 @@ async function restoreInstance(sid, instNr) {
   const r = await api('POST', `node/${sid}/unsuppress_instance`, { instance_nr: instNr });
   if (r && r.error) { alert('Restore failed: ' + r.error); return; }
   flashActivity(`${sid}: restored instance ${instNr}`, 3000);
+  startPolling();
+  await pollUpdates();
+}
+
+// Issue #92 follow-up — the 'forget' link next to restore.  Clears the
+// deletion record (ban + cached row) WITHOUT re-adding the instance to
+// System Details.  The next scan is then free to re-discover this NN
+// from scratch — the escape hatch for a mis-attributed instance whose
+// cached row is stale (restoring it would just reinstate the wrong
+// data).  Always confirms: forget is final — once the cached row is
+// gone, restore stops working for that NN.
+async function forgetSuppression(sid, instNr) {
+  const msg =
+    `Forget suppression of instance ${instNr}?\n\n` +
+    `This clears the deletion record.  Future scans will be free to ` +
+    `re-discover this instance from scratch.\n\n` +
+    `The cached row (saved when you removed it) is permanently ` +
+    `discarded — restore will no longer work for this instance.`;
+  if (!confirm(msg)) return;
+  const r = await api('POST', `node/${sid}/forget_suppression`, { instance_nr: instNr });
+  if (r && r.error) { alert('Forget failed: ' + r.error); return; }
+  flashActivity(`${sid}: forgot suppression of instance ${instNr}`, 3000);
   startPolling();
   await pollUpdates();
 }

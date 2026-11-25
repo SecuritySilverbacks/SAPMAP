@@ -8314,6 +8314,35 @@ def create_app(api: SAPMAPApi) -> Bottle:
             "suppressed": sorted(node.suppressed_instance_nrs),
         })
 
+    @app.route("/api/node/<sid>/forget_suppression", method="POST")
+    def node_forget_suppression(sid):
+        """Issue #92 follow-up — discard the suppression record for an
+        instance nr (ban + cached row), without re-adding anything to
+        node.instances.  The next scan is then free to re-discover this
+        NN from scratch — the escape hatch for mis-attributed instances
+        (the cached row is stale, bringing it back via 'restore' would
+        just reinstate the wrong data).  Same validation + response
+        shape as remove_instance / unsuppress_instance."""
+        response.content_type = "application/json"
+        data = request.json or {}
+        node = api.state.get_node(sid)
+        if not node:
+            return json.dumps({"error": f"Node {sid} not found"})
+        instance_nr = str(data.get("instance_nr") or "").strip()
+        if not instance_nr:
+            return json.dumps({"error": "instance_nr required"})
+        if not (instance_nr.isalnum() and len(instance_nr) <= 4):
+            return json.dumps({"error": "invalid instance_nr"})
+        was = node.forget_suppression(instance_nr)
+        print(f"[*] {sid}: forgot suppression for instance {instance_nr} "
+              f"(was suppressed: {was}; future scans may re-discover it)")
+        return json.dumps({
+            "ok": True,
+            "forgotten": was,
+            "remaining": len(node.instances),
+            "suppressed": sorted(node.suppressed_instance_nrs),
+        })
+
     @app.route("/api/node/<sid>/set_saprouter", method="POST")
     def node_set_saprouter(sid):
         response.content_type = "application/json"
