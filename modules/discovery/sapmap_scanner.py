@@ -5786,6 +5786,18 @@ def enumerate_system_clients(host: str, disp_port: int, timeout: float = 5,
 # Build HostControlNode from scan result (SAP Host Agent, issue #91)
 # ---------------------------------------------------------------------------
 
+def _hostcontrol_colocated_sids(host_nodes) -> list:
+    """SIDs the SAP Host Agent genuinely manages on this host.
+
+    Excludes SAProuter nodes: a SAProuter is a network relay, not a SAP
+    application instance managed by the Host Agent, so it must not appear
+    in the HostControl entity's managed/linked list or earn a topology
+    edge to it (operator-reported on issue #91).
+    """
+    return [n.sid for n in (host_nodes or [])
+            if (getattr(n, "system_type", "") or "").upper() != "SAPROUTER"]
+
+
 def _maybe_build_hostcontrol_node(scan_result: dict,
                                   co_located_sids=None,
                                   timeout: float = 2.5,
@@ -6902,7 +6914,7 @@ def discover_systems(targets: list, instance_range: tuple = DEFAULT_INSTANCE_RAN
             # 1128/1129 with the SIDs just discovered on this host.
             hc_node = _maybe_build_hostcontrol_node(
                 result,
-                co_located_sids=[n.sid for n in host_nodes],
+                co_located_sids=_hostcontrol_colocated_sids(host_nodes),
                 timeout=min(timeout, 2.5),
             )
             if hc_node:
@@ -8110,7 +8122,7 @@ def scan_network_via_saprouter(
         # corroborate the open 1128/1129 and plot the entity.
         hc_node = _maybe_build_hostcontrol_node(
             host_result,
-            co_located_sids=[n.sid for n in host_nodes],
+            co_located_sids=_hostcontrol_colocated_sids(host_nodes),
             timeout=min(timeout, 2.5),
             saprouter=saprouter_prefix,
         )

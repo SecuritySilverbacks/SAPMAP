@@ -129,6 +129,23 @@ def test_hostcontrol_builds_with_colocated_sid():
     assert hc.findings and hc.findings[0].name.startswith("SAP Host Agent")
 
 
+def test_hostcontrol_excludes_saprouter_from_managed():
+    # A SAProuter co-located on the host is a network relay, not a SAP
+    # system the Host Agent manages — it must NOT appear in the Host
+    # Agent's managed/linked list or earn a topology edge to it
+    # (operator-reported on 192.168.2.209: RD1 SAProuter wrongly linked).
+    nodes = [SAPNode(sid="S4H", system_type="ABAP"),
+             SAPNode(sid="S4D", system_type="HANA"),
+             SAPNode(sid="RD1", system_type="SAPROUTER")]
+    sids = S._hostcontrol_colocated_sids(nodes)
+    assert sids == ["S4H", "S4D"]
+    hc = S._maybe_build_hostcontrol_node(
+        _mixed_scan(), co_located_sids=sids, saprouter="/H/x")
+    assert hc is not None
+    assert "RD1" not in hc.linked_sids
+    assert hc.linked_sids == ["S4H", "S4D"]
+
+
 def test_hostcontrol_not_built_without_signal():
     # Bare 1128/1129, no SAP system discovered, no agent answer -> no node.
     bare = {"host": "10.9.9.9",
