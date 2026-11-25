@@ -6961,7 +6961,8 @@ def discover_systems(targets: list, instance_range: tuple = DEFAULT_INSTANCE_RAN
                     f"unrelated package with the same name")
                 raise ImportError(_fallback_reason)
             _deep_scan_with_sapology(targets, instance_range, timeout, threads,
-                                     cancel_event, progress_callback, nodes)
+                                     cancel_event, progress_callback, nodes,
+                                     hostcontrol_callback=hostcontrol_callback)
         except ImportError as _e:
             _reason = _fallback_reason or str(_e) or "not installed"
             logger.warning(f"SAPology unavailable ({_reason}), "
@@ -7126,13 +7127,51 @@ def _rec_snc_probe_meta(node, info):
         node.snc_info["last_probe_at"] = pa
 
 
+def _deep_hostcontrol_node(target_ip: str, hc_ports: dict,
+                           linked_sid: str = "") -> HostControlNode:
+    """Build a SAP(Host)Control entity from host-agent ports found on the
+    deep-scan (SAPology) path (issue #242)."""
+    hc = HostControlNode(
+        host=target_ip, ip=target_ip,
+        ports=dict(hc_ports), reachable=True,
+        sid_primary=linked_sid or "",
+        managed_sids=[linked_sid] if linked_sid else [],
+        linked_sids=[linked_sid] if linked_sid else [],
+        fingerprint_source="sapology_deep",
+    )
+    hc.findings.append(Finding(
+        name="SAP Host Agent (SAPHostControl) exposed",
+        severity=Severity.INFO,
+        description=(
+            f"SAP Host Agent reachable on {target_ip} "
+            f"({', '.join(str(p) for p in sorted(hc_ports))}) via deep scan. "
+            "Host-level management service (SAPHostControl / sapstartsrv) "
+            "managing every SAP instance on the box. Surfaced as its own "
+            "SAP(Host)Control entity so its ports are not mis-attributed to a "
+            "co-located SAP system."),
+    ))
+    return hc
+
+
 def _sapology_system_to_node(sys_obj, target_ip: str, *,
                              snc_partnername: str = "", creds=None,
                              state=None, saprouter: str = "",
                              snc_auth_enabled: bool = False,
                              sid_hint: str = "",
-                             timeout: float = DEFAULT_TIMEOUT) -> SAPNode:
+                             hostcontrol_sink=None,
+                             timeout: float = DEFAULT_TIMEOUT):
     """Convert a SAPology SAPSystem object to a SAPMAP SAPNode.
+
+    Issue #242 — SAP Host Agent (SAPHostControl, 1128/1129) is host-level, not
+    a SAP instance.  This bridge lifts it into a dedicated SAP(Host)Control
+    entity instead of letting it ride on a SAP node's instance ports:
+      * host-agent ports are read from ``sys_obj.host_control_ports`` (SAPology
+        >= 1.2.0) and, as a fallback, scanned out of the instance port maps
+        (older SAPology that folded 1128/1129 onto the first instance);
+      * those ports are stripped from the SAPNode's instances;
+      * when ``hostcontrol_sink`` is given it is called with a HostControlNode;
+      * a host exposing ONLY the Host Agent returns ``None`` (no SAP node) —
+        the caller plots just the host-control entity.
 
     Issue #220 — the keyword-only ``snc_*`` / ``creds`` / ``state`` /
     ``snc_auth_enabled`` args are the deep-scan SNC context.  They default to
@@ -7154,6 +7193,35 @@ def _sapology_system_to_node(sys_obj, target_ip: str, *,
             services=dict(inst.services),
             info=dict(inst.info),
         ))
+
+    # Issue #242 — lift the SAP Host Agent (1128/1129) out of the SAP node.
+    # Prefer SAPology's host-level field (>= 1.2.0); fall back to scanning the
+    # instance port maps (older SAPology folded 1128/1129 onto the first
+    # instance).  Either way, strip the ports from the SAPNode's instances.
+    _HC_PORTS = (1128, 1129)
+    hc_ports = {}
+    for _k, _v in (getattr(sys_obj, "host_control_ports", None) or {}).items():
+        try:
+            hc_ports[int(_k)] = _v
+        except (TypeError, ValueError):
+            pass
+    for _inst in instances:
+        for _p in _HC_PORTS:
+            if _p in _inst.ports:
+                hc_ports.setdefault(_p, _inst.ports[_p])
+                del _inst.ports[_p]
+
+    # A host exposing ONLY the Host Agent (no SAP system): plot just the
+    # host-control entity, no SAP node (mirrors the fast-path #91 behaviour).
+    if (hc_ports
+            and (sys_obj.sid or "UNKNOWN") in ("UNKNOWN", "")
+            and not any(_i.ports for _i in instances)):
+        if hostcontrol_sink:
+            try:
+                hostcontrol_sink(_deep_hostcontrol_node(target_ip, hc_ports))
+            except Exception as e:
+                logger.debug("hostcontrol_sink failed for %s: %s", target_ip, e)
+        return None
 
     # Convert SAPology findings to SAPMAP findings
     findings = []
@@ -7310,11 +7378,24 @@ def _sapology_system_to_node(sys_obj, target_ip: str, *,
         # the SAPology bridge.
         pass
 
+    # Issue #242 — co-located Host Agent: emit the SAP(Host)Control entity.
+    # Link it to this SAP system, EXCEPT a SAProuter (a relay, not a
+    # Host-Agent-managed app instance) — still plot the agent, just unlinked,
+    # mirroring the fast-path rule.  The sink merges, so on a multi-SID host
+    # each system contributes its SID to the one host-keyed entity.
+    if hc_ports and hostcontrol_sink:
+        _link = "" if node.system_type == "SAPROUTER" else node.sid
+        try:
+            hostcontrol_sink(_deep_hostcontrol_node(target_ip, hc_ports, _link))
+        except Exception as e:
+            logger.debug("hostcontrol_sink failed for %s: %s", target_ip, e)
+
     return node
 
 
 def _deep_scan_with_sapology(targets, instance_range, timeout, threads,
-                              cancel_event, progress_callback, nodes):
+                              cancel_event, progress_callback, nodes,
+                              hostcontrol_callback=None):
     """Run full SAPology discover_systems + assess_vulnerabilities.
 
     Uses SAPology's own functions which handle all detection properly:
@@ -7460,8 +7541,23 @@ def _deep_scan_with_sapology(targets, instance_range, timeout, threads,
                 if inst.ip:
                     target_ip = inst.ip
                     break
+            # Issue #242 — a host exposing ONLY the Host Agent has no instances
+            # (SAPology >= 1.2.0), so there is no instance IP; fall back to the
+            # system's hostname (SAPology sets it to the reverse-DNS name or the
+            # target IP) so the HostControl entity gets a real, unique host key
+            # instead of "" (which would collide across such hosts).
+            if not target_ip:
+                target_ip = getattr(sys_obj, "hostname", "") or ""
+            if not target_ip:
+                # No usable host identifier — can't key an entity; skip.
+                continue
 
-            node = _sapology_system_to_node(sys_obj, target_ip)
+            node = _sapology_system_to_node(
+                sys_obj, target_ip, hostcontrol_sink=hostcontrol_callback)
+            if node is None:
+                # Host-Agent-only host — the SAP(Host)Control entity was
+                # emitted via hostcontrol_callback; there is no SAP node (#242).
+                continue
             nodes.append(node)
 
             # Determine DB info for display
@@ -7606,6 +7702,18 @@ def deep_scan_single(node: SAPNode, timeout: float = DEFAULT_TIMEOUT,
 
         # Convert the first result and update node in-place
         sys_obj = landscape[0]
+        def _hc_sink(hc):
+            # Issue #242 — a deep rescan lifts the Host Agent (1128/1129) off
+            # this SAP node into its own SAP(Host)Control entity.  Link it to
+            # the STORED node's SID (SAPology's fresh SID may be blank/UNKNOWN
+            # on a rescan), and MERGE via upsert so the rescan never clobbers an
+            # enriched/pwned entity or the operator's map position.
+            if node.sid and not node.sid.startswith("UNK_"):
+                hc.linked_sids = [node.sid]
+                hc.managed_sids = [node.sid]
+                hc.sid_primary = hc.sid_primary or node.sid
+            state.upsert_host_control_node(hc)
+
         fresh = _sapology_system_to_node(
             sys_obj, host,
             snc_partnername=_node_partner,
@@ -7614,8 +7722,14 @@ def deep_scan_single(node: SAPNode, timeout: float = DEFAULT_TIMEOUT,
             saprouter=(getattr(node, "saprouter", "") or ""),
             snc_auth_enabled=_snc_auth_enabled,
             sid_hint=node.sid,
+            hostcontrol_sink=(_hc_sink if state is not None else None),
             timeout=timeout,
         )
+        if fresh is None:
+            # Rescanned host turned out to be Host-Agent-only (no SAP system);
+            # the HostControl entity was emitted via the sink.  Leave the
+            # existing node untouched.
+            return node
 
         # Update node fields from the fresh scan.  When the node already
         # carries authoritative sysinfo from Stage 0 RFCSI (Julian's
