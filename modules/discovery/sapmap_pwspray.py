@@ -486,14 +486,17 @@ def landscape_password_pool(
 def _node_dispatcher_port(node) -> int:
     """Pick the first 32XX dispatcher port we see on any InstanceInfo.
     Returns 0 when the node has no scanned instance (which excludes it
-    from spray — we don't guess 3200 blindly)."""
-    for inst in (getattr(node, "instances", None) or []):
-        for port, svc in (getattr(inst, "ports", {}) or {}).items():
-            if not isinstance(port, int):
-                continue
-            if svc == "dispatcher" or (3200 <= port <= 3299):
-                return port
-    return 0
+    from spray — we don't guess 3200 blindly).
+
+    Issue #255 — thin compatibility wrapper around the canonical
+    _find_dispatcher_endpoint helper in sapmap_exploit.  Old callers
+    that only need the port stay unchanged; build_target_matrix uses
+    the full helper directly so the host travels with the port on a
+    multi-host node.
+    """
+    from sapmap_exploit import _find_dispatcher_endpoint
+    _host, port, _nr = _find_dispatcher_endpoint(node)
+    return port
 
 
 def _node_clients(node) -> List[str]:
@@ -550,6 +553,12 @@ def build_target_matrix(state, scope_filter: Optional[dict] = None) -> dict:
 
     include_prod = bool(scope_filter.get("include_production", False))
 
+    # Issue #255 — host AND dispatcher_port come from the owning
+    # instance (previously host was node.ip, paired with an instance-
+    # derived port — wrong box on a multi-host node).  Preserved the
+    # two distinct ineligibility reasons ('no_dispatcher_port' vs
+    # 'no_host') the UI/report relies on.
+    from sapmap_exploit import _find_dispatcher_endpoint
     eligible: List[SprayTarget] = []
     ineligible: List[Tuple[object, str]] = []
     for sid, node in (state.nodes or {}).items():
@@ -561,11 +570,12 @@ def build_target_matrix(state, scope_filter: Optional[dict] = None) -> dict:
             ineligible.append((node, "non_abap_stack"))
             continue
         # Must have a known dispatcher port — we don't blind-guess 3200
-        port = _node_dispatcher_port(node)
+        inst_host, port, _nr = _find_dispatcher_endpoint(node)
         if not port:
             ineligible.append((node, "no_dispatcher_port"))
             continue
-        host = (getattr(node, "ip", "") or "").strip() or \
+        host = (inst_host or "").strip() or \
+               (getattr(node, "ip", "") or "").strip() or \
                (getattr(node, "hostname", "") or "").strip()
         if not host:
             ineligible.append((node, "no_host"))

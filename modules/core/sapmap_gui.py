@@ -18158,11 +18158,16 @@ def create_app(api: SAPMAPApi) -> Bottle:
             if not creds:
                 print(f"[-] No credentials available for {sid}")
                 return
-            tgt_host = tgt_node.ip or tgt_node.hostname
             # Pick the target's gateway port SNC-aware (#172): an SNC
             # system's registered-program gateway is gw/snc_port (4800+NN),
             # not the plain 33NN which is typically firewalled.
             gw_port = sapmap_rfc._resolve_gateway_service(tgt_node)
+            # Issue #255 — SERVER_NAME + GATEWAY_HOST must be the host
+            # of the INSTANCE that owns gw_port on tgt_node (previously
+            # pinned to tgt_node.ip — wrong box when the target node's
+            # gateway lives off its MS host on a multi-host target).
+            tgt_host = (sapmap_rfc._sapxpg_dest_host(tgt_node, gw_port)
+                        or tgt_node.ip or tgt_node.hostname)
             print(f"[*] Creating TCP/IP dest from {sid} → "
                   f"{target_sid} ({tgt_host}, gw={gw_port})...")
             # Phase 3b: when the SOURCE node's gateway is firewalled,

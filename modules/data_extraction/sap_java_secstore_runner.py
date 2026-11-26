@@ -94,41 +94,46 @@ def extract_java_secstore(node: SAPNode, state: SAPMAPState) -> dict:
     #   2. java_http service from any instance — guaranteed plain HTTP.
     #   3. java_https service — fall back to HTTPS scheme.
     #   4. 5NN00 derived from instance number — assume HTTP.
+    # Issue #255 — host AND port from the OWNING instance (previously
+    # jsp_host at L188 was node.ip, paired with an instance-derived port
+    # — wrong box on a multi-host node).  jsp_host_from_helper is used
+    # to build jsp_url below, EXCEPT when the SAPControl-pivot override
+    # fires (deliberate multi-host escape hatch — see below).
+    #
+    # Adversarial review of the first #255 cut caught: delegating the
+    # NOT-vulnerable fallback to a helper that trusted cve_2025_31324_port
+    # (recorded by the scanner for display even when not vulnerable)
+    # silently promoted HTTPS on patched Java nodes and tripped the
+    # Connection-reset trap that test_java_secstore_url_scheme exists
+    # to prevent.  Keep the CVE-scalar lookup STRICTLY guarded by
+    # cve_2025_31324_vulnerable; the shared helper is now
+    # label+convention-only.
+    from sapmap_exploit import _find_java_http_endpoint, _host_for_port
     jsp_scheme = "http"
     http_port = 0
+    jsp_host_from_helper = ""
     if node.cve_2025_31324_vulnerable:
         http_port = getattr(node, "cve_2025_31324_port", 0) or 0
         # The CVE probe records whether it used HTTPS.  Use that as
         # the authoritative source so the URL scheme matches.
         if http_port and getattr(node, "cve_2025_31324_https", False):
             jsp_scheme = "https"
+    if http_port:
+        # Pull the host that OWNS this CVE-recorded port, so the JSP
+        # URL below targets the real box.  Falls back to node.ip when
+        # the scanner didn't backfill inst.ports (pre-#255 behaviour).
+        jsp_host_from_helper = _host_for_port(node, http_port)
     if not http_port:
         # Prefer plain HTTP — avoids cert verification headaches and
         # the "Connection reset" failure mode when the JSP probe hits
-        # the TLS port unencrypted.
-        for inst in node.instances:
-            for p, svc in inst.ports.items():
-                if svc == "java_http":
-                    http_port = p; break
-            if http_port: break
-    if not http_port:
-        # Only HTTPS port known — use https:// scheme.
-        for inst in node.instances:
-            for p, svc in inst.ports.items():
-                if svc == "java_https":
-                    http_port = p
-                    jsp_scheme = "https"
-                    break
-            if http_port: break
-    if not http_port:
-        for inst in node.instances:
-            try:
-                nr = int(inst.instance_nr)
-            except (ValueError, TypeError):
-                continue
-            candidate = 50000 + nr * 100
-            if candidate in inst.ports:
-                http_port = candidate; break
+        # the TLS port unencrypted.  Helper is now label+convention
+        # only (no CVE-scalar trust) so this preserves the pre-#255
+        # java_http-before-java_https preference on a patched node.
+        _h, _p, _https = _find_java_http_endpoint(node, prefer="http")
+        if _p:
+            http_port = _p
+            jsp_host_from_helper = _h
+            jsp_scheme = "https" if _https else "http"
     # SAPControl pivot fallback: when Test Connection landed a
     # SAPControl OSExecute pivot on this node, the pivot's URL
     # points at 5NN13/14 — the Java HTTP port for THAT instance
@@ -185,7 +190,15 @@ def extract_java_secstore(node: SAPNode, state: SAPMAPState) -> dict:
     # deploy via SAPControl OSExecute.  Operator-reported JP1: pivot
     # at srv01jp1aas → JSP written to AAS's disk → URL rebuilt with
     # srv01jp1pas (node.hostname) hit the wrong ICM and got 404.
-    jsp_host = node.ip or node.hostname
+    # Issue #255 — prefer the owning-instance host we resolved above
+    # (jsp_host_from_helper) over node.ip, so a multi-host node's JSP
+    # URL targets the real box that hosts the Java HTTP port.  The
+    # SAPControl-pivot override below still wins — that's a deliberate
+    # multi-host escape hatch for a cluster where the pivot host owns
+    # the disk the JSP lands on (operator-reported JP1: pivot at
+    # srv01jp1aas → JSP on AAS disk → URL via srv01jp1pas hit the
+    # wrong ICM, got 404).
+    jsp_host = jsp_host_from_helper or node.ip or node.hostname
     _sc_pivot = getattr(node, "_cached_sapcontrol_pivot", None) or {}
     if _sc_pivot.get("url"):
         try:

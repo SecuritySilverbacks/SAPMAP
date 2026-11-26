@@ -309,7 +309,21 @@ def lpe_webgui_sm49(node: SAPNode, creds: Credentials) -> bool:
     The real approach: open any transaction, then use the batch/json
     okcode mechanism to navigate to any other transaction and execute.
     """
-    host = node.ip or node.hostname
+    # Issue #255 — WebGUI is hosted by the ICM of a SPECIFIC instance.
+    # The credential names an instance_nr; if that matches a known
+    # instance on the node, probe at THAT instance's host (instead of
+    # pinning once on node.ip, which is often the MS/ASCS box with no
+    # ICM).  Falls back to node-level when the credential's instance
+    # isn't in node.instances.
+    from sapmap_exploit import _inst_host
+    inst_nr = creds.instance_nr or "00"
+    host = ""
+    for _inst in (node.instances or []):
+        if getattr(_inst, "instance_nr", "") == inst_nr:
+            host = _inst_host(_inst, node)
+            break
+    if not host:
+        host = node.ip or node.hostname
     if not host:
         print(f"[-] {node.sid}: No IP/hostname available")
         return False
@@ -319,8 +333,6 @@ def lpe_webgui_sm49(node: SAPNode, creds: Credentials) -> bool:
     if not db_key or db_key not in SQL_GENERATORS:
         print(f"[-] {node.sid}: Unknown DB type: {db_type!r} — cannot generate SQL")
         return False
-
-    inst_nr = creds.instance_nr or "00"
 
     # Find the WebGUI HTTP port
     print(f"[*] {node.sid}: Searching for WebGUI HTTP port on {host}...")

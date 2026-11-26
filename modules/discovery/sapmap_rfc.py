@@ -6832,6 +6832,41 @@ def _resolve_gateway_service(node, snc=None) -> str:
         return str(base)
 
 
+def _sapxpg_dest_host(node, gw_port_str: str) -> str:
+    """Issue #255 — pair _resolve_gateway_service's port with the host of
+    the INSTANCE that owns that port.  Previously the SAPXPG destination
+    paired an instance-derived (and SNC-aware) gw port with node.ip,
+    which on a multi-host node is often the MS box that doesn't expose
+    the gateway — the TCP/IP dest then pointed at a dead box.
+
+    Returns node.ip / node.hostname when the port isn't recognised on
+    any instance (so a kernel-derived fallback port in
+    _resolve_gateway_service degrades to the pre-#255 behaviour)."""
+    try:
+        want = int(gw_port_str)
+    except (TypeError, ValueError):
+        want = -1
+    for inst in (getattr(node, "instances", None) or []):
+        ports = _instance_field(inst, "ports") or {}
+        try:
+            keys = list(ports.keys())
+        except AttributeError:
+            keys = []
+        for port in keys:
+            try:
+                pint = int(port)
+            except (TypeError, ValueError):
+                continue
+            if pint == want:
+                return (_instance_field(inst, "ip")
+                        or _instance_field(inst, "hostname")
+                        or getattr(node, "ip", "")
+                        or getattr(node, "hostname", "")
+                        or "")
+    return (getattr(node, "ip", "")
+            or getattr(node, "hostname", "") or "")
+
+
 def create_tcpip_destination(node: SAPNode, target_host: str,
                              target_sid: str = "",
                              target_gw_port: str = "",
@@ -7186,17 +7221,20 @@ def execute_local_command(node: SAPNode, command: str, params: str,
 
     # Create one if not found
     if not dest_name:
-        host = node.ip or node.hostname
-        if not host:
-            result["error"] = "No IP/hostname for node"
-            return result
-
         # Pick the gateway port SNC-aware (#172): an SNC system exposes the
         # gateway on gw/snc_port (4800+NN) and firewalls the plain 33NN
         # gateway, so a self-referencing sapxpg dest must target the SNC
         # port — otherwise the registered-program connection lands on a
         # dead non-SNC port.
         gw_port = _resolve_gateway_service(node)
+        # Issue #255 — SERVER_NAME + GATEWAY_HOST on the created TCP/IP
+        # dest must be the host of the INSTANCE that owns gw_port (not
+        # node.ip), so on a multi-host node the dest doesn't point at
+        # the MS box that has no gateway.
+        host = _sapxpg_dest_host(node, gw_port)
+        if not host:
+            result["error"] = "No IP/hostname for node"
+            return result
 
         create_result = create_tcpip_destination(
             node, target_host=host, target_sid=node.sid,

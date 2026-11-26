@@ -66,21 +66,44 @@ def test_secstore_picks_https_scheme_when_https_port_used():
 def test_secstore_prefers_java_http_over_https_service():
     """When falling back to inst.ports, prefer java_http (plain HTTP)
     over java_https — avoids the cert-verification path and the
-    HTTP-to-HTTPS-port connection-reset trap."""
+    HTTP-to-HTTPS-port connection-reset trap.
+
+    Issue #255 — the fallback was lifted out of this module into the
+    shared helper ``sapmap_exploit._find_java_http_endpoint``.  This
+    test now asserts (a) the delegation is wired up, and (b) the shared
+    helper preserves the java_http-before-java_https preference, so
+    secstore behaviour is unchanged.
+    """
+    # (a) Delegation: the runner must import/call the shared helper.
     src = _runner_src()
     m = re.search(r"def extract_java_secstore.*?Pick delivery path",
                   src, re.DOTALL)
     assert m, "port resolution block not found"
     body = m.group(0)
-    # java_http must be searched BEFORE java_https in the fallback.
-    idx_http = body.find('"java_http"')
-    idx_https = body.find('"java_https"')
-    assert idx_http > 0, "java_http preference not found"
-    assert idx_https > 0, "java_https fallback not found"
-    assert idx_http < idx_https, (
-        "java_http (HTTP) must be preferred over java_https (HTTPS) "
-        "in the port fallback chain — HTTP is simpler and avoids the "
-        "Connection-reset trap on the TLS port")
+    assert "_find_java_http_endpoint" in body, (
+        "SecStore runner should delegate Java-HTTP endpoint resolution "
+        "to sapmap_exploit._find_java_http_endpoint (issue #255).")
+
+    # (b) Behaviour: the shared helper picks the labelled java_http port
+    # over java_https, so secstore still prefers HTTP over HTTPS.
+    import os as _os
+    import sys as _sys
+    _sys.path.insert(0, _os.path.join(_os.path.dirname(__file__), "..",
+                                       "modules", "exploitation"))
+    _sys.path.insert(0, _os.path.join(_os.path.dirname(__file__), "..",
+                                       "modules", "core"))
+    from sapmap_models import SAPNode, InstanceInfo
+    import sapmap_exploit as X
+    n = SAPNode(sid="J", ip="10.0.0.1")
+    # Both labels present on the same instance — java_http must win.
+    n.instances = [InstanceInfo(instance_nr="00", ip="10.0.0.1",
+                                 ports={50000: "java_http",
+                                        50001: "java_https"})]
+    host, port, https = X._find_java_http_endpoint(n)
+    assert (port, https) == (50000, False), (
+        f"_find_java_http_endpoint must pick java_http over java_https "
+        f"— HTTP is simpler and avoids the Connection-reset trap on "
+        f"the TLS port.  Got (port={port!r}, https={https!r}).")
 
 
 def test_secstore_jsp_url_uses_dynamic_scheme():
