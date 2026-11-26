@@ -121,6 +121,15 @@ class Finding:
 class InstanceInfo:
     instance_nr: str           # e.g. "00"
     ip: str = ""
+    # Issue #246 — the host this instance actually runs on, when it differs
+    # from the node-level host.  A single SAPNode can carry instances on
+    # DIFFERENT physical hosts (e.g. the Message-Server/ASCS host plus app
+    # servers elsewhere); the node-level ip/hostname is only one of them.
+    # Producers that know the per-instance host (MS app-server import, the
+    # SAPology deep-scan bridge) populate this so the gateway/exploit paths
+    # connect to the box that actually owns the port, not node.ip.  Empty
+    # when unknown — readers fall back to inst.ip → node.ip → node.hostname.
+    hostname: str = ""
     ports: dict = field(default_factory=dict)        # {port_int: "open"/"service_name"}
     services: dict = field(default_factory=dict)      # {service_name: detail}
     info: dict = field(default_factory=dict)           # arbitrary k/v from sapcontrol etc.
@@ -142,6 +151,7 @@ class InstanceInfo:
         return {
             "instance_nr": self.instance_nr,
             "ip": self.ip,
+            "hostname": self.hostname,
             "ports": {str(k): v for k, v in self.ports.items()},
             "services": self.services,
             "info": self.info,
@@ -155,6 +165,7 @@ class InstanceInfo:
         return cls(
             instance_nr=d["instance_nr"],
             ip=d.get("ip", ""),
+            hostname=d.get("hostname", ""),
             ports={int(k): v for k, v in d.get("ports", {}).items()},
             services=d.get("services", {}),
             info=d.get("info", {}),
