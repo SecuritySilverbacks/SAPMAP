@@ -441,7 +441,12 @@ def _get_connection(node: SAPNode, creds: Credentials = None,
                 # attribute-only access crashed on dict-shaped instances).
                 if _norm_instance_nr(
                         _instance_field(inst, "instance_nr")) == want_nr:
-                    host = _instance_field(inst, "ip") or ""
+                    # Issue #246 — consult the per-instance hostname too (same
+                    # precedence the gateway path uses in sapmap_exploit), so
+                    # an MS-imported instance that carries a hostname but no ip
+                    # has its RFC verify reach the SAME box as the GW write.
+                    host = (_instance_field(inst, "ip")
+                            or _instance_field(inst, "hostname") or "")
                     break
         if not host:
             host = node.ip or node.hostname

@@ -7268,6 +7268,10 @@ def _sapology_system_to_node(sys_obj, target_ip: str, *,
         instances.append(InstanceInfo(
             instance_nr=inst.instance_nr,
             ip=inst.ip or target_ip,
+            # Issue #246 — reclaim SAPology's per-instance host (dropped
+            # before this), so a deep-scanned multi-host node routes the
+            # gateway/exploit paths to the instance's real box.
+            hostname=getattr(inst, "host", "") or "",
             ports=dict(inst.ports),
             services=dict(inst.services),
             info=_inst_info,

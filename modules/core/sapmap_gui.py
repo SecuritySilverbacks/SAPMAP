@@ -3904,6 +3904,11 @@ def _import_appserver_instances(node, ms_host: str, ms_port) -> int:
             continue
         node.instances.append(InstanceInfo(
             instance_nr=inst_nr, ip=ip,
+            # Issue #246 — carry this app server's own host so the gateway/
+            # exploit paths reach THIS box, not node.ip (the MS/ASCS host).
+            # A distributed MS import is the one place a single SAPNode
+            # genuinely spans multiple physical hosts.
+            hostname=fqdn_host,
             ports={3200 + nn: "dispatcher"},
             info={"host": fqdn_host}))
         imported += 1
