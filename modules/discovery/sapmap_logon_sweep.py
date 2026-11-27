@@ -223,15 +223,18 @@ def _finalise_status(aborted: str = "") -> None:
 def _node_dispatcher_port(node) -> Tuple[int, str]:
     """Mirror of the per-node orchestrator's helper — (port, instance_nr)
     for the first dispatcher the scanner has observed, or (0, '') if
-    none.  Does NOT blind-guess 3200+instance_nr."""
-    for inst in (getattr(node, "instances", None) or []):
-        ports = getattr(inst, "ports", {}) or {}
-        for port, svc in ports.items():
-            if not isinstance(port, int):
-                continue
-            if svc == "dispatcher" or (3200 <= port <= 3299):
-                return port, getattr(inst, "instance_nr", "") or ""
-    return 0, ""
+    none.  Does NOT blind-guess 3200+instance_nr.
+
+    Issue #255 — kept as a thin compatibility wrapper around the
+    canonical _find_dispatcher_endpoint helper in sapmap_exploit (which
+    ALSO surfaces the owning instance's host).  Existing callers that
+    only consume (port, instance_nr) stay unchanged; new callers should
+    prefer _find_dispatcher_endpoint directly so the host travels with
+    the port on multi-host nodes.
+    """
+    from sapmap_exploit import _find_dispatcher_endpoint
+    _host, port, inst_nr = _find_dispatcher_endpoint(node)
+    return port, inst_nr
 
 
 def _is_abap(node) -> bool:
@@ -262,6 +265,11 @@ def enumerate_targets(state, cfg: LogonSweepConfig) -> List[dict]:
     nodes_by_sid = dict(getattr(state, "nodes", {}) or {})
     order: List[str] = want if want is not None else sorted(nodes_by_sid.keys())
 
+    # Issue #255 — host, port AND instance_nr all come from the owning
+    # dispatcher instance via _find_dispatcher_endpoint (previously host
+    # was node.ip, paired with an instance-derived port — wrong box on
+    # a multi-host node where the dispatcher lives off the MS host).
+    from sapmap_exploit import _find_dispatcher_endpoint
     targets: List[dict] = []
     for sid in order:
         node = nodes_by_sid.get(sid)
@@ -269,12 +277,9 @@ def enumerate_targets(state, cfg: LogonSweepConfig) -> List[dict]:
             continue
         if not _is_abap(node):
             continue
-        host = (getattr(node, "ip", "")
-                or getattr(node, "hostname", "")
-                or "")
+        host, port, inst_nr = _find_dispatcher_endpoint(node)
         if not host:
             continue
-        port, inst_nr = _node_dispatcher_port(node)
         if not port:
             continue
         targets.append({

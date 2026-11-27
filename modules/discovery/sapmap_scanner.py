@@ -2723,32 +2723,44 @@ def check_cve_2025_31324(node: SAPNode, timeout: float = 10.0) -> bool:
                      "skipping CVE-2025-31324")
         return False
 
-    host = node.ip or node.hostname
-    if not host:
+    node_host_fallback = node.ip or node.hostname
+    if not node_host_fallback and not (node.instances or []):
         return False
 
     node.cve_2025_31324_checked = True
 
-    # Candidate HTTP ports: 50000 + nn*100 (plain), 50000 + nn*100 + 1 (HTTPS).
-    # Prefer ports already known to be open.
-    candidates = []
+    # Issue #255 — candidates carry the host of the INSTANCE that owns the
+    # derived port (not a single node-level host), so on a multi-host node
+    # 5NN00/5NN01 are probed at the real app-server box instead of the MS
+    # host that doesn't run AS-Java.  Shape: (host, port, use_https).  The
+    # no-instance fallback legitimately falls back to node-level host.
+    from sapmap_exploit import _inst_host
+    candidates = []  # (host, port, use_https)
+    seen = set()     # dedup on (host, port, use_https)
     for inst in node.instances:
         try:
             nr = int(inst.instance_nr)
         except (ValueError, TypeError):
             continue
+        inst_host = _inst_host(inst, node)
+        if not inst_host:
+            continue
         base = 50000 + nr * 100
         for p, use_https in [(base, False), (base + 1, True)]:
-            if p in inst.ports or (p, use_https) not in candidates:
-                candidates.append((p, use_https))
+            key = (inst_host, p, use_https)
+            if p in (inst.ports or {}) or key not in seen:
+                seen.add(key)
+                candidates.append(key)
     if not candidates:
-        # No instances known — probe common Java ports as a last resort.
-        for nr in (0, 1, 2, 3):
-            base = 50000 + nr * 100
-            candidates.append((base, False))
-            candidates.append((base + 1, True))
+        # No instances known — probe common Java ports as a last resort
+        # at the node-level host.
+        if node_host_fallback:
+            for nr in (0, 1, 2, 3):
+                base = 50000 + nr * 100
+                candidates.append((node_host_fallback, base, False))
+                candidates.append((node_host_fallback, base + 1, True))
 
-    for port, use_https in candidates:
+    for host, port, use_https in candidates:
         try:
             import sapmap_stop
             if sapmap_stop.is_stop_requested():
@@ -2767,6 +2779,13 @@ def check_cve_2025_31324(node: SAPNode, timeout: float = 10.0) -> bool:
             node.cve_2025_31324_port = port
             node.cve_2025_31324_https = use_https
             node.cve_2025_31324_evidence = r.get("evidence", "")
+            # Issue #255 — stamp the confirmed port onto the OWNING
+            # instance (by matching host) so downstream helpers that
+            # look up the host for a CVE-recorded port find it on the
+            # right instance instead of falling back to node.ip.  No-op
+            # on the no-instance fallback (host is node-level).
+            from sapmap_exploit import _mark_java_http_port
+            _mark_java_http_port(node, port, host=host)
             logger.info(f"{node.sid}: VULNERABLE to CVE-2025-31324 on port {port}")
             emit_finding(
                 "CRITICAL", node.sid,
@@ -2828,28 +2847,35 @@ def check_cve_2020_6287(node: SAPNode, timeout: float = 10.0) -> bool:
     if "JAVA" not in sys_type:
         return False
 
-    host = node.ip or node.hostname
-    if not host:
+    node_host_fallback = node.ip or node.hostname
+    if not node_host_fallback and not (node.instances or []):
         return False
 
     node.cve_2020_6287_checked = True
 
-    candidates = []
+    # Issue #255 — candidates carry the owning instance's host so a
+    # multi-host node probes the real Java box; no-instance fallback
+    # correctly stays node-level.
+    from sapmap_exploit import _inst_host
+    candidates = []  # (host, port, use_https)
     for inst in node.instances:
         try:
             nr = int(inst.instance_nr)
         except (ValueError, TypeError):
             continue
+        inst_host = _inst_host(inst, node)
+        if not inst_host:
+            continue
         base = 50000 + nr * 100
         for p, use_https in [(base, False), (base + 1, True)]:
-            candidates.append((p, use_https))
-    if not candidates:
+            candidates.append((inst_host, p, use_https))
+    if not candidates and node_host_fallback:
         for nr in (0, 1, 2, 3):
             base = 50000 + nr * 100
-            candidates.append((base, False))
-            candidates.append((base + 1, True))
+            candidates.append((node_host_fallback, base, False))
+            candidates.append((node_host_fallback, base + 1, True))
 
-    for port, use_https in candidates:
+    for host, port, use_https in candidates:
         try:
             import sapmap_stop
             if sapmap_stop.is_stop_requested():
@@ -2866,6 +2892,10 @@ def check_cve_2020_6287(node: SAPNode, timeout: float = 10.0) -> bool:
             node.cve_2020_6287_port = port
             node.cve_2020_6287_https = use_https
             node.cve_2020_6287_evidence = r.get("evidence", "")
+            # Issue #255 — stamp onto the owning instance (match by host)
+            # so _host_for_port downstream finds the right box, not node.ip.
+            from sapmap_exploit import _mark_java_http_port
+            _mark_java_http_port(node, port, host=host)
             emit_finding(
                 "CRITICAL", node.sid,
                 f"CVE-2020-6287 RECON unauth admin-user creation on port {port}",
@@ -2935,16 +2965,20 @@ def check_cve_2022_22536(node: SAPNode, timeout: float = 12.0,
         logger.warning("sap_cve_2022_22536 not available — skipping")
         return False
 
-    host = node.ip or node.hostname
-    if not host:
-        return False
+    node_host_fallback = node.ip or node.hostname
 
-    # Build the list of (port, https) candidates to probe.  Prefer ports
-    # we already know are ICM HTTP (set by SAPControl during fingerprint
-    # or by enrich_system_info()); fall back to standard 8000+NN / 5XX00
-    # defaults when nothing better is known.
-    candidates = []
+    # Issue #255 — candidates carry the OWNING INSTANCE's host so a
+    # multi-host node probes each ICM at the real app-server box
+    # (previously one node-level host was paired with every per-instance
+    # port — wrong target when ICM lives off the MS box).  Fallback 2
+    # (no-instance) legitimately stays node-level; a host is required
+    # only when we end up with candidates to probe.
+    from sapmap_exploit import _inst_host
+    candidates = []  # (host, port, use_https)
     for inst in node.instances:
+        inst_host = _inst_host(inst, node)
+        if not inst_host:
+            continue
         for port, svc in (inst.ports or {}).items():
             svc_low = (svc or "").lower()
             if any(tag in svc_low for tag in ("icm", "http", "wd",
@@ -2952,25 +2986,32 @@ def check_cve_2022_22536(node: SAPNode, timeout: float = 12.0,
                 use_https = (svc_low.find("https") != -1
                               or 44300 <= port <= 44399
                               or 50000 <= port <= 59999 and port % 100 == 1)
-                candidates.append((port, use_https))
+                candidates.append((inst_host, port, use_https))
     if not candidates:
         for inst in node.instances:
             try:
                 nr = int(inst.instance_nr)
             except (ValueError, TypeError):
                 continue
-            candidates.append((8000 + nr, False))         # default ICM HTTP
-            candidates.append((44300 + nr, True))         # default ICM HTTPS
-            candidates.append((50000 + nr * 100, False))  # AS Java HTTP
-            candidates.append((50001 + nr * 100, True))   # AS Java HTTPS
+            inst_host = _inst_host(inst, node)
+            if not inst_host:
+                continue
+            candidates.append((inst_host, 8000 + nr, False))         # ICM HTTP
+            candidates.append((inst_host, 44300 + nr, True))         # ICM HTTPS
+            candidates.append((inst_host, 50000 + nr * 100, False))  # AS Java HTTP
+            candidates.append((inst_host, 50001 + nr * 100, True))   # AS Java HTTPS
+    if not candidates and node_host_fallback:
+        candidates = [(node_host_fallback, 8000, False),
+                      (node_host_fallback, 44300, True),
+                      (node_host_fallback, 50000, False)]
     if not candidates:
-        candidates = [(8000, False), (44300, True), (50000, False)]
+        return False
 
     node.cve_2022_22536_checked = True
     saprouter = node.saprouter or ""
     found_any = False
 
-    for port, use_https in candidates:
+    for host, port, use_https in candidates:
         if not _scan_port(host, port, timeout=2.0):
             continue
         try:
