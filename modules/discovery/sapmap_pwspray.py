@@ -47,6 +47,8 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from typing import Callable, List, Optional, Sequence, Set, Tuple
 
+import sapmap_lock as _lock   # issue #85: host-lock policy (is_locked)
+
 logger = logging.getLogger(__name__)
 
 
@@ -563,6 +565,11 @@ def build_target_matrix(state, scope_filter: Optional[dict] = None) -> dict:
     ineligible: List[Tuple[object, str]] = []
     for sid, node in (state.nodes or {}).items():
         if sids is not None and sid not in sids:
+            continue
+        # #85 — never spray a LOCKED host.  Credential spray can lock real
+        # accounts, and a locked host is excluded from all automated contact.
+        if _lock.is_locked(state, node):
+            ineligible.append((node, "host_locked"))
             continue
         # ABAP-only
         stype = (getattr(node, "system_type", "") or "").upper()
