@@ -34,6 +34,22 @@ import sapmap_exploit  # noqa: F401
 from sap_db_sql_writers import (  # noqa: E402
     _build_hana_wrapper_script, _hana_dbhost_prelude_sh,
 )
+from sapmap_exploit import (  # noqa: E402
+    _hana_sxpg_exec_cmd, _hana_sxpg_verify_cmd, _hana_hdbsql_probe_sh,
+)
+
+
+def _sh_syntax_ok(script: str) -> bool:
+    if shutil.which("sh") is None:
+        return True  # no POSIX sh — skip the check
+    fd, path = tempfile.mkstemp(suffix=".sh")
+    try:
+        with os.fdopen(fd, "w") as fh:
+            fh.write(script)
+        return subprocess.run(["sh", "-n", path],
+                              capture_output=True, text=True).returncode == 0
+    finally:
+        os.unlink(path)
 
 
 # --- the shared on-target dbhost-discovery prelude -------------------------
@@ -121,13 +137,54 @@ def test_wrapper_is_valid_posix_sh(kwargs):
     """The generated wrapper must parse under /bin/sh -n for every code
     path (default runtime probe, supplied path, probed ports)."""
     script = _build_hana_wrapper_script("A4H", "00", **kwargs)
-    fd, path = tempfile.mkstemp(suffix=".sh")
-    try:
-        with os.fdopen(fd, "w") as fh:
-            fh.write(script)
-        proc = subprocess.run(["sh", "-n", path],
-                              capture_output=True, text=True)
-        assert proc.returncode == 0, (
-            f"sh -n rejected the wrapper: {proc.stderr}")
-    finally:
-        os.unlink(path)
+    assert _sh_syntax_ok(script), "sh -n rejected the GW wrapper"
+
+
+# --- the authenticated SXPG path (create_user_via_tcpip) -------------------
+# Same distributed-HANA defect, same on-target discovery fix, via the shared
+# _hana_dbhost_prelude_sh helper.  Covered here because both channels share
+# the fix and must stay consistent.
+
+def test_sxpg_exec_cmd_has_no_hardcoded_localhost():
+    cmd = _hana_sxpg_exec_cmd("A4H", 0, 'INSERT INTO USR02 VALUES(1)')
+    assert "-n localhost:" not in cmd
+    assert "-n $_h:" in cmd
+    assert "for _h in $HOSTS" in cmd
+    # the on-target dbhost discovery prelude is embedded
+    assert "SAPDBHOST" in cmd
+    assert "/usr/sap/A4H/SYS/profile/*" in cmd
+
+
+def test_sxpg_exec_cmd_preserves_port_ladder_and_exit_semantics():
+    cmd = _hana_sxpg_exec_cmd("A4H", 0, "SQL")
+    assert "3${HDBN}15" in cmd
+    assert "3${HDBN}13" in cmd
+    assert "3${HDBN}41" in cmd
+    # success per attempt, explicit failure after all hosts/ports
+    assert "&& exit 0" in cmd
+    assert cmd.rstrip().endswith("exit 1")
+
+
+def test_sxpg_verify_cmd_loops_hosts_without_hardcoded_localhost():
+    cmd = _hana_sxpg_verify_cmd("A4H", 0, "SELECT COUNT(*) FROM USR02")
+    assert "-n localhost:" not in cmd
+    assert "-n $_h:" in cmd
+    assert "for _h in $HOSTS" in cmd
+    assert "SAPDBHOST" in cmd
+
+
+def test_sxpg_hdbsql_probe_covers_known_layouts():
+    probe = _hana_hdbsql_probe_sh("A4H")
+    for candidate in (
+        "/usr/sap/A4H/hdbclient/hdbsql",
+        "/usr/sap/A4H/SYS/exe/uc/linuxx86_64/hdbclient/hdbsql",
+        "/usr/sap/A4H/SYS/exe/run/hdbsql",
+        "/hana/shared/A4H/hdbclient/hdbsql",
+    ):
+        assert candidate in probe
+
+
+@pytest.mark.skipif(shutil.which("sh") is None, reason="no POSIX sh")
+def test_sxpg_cmds_are_valid_posix_sh():
+    assert _sh_syntax_ok(_hana_sxpg_exec_cmd("A4H", 2, 'INSERT "x"'))
+    assert _sh_syntax_ok(_hana_sxpg_verify_cmd("A4H", 2, "SELECT 1"))
