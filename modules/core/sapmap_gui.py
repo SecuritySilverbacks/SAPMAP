@@ -3099,6 +3099,25 @@ class SAPMAPApi:
         d["btp_mint_client_ids"] = {
             f"{k[0]}|{k[1]}": v for k, v in _mint_cache.items()
         }
+        # Issue #85 — annotate each node with its DERIVED host-lock status so
+        # the frontend can badge locked nodes and gate the ctx-menu.  Lock
+        # state is host-scoped (lives on state.locked_hosts), not stored per
+        # node, so it is computed here, once per poll.
+        try:
+            import sapmap_lock as _lock
+            for _sid, _node in self.state.nodes.items():
+                _rec = _lock.locked_record_for(self.state, _node)
+                _nd = (d.get("nodes") or {}).get(_sid)
+                if isinstance(_nd, dict):
+                    _nd["locked"] = _rec is not None
+                    _nd["lock_reason"] = (_rec or {}).get("reason", "")
+                    _nd["lock_auto"] = bool((_rec or {}).get("auto"))
+            d["locked_hosts"] = [dict(r)
+                                 for r in (self.state.locked_hosts or [])]
+            d["unlock_log"] = [dict(r)
+                               for r in (self.state.unlock_log or [])]
+        except Exception:
+            pass
         return d
 
 
@@ -4084,6 +4103,142 @@ def create_app(api: SAPMAPApi) -> Bottle:
             status=403,
             headers={"Content-Type": "application/json"},
         )
+
+    # -- Issue #85: host-lock guardrail (DEFAULT-DENY) --------------------
+    # A locked HOST is excluded from all further automated contact.  This
+    # gate refuses a node-scoped (<sid>) route whose target node is on a
+    # locked host, UNLESS the route is classified passive (read-only / lock
+    # management).  One HTTP gate covers the GUI, the scripting engine and
+    # the MCP server — all three are HTTP clients of this same Bottle app.
+    #
+    # Classification fails CLOSED:
+    #   * every GET <sid> route is explicitly reviewed into _LOCK_ACTIVE_GET
+    #     (contacts the target → denied) or _LOCK_PASSIVE_GET (reads cached
+    #     data → allowed).  An UN-reviewed GET is denied at runtime AND
+    #     fails the coverage CI test (tests/test_lock_gate_coverage_85.py).
+    #   * every other (non-GET) <sid> route is ACTIVE by default (denied),
+    #     except the small _LOCK_PASSIVE_NONGET management allowlist.
+    # The CI test enforces that every <sid> route is classified — the
+    # reporter's "durable invariant" that the guardrail can't silently rot.
+    import sapmap_lock as _lock
+
+    # Lazily-built {compiled sid-capturing path regex: rule} for every
+    # registered <sid> route.  Built on first request — app.routes is fully
+    # populated by then (before_request fires after route registration).
+    # The passive/active classification itself lives in sapmap_lock (the one
+    # policy module); the coverage CI test imports it to prove completeness.
+    _lock_route_cache = {}
+
+    def _lock_compile_rule(rule: str):
+        parts = []
+        for tok in _re.split(r"(<[^>]+>)", rule):
+            if tok.startswith("<") and tok.endswith(">"):
+                name = tok[1:-1].split(":")[0]
+                parts.append("(?P<sid>[^/]+)" if name == "sid" else "[^/]+")
+            else:
+                parts.append(_re.escape(tok))
+        return _re.compile("^" + "".join(parts) + "$")
+
+    def _lock_node_rules():
+        if not _lock_route_cache:
+            for route in app.routes:
+                # Match a bare <sid> AND a filtered <sid:re:...> form, so a
+                # future filtered sid route can't slip past the gate
+                # un-enumerated (_lock_compile_rule already handles both).
+                if _re.search(r"<sid[:>]", route.rule):
+                    _lock_route_cache[_lock_compile_rule(route.rule)] = \
+                        route.rule
+        return _lock_route_cache
+
+    @app.hook("before_request")
+    def _lock_gate():
+        path = request.path
+        method = request.method
+        matched = [(rule, m) for pat, rule in _lock_node_rules().items()
+                   if (m := pat.match(path))]
+        if not matched:
+            return
+        sid = matched[0][1].group("sid")
+        if not sid:
+            return
+        node = api.state.nodes.get(sid)
+        if node is None or not _lock.is_locked(api.state, node):
+            return
+        # Fail CLOSED on overlapping rules: the request is allowed only if
+        # EVERY rule whose path matches is passive for this method.  If any
+        # match is active, deny — so a passive wildcard-tail rule can never
+        # shadow an active route beneath it.
+        if all(_lock.route_is_passive(rule, method) for rule, _ in matched):
+            return
+        active_rule = next(
+            (rule for rule, _ in matched
+             if not _lock.route_is_passive(rule, method)),
+            matched[0][0])
+        rec = _lock.locked_record_for(api.state, node) or {}
+        from bottle import HTTPResponse
+        raise HTTPResponse(
+            body=json.dumps({
+                "error": "host_locked",
+                "message": (
+                    "This host is LOCKED (#85) and excluded from further "
+                    "automated contact.  Unlock it with a recorded reason to "
+                    "re-arm live testing."
+                ),
+                "route": active_rule,
+                "host": rec.get("host", ""),
+                "reason": rec.get("reason", ""),
+            }),
+            status="423 Locked",
+            headers={"Content-Type": "application/json"},
+        )
+
+    # -- Issue #85: lock / unlock / list API ------------------------------
+    @app.route("/api/node/<sid>/lock", method="POST")
+    def api_node_lock(sid):
+        node = api.state.nodes.get(sid)
+        if node is None:
+            response.status = 404
+            return {"error": "node_not_found"}
+        body = request.json or {}
+        reason = (body.get("reason") or "").strip()
+        by = (body.get("by") or "").strip()
+        artifacts = _lock.pending_artifacts_for(api.state, node)
+        recs = _lock.lock_node(api.state, node, reason, by=by)
+        hosts = sorted({r["host"] for r in recs if r})
+        warning = ""
+        if artifacts:
+            warning = (
+                f"{artifacts} SAPMAP-planted artifact(s) remain on this host. "
+                f"Locking does NOT remove them — clean up separately first if "
+                f"required."
+            )
+        return {"ok": True, "locked_hosts": hosts,
+                "pending_artifacts": artifacts,
+                "message": f"Locked {len(hosts)} host(s).",
+                "warning": warning}
+
+    @app.route("/api/node/<sid>/unlock", method="POST")
+    def api_node_unlock(sid):
+        node = api.state.nodes.get(sid)
+        if node is None:
+            response.status = 404
+            return {"error": "node_not_found"}
+        body = request.json or {}
+        reason = (body.get("reason") or "").strip()
+        by = (body.get("by") or "").strip()
+        if not reason:
+            response.status = 400
+            return {"error": "reason_required",
+                    "message": "Unlocking requires a recorded reason (#85)."}
+        removed = _lock.unlock_node(api.state, node, reason, by=by)
+        return {"ok": True, "unlocked_records": removed}
+
+    @app.route("/api/locks", method="GET")
+    def api_locks_list():
+        return {
+            "locked_hosts": [dict(r) for r in (api.state.locked_hosts or [])],
+            "unlock_log": [dict(r) for r in (api.state.unlock_log or [])],
+        }
 
     # -- Serve the SPA --
     @app.route("/")

@@ -1414,6 +1414,11 @@ body {
   <!-- Top-level quick actions -->
   <div class="ctx-item" data-action="details">&#128269; View System Details</div>
   <div class="ctx-item" data-action="findings">&#128203; View Findings</div>
+  <!-- Issue #85 — host-lock guardrail.  NOT a write-op (locking is a SAFETY
+       action that stays available in read-only mode).  showCtxMenu shows
+       exactly one of these based on the node's derived lock state. -->
+  <div class="ctx-item" id="ctx-lock-host" data-action="lock_host" title="LOCK this host (issue #85): exclude it from ALL further automated contact — scanning, probing, RFC, vuln checks, exploitation, propagation — while keeping it visible on the map and in the report. Host-scoped: every SID on this host is covered. Locking never cleans up planted artifacts.">&#128274; Lock Host (exclude from contact)</div>
+  <div class="ctx-item" id="ctx-unlock-host" data-action="unlock_host" title="UNLOCK this host (issue #85) to re-arm live testing. Requires a recorded reason (team / compliance traceability).">&#128275; Unlock Host (requires reason)&hellip;</div>
   <div class="ctx-item" data-action="blast_radius_forward" title="Flood every system reachable FROM this node, ring by ring, colour-graded by hop distance (issue #197).  'Own this box, own all of that.'  Read-only view over the RFC/trust graph — no exploitation.">&#128165; Blast Radius (reachable from here)</div>
   <div class="ctx-item" data-action="blast_radius_inverse" title="Flood every system that can reach THIS node — the exposure cone of a crown jewel (issue #197).  'Who can get to me?'  Read-only view over the RFC/trust graph.">&#127919; Exposure Cone (who can reach this)</div>
   <div class="ctx-item write-op" data-action="wd_admin_creds">&#128273; Add WD admin credentials (webadm / pull backend table)</div>
@@ -5730,6 +5735,18 @@ function updateMap() {
     if (n.pwned) {
       html += pwnedTagSvg(x + BOX_W + 8, y);
     }
+    // Issue #85 — host-lock padlock.  A locked system stays fully drawn
+    // (locked hosts remain visible on the map); the padlock + tooltip flag
+    // that it is excluded from all further automated contact.
+    if (n.locked) {
+      html += `<text x="${x+16}" y="${y+BOX_H-11}" font-size="18"`
+           + ` fill="#f0b429" stroke="#0d1117" stroke-width="2.5"`
+           + ` paint-order="stroke" dominant-baseline="middle">&#128274;`
+           + `<title>LOCKED (#85)`
+           + `${n.lock_auto ? ' — auto (whitelist)' : ''}`
+           + `${n.lock_reason ? ': ' + escHtml(n.lock_reason) : ''}`
+           + ` — excluded from further automated contact.</title></text>`;
+    }
     // Root badge — shown when ANY of the Linux LPE techniques
     // (Copy Fail / pedit-COW / Dirty Frag) has obtained root.
     if (n.copyfail_root_obtained || n.dirtyfrag_root_obtained
@@ -7092,6 +7109,11 @@ function showCtxMenu(e, sid) {
   selectedNodeSid = sid;
   const n = (mapState.nodes || {})[sid];
   const menu = document.getElementById('ctx-menu');
+  // Issue #85 — show Lock on an unlocked node, Unlock on a locked one.
+  const _lockItem = document.getElementById('ctx-lock-host');
+  const _unlockItem = document.getElementById('ctx-unlock-host');
+  if (_lockItem) _lockItem.style.display = (n && n.locked) ? 'none' : '';
+  if (_unlockItem) _unlockItem.style.display = (n && n.locked) ? '' : 'none';
 
   // Determine node capabilities
   const hasCreds = n && ((n.credentials || []).length > 0 || (n.created_users || []).length > 0 || n.pwned);
@@ -9362,6 +9384,33 @@ async function ctxAction(action) {
   switch (action) {
     case 'details': showDetails(sid); break;
     case 'findings': showFindings(sid); break;
+    case 'lock_host': {
+      // Issue #85 — lock this host (host-scoped).  Reason is optional at
+      // lock time; the backend warns (does NOT block, never auto-cleans) if
+      // SAPMAP-planted artifacts remain on the host.
+      const reason = prompt(
+        'Lock this HOST — exclude it from all further automated contact.\n'
+        + 'Optional reason:', '');
+      if (reason === null) break;  // cancelled
+      const r = await api('POST', `node/${sid}/lock`, { reason });
+      if (r && r.warning) showToast('&#9888; ' + escHtml(r.warning));
+      else if (r && r.message) showToast('&#128274; ' + escHtml(r.message));
+      break;
+    }
+    case 'unlock_host': {
+      // Issue #85 — unlock REQUIRES a recorded reason (traceability).
+      const reason = prompt(
+        'Unlock this HOST — this RE-ARMS live testing against it.\n'
+        + 'Recorded reason (REQUIRED):', '');
+      if (reason === null) break;
+      if (!reason.trim()) {
+        showToast('&#9888; Unlock cancelled — a reason is required (#85).');
+        break;
+      }
+      const r = await api('POST', `node/${sid}/unlock`, { reason });
+      if (r && r.ok) showToast('&#128275; Host unlocked — live testing re-armed.');
+      break;
+    }
     case 'blast_radius_forward': floodBlastRadius(sid, 'forward'); break;
     case 'blast_radius_inverse': floodBlastRadius(sid, 'inverse'); break;
     case 'credentials': showCredModal(sid); break;
@@ -11765,6 +11814,7 @@ function showDetails(sid, opts) {
       <div class="detail-row"><span class="detail-key">SAP Release</span><span class="detail-val">${escHtml(n.sap_release)}</span></div>
       <div class="detail-row"><span class="detail-key">Production</span><span class="detail-val">${n.is_production ? '<span style="color:#f85149">YES</span>' : 'No'}</span></div>
       <div class="detail-row"><span class="detail-key">Pwned</span><span class="detail-val">${n.pwned ? '<span style="color:#f0883e">&#9889; YES</span>' : 'No'}</span></div>
+      <div class="detail-row"><span class="detail-key">Locked (#85)</span><span class="detail-val">${n.locked ? `<span style="color:#f0b429">&#128274; YES${n.lock_auto ? ' (auto)' : ''}</span>${n.lock_reason ? ' — ' + escHtml(n.lock_reason) : ''}` : 'No'}</span></div>
       ${(() => {
         // Password-spray hits (issue #69, PR5-de-gate).  Group by
         // authority tier so the operator sees at a glance whether
