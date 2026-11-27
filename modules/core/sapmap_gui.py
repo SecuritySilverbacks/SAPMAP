@@ -3112,6 +3112,22 @@ class SAPMAPApi:
                     _nd["locked"] = _rec is not None
                     _nd["lock_reason"] = (_rec or {}).get("reason", "")
                     _nd["lock_auto"] = bool((_rec or {}).get("auto"))
+            # Host Agent (#91) boxes live OUTSIDE state.nodes and are keyed by
+            # host, so their lock status is derived separately — but off the
+            # SAME host-scoped records, so a co-located SAP node and its Host
+            # Agent share one lock (issue #85).  locked_record_for reads the
+            # agent's host + IP via canonical_hosts, so an IP-only lock lands
+            # too.
+            _hc_payload = d.get("host_control_nodes") or {}
+            for _h, _hc_obj in (getattr(self.state, "host_control_nodes", None)
+                                or {}).items():
+                _hcd = _hc_payload.get(_h)
+                if not isinstance(_hcd, dict):
+                    continue
+                _hrec = _lock.locked_record_for(self.state, _hc_obj)
+                _hcd["locked"] = _hrec is not None
+                _hcd["lock_reason"] = (_hrec or {}).get("reason", "")
+                _hcd["lock_auto"] = bool((_hrec or {}).get("auto"))
             d["locked_hosts"] = [dict(r)
                                  for r in (self.state.locked_hosts or [])]
             d["unlock_log"] = [dict(r)
@@ -4175,12 +4191,32 @@ def create_app(api: SAPMAPApi) -> Bottle:
              if not _lock.route_is_passive(rule, method)),
             matched[0][0])
         rec = _lock.locked_record_for(api.state, node) or {}
+        # Issue #85 — make the refusal VISIBLE: drop a line in the operator
+        # console so a blocked action is never silent (the 423 alone was easy
+        # to miss).  The frontend api() helper also raises a toast on 423.
+        # The console buffer is rendered into the DOM via innerHTML and its
+        # contract is CALLER-escapes (cf. _console_push_finding / OutputCapture
+        # which both pre-escape).  EVERY dynamic token here — method, path, and
+        # above all the target-SELF-REPORTED host (a hostname captured during
+        # discovery) — is HTML-escaped before it goes in, or a crafted hostname
+        # would be stored XSS in the operator's browser.
+        def _esc(s):
+            return (str(s).replace("&", "&amp;")
+                          .replace("<", "&lt;").replace(">", "&gt;"))
+        _lock_ts = datetime.now().strftime("%H:%M:%S")
+        _add_console_line(
+            _lock_ts,
+            "&#128274; Blocked " + _esc(method) + " " + _esc(path)
+            + " — host " + _esc(rec.get("host") or "?")
+            + " is LOCKED; unlock it with a recorded reason to re-arm "
+            "live testing.",
+            "cl-warn")
         from bottle import HTTPResponse
         raise HTTPResponse(
             body=json.dumps({
                 "error": "host_locked",
                 "message": (
-                    "This host is LOCKED (#85) and excluded from further "
+                    "This host is LOCKED and excluded from further "
                     "automated contact.  Unlock it with a recorded reason to "
                     "re-arm live testing."
                 ),
@@ -4229,8 +4265,63 @@ def create_app(api: SAPMAPApi) -> Bottle:
         if not reason:
             response.status = 400
             return {"error": "reason_required",
-                    "message": "Unlocking requires a recorded reason (#85)."}
+                    "message": "Unlocking requires a recorded reason."}
         removed = _lock.unlock_node(api.state, node, reason, by=by)
+        return {"ok": True, "unlocked_records": removed}
+
+    # Host Agent (#91) boxes are keyed by host, not <sid>, so they get their
+    # own host-scoped lock/unlock routes.  They are NOT <sid> routes, so the
+    # before_request gate ignores them (lock management stays reachable on a
+    # locked host, same as /api/node/<sid>/lock).
+    def _hostcontrol_box_hosts(hc):
+        """Every host of the whole box the Host Agent fronts: the agent's own
+        canonical hosts UNION the canonical hosts of every SAP node that
+        shares a host with it (co-located).  A discovery-built Host Agent is
+        keyed by a single IP (``host == ip``), while a co-located SAP node
+        also carries its resolved HOSTNAME — so a box locked via the SAP node
+        holds BOTH an IP record and a hostname record.  Spanning the union
+        here makes lock/unlock-via-agent cover the whole box, so unlocking the
+        agent can't leave a stray hostname record that keeps the SAP node at
+        423 while the agent badge says re-armed."""
+        agent_hosts = set(_lock.canonical_hosts(hc))
+        box = set(agent_hosts)
+        if agent_hosts:
+            for n in (getattr(api.state, "nodes", None) or {}).values():
+                if _lock.canonical_hosts(n) & agent_hosts:  # co-located
+                    box |= _lock.canonical_hosts(n)
+        return sorted(box)
+
+    @app.route("/api/hostcontrol/<host>/lock", method="POST")
+    def api_hostcontrol_lock(host):
+        hc = (getattr(api.state, "host_control_nodes", None) or {}).get(host)
+        if hc is None:
+            response.status = 404
+            return {"error": "hostcontrol_not_found"}
+        body = request.json or {}
+        reason = (body.get("reason") or "").strip()
+        by = (body.get("by") or "").strip()
+        hosts = _hostcontrol_box_hosts(hc) or [host]
+        recs = [_lock.lock_host(api.state, h, reason, by=by) for h in hosts]
+        locked = sorted({r["host"] for r in recs if r})
+        return {"ok": True, "locked_hosts": locked,
+                "message": f"Locked Host Agent on {len(locked)} host(s)."}
+
+    @app.route("/api/hostcontrol/<host>/unlock", method="POST")
+    def api_hostcontrol_unlock(host):
+        hc = (getattr(api.state, "host_control_nodes", None) or {}).get(host)
+        if hc is None:
+            response.status = 404
+            return {"error": "hostcontrol_not_found"}
+        body = request.json or {}
+        reason = (body.get("reason") or "").strip()
+        by = (body.get("by") or "").strip()
+        if not reason:
+            response.status = 400
+            return {"error": "reason_required",
+                    "message": "Unlocking requires a recorded reason."}
+        removed = 0
+        for h in (_hostcontrol_box_hosts(hc) or [host]):
+            removed += _lock.unlock_host(api.state, h, reason, by=by)
         return {"ok": True, "unlocked_records": removed}
 
     @app.route("/api/locks", method="GET")

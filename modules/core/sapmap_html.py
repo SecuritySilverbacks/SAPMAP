@@ -1417,8 +1417,8 @@ body {
   <!-- Issue #85 — host-lock guardrail.  NOT a write-op (locking is a SAFETY
        action that stays available in read-only mode).  showCtxMenu shows
        exactly one of these based on the node's derived lock state. -->
-  <div class="ctx-item" id="ctx-lock-host" data-action="lock_host" title="LOCK this host (issue #85): exclude it from ALL further automated contact — scanning, probing, RFC, vuln checks, exploitation, propagation — while keeping it visible on the map and in the report. Host-scoped: every SID on this host is covered. Locking never cleans up planted artifacts.">&#128274; Lock Host (exclude from contact)</div>
-  <div class="ctx-item" id="ctx-unlock-host" data-action="unlock_host" title="UNLOCK this host (issue #85) to re-arm live testing. Requires a recorded reason (team / compliance traceability).">&#128275; Unlock Host (requires reason)&hellip;</div>
+  <div class="ctx-item" id="ctx-lock-host" data-action="lock_host" title="LOCK this host: exclude it from ALL further automated contact — scanning, probing, RFC, vuln checks, exploitation, propagation — while keeping it visible on the map and in the report. Host-scoped: every SID on this host is covered. Locking never cleans up planted artifacts.">&#128274; Lock Host (exclude from contact)</div>
+  <div class="ctx-item" id="ctx-unlock-host" data-action="unlock_host" title="UNLOCK this host to re-arm live testing. Requires a recorded reason (team / compliance traceability).">&#128275; Unlock Host (requires reason)&hellip;</div>
   <div class="ctx-item" data-action="blast_radius_forward" title="Flood every system reachable FROM this node, ring by ring, colour-graded by hop distance (issue #197).  'Own this box, own all of that.'  Read-only view over the RFC/trust graph — no exploitation.">&#128165; Blast Radius (reachable from here)</div>
   <div class="ctx-item" data-action="blast_radius_inverse" title="Flood every system that can reach THIS node — the exposure cone of a crown jewel (issue #197).  'Who can get to me?'  Read-only view over the RFC/trust graph.">&#127919; Exposure Cone (who can reach this)</div>
   <div class="ctx-item write-op" data-action="wd_admin_creds">&#128273; Add WD admin credentials (webadm / pull backend table)</div>
@@ -1771,6 +1771,8 @@ body {
 <!-- SAP(Host)Control Context Menu (#91) -->
 <div class="ctx-menu" id="hostcontrol-ctx-menu">
   <div class="ctx-item" data-action="hostcontrol_details">&#128269; View Host Agent Details</div>
+  <div class="ctx-item" id="hc-ctx-lock" data-action="lock_host" title="LOCK this host: exclude the Host Agent AND every co-located SAP system on this box from all further automated contact, while keeping it visible on the map and in the report.">&#128274; Lock Host (exclude from contact)</div>
+  <div class="ctx-item" id="hc-ctx-unlock" data-action="unlock_host" title="UNLOCK this host: re-arm live testing against the Host Agent and co-located systems. Requires a recorded reason.">&#128275; Unlock Host (requires reason)</div>
 </div>
 
 <!-- SAP Cloud Connector Context Menu -->
@@ -4052,7 +4054,21 @@ async function api(method, path, body) {
   const opts = { method, headers: { 'Content-Type': 'application/json' } };
   if (body) opts.body = JSON.stringify(body);
   const res = await fetch('/api/' + path, opts);
-  return res.json();
+  let data;
+  try { data = await res.json(); } catch (_) { data = {}; }
+  // Issue #85 — a locked host refuses every active route with 423.  Surface
+  // it uniformly here (every caller, no per-call wiring) so the block is
+  // never silent.  Still return the body, so callers that inspect r.error
+  // keep working unchanged.
+  if (res.status === 423 && data && data.error === 'host_locked') {
+    try {
+      showToast('&#128274; <b>Action blocked</b> — this host is LOCKED'
+        + (data.reason ? ': ' + escHtml(data.reason) : '')
+        + '.<br>Right-click the node &rarr; <b>Unlock Host</b> (with a '
+        + 'recorded reason) to re-arm live testing.');
+    } catch (_) {}
+  }
+  return data;
 }
 
 // --- Scan control ---
@@ -5742,7 +5758,7 @@ function updateMap() {
       html += `<text x="${x+16}" y="${y+BOX_H-11}" font-size="18"`
            + ` fill="#f0b429" stroke="#0d1117" stroke-width="2.5"`
            + ` paint-order="stroke" dominant-baseline="middle">&#128274;`
-           + `<title>LOCKED (#85)`
+           + `<title>LOCKED`
            + `${n.lock_auto ? ' — auto (whitelist)' : ''}`
            + `${n.lock_reason ? ': ' + escHtml(n.lock_reason) : ''}`
            + ` — excluded from further automated contact.</title></text>`;
@@ -6066,6 +6082,18 @@ function updateMap() {
     html += `<text x="${x+10}" y="${y+19}" fill="#fff" font-size="12" font-weight="bold" font-family="monospace">⚙ HOST AGENT</text>`;
 
     if (hn.pwned) { html += pwnedTagSvg(x + BOX_W + 8, y); }
+    // Issue #85 — host-lock padlock (same badge as SAP-node boxes).  A locked
+    // Host Agent stays fully drawn; the padlock flags it as excluded from
+    // further automated contact.
+    if (hn.locked) {
+      html += `<text x="${x+16}" y="${y+BOX_H-11}" font-size="18"`
+           + ` fill="#f0b429" stroke="#0d1117" stroke-width="2.5"`
+           + ` paint-order="stroke" dominant-baseline="middle">&#128274;`
+           + `<title>LOCKED`
+           + `${hn.lock_auto ? ' — auto (whitelist)' : ''}`
+           + `${hn.lock_reason ? ': ' + escHtml(hn.lock_reason) : ''}`
+           + ` — excluded from further automated contact.</title></text>`;
+    }
 
     let ty = y + 46;
     html += `<text x="${x+10}" y="${ty}" fill="#cfd9df" font-size="11" font-weight="bold" font-family="monospace">${escHtml(host)}</text>`;
@@ -8468,6 +8496,12 @@ function showHostControlCtxMenu(e, host) {
   selectedHcHost = host;
   const menu = document.getElementById('hostcontrol-ctx-menu');
   if (!menu) return;
+  // Issue #85 — show Lock OR Unlock, mirroring the SAP-node ctx-menu.
+  const _hn = (mapState.host_control_nodes || {})[host] || {};
+  const _lockItem = document.getElementById('hc-ctx-lock');
+  const _unlockItem = document.getElementById('hc-ctx-unlock');
+  if (_lockItem) _lockItem.style.display = _hn.locked ? 'none' : '';
+  if (_unlockItem) _unlockItem.style.display = _hn.locked ? '' : 'none';
   menu.classList.add('visible');
   const w = menu.offsetWidth || 240;
   const h = menu.offsetHeight || 80;
@@ -8489,6 +8523,32 @@ function showHostControlCtxMenu(e, host) {
     if (!host) return;
     if (action === 'hostcontrol_details') {
       showHostControlDetail(host);
+    } else if (action === 'lock_host') {
+      // Issue #85 — host-scoped lock on the Host Agent's box (covers every
+      // co-located SAP system too).  Reason optional at lock time.
+      const reason = prompt(
+        'Lock this HOST (Host Agent + every co-located SAP system) —\n'
+        + 'exclude it from all further automated contact.\nOptional reason:',
+        '');
+      if (reason === null) return;
+      api('POST', `hostcontrol/${encodeURIComponent(host)}/lock`, { reason })
+        .then(r => {
+          if (r && r.message) showToast('&#128274; ' + escHtml(r.message));
+        });
+    } else if (action === 'unlock_host') {
+      // Issue #85 — unlock REQUIRES a recorded reason (traceability).
+      const reason = prompt(
+        'Unlock this HOST — this RE-ARMS live testing against the Host Agent\n'
+        + 'and co-located systems.\nRecorded reason (REQUIRED):', '');
+      if (reason === null) return;
+      if (!reason.trim()) {
+        showToast('&#9888; Unlock cancelled — a reason is required.');
+        return;
+      }
+      api('POST', `hostcontrol/${encodeURIComponent(host)}/unlock`, { reason })
+        .then(r => {
+          if (r && r.ok) showToast('&#128275; Host unlocked — live testing re-armed.');
+        });
     }
   });
 })();
@@ -8518,6 +8578,7 @@ function showHostControlDetail(host, opts) {
       <div class="detail-row"><span class="detail-key">Discovered via</span><span class="detail-val">${escHtml(hn.fingerprint_source || '?')}</span></div>
       <div class="detail-row"><span class="detail-key">OS-exec (sapadm)</span><span class="detail-val">${hn.os_exec_capable ? '<span style="color:#f0883e">Yes &mdash; /SAPHostControl.CGI</span>' : 'Not confirmed'}</span></div>
       <div class="detail-row"><span class="detail-key">Pwned</span><span class="detail-val">${hn.pwned ? '<span style="color:#f0883e">&#9889; YES</span>' : 'No'}</span></div>
+      <div class="detail-row"><span class="detail-key">Locked</span><span class="detail-val">${hn.locked ? '<span style="color:#f0b429">&#128274; YES' + (hn.lock_auto ? ' (auto)' : '') + (hn.lock_reason ? ' &mdash; ' + escHtml(hn.lock_reason) : '') + '</span>' : 'No'}</span></div>
     </div>
     <div class="detail-section">
       <h4>Manages (co-located SAP systems)</h4>
@@ -9404,7 +9465,7 @@ async function ctxAction(action) {
         + 'Recorded reason (REQUIRED):', '');
       if (reason === null) break;
       if (!reason.trim()) {
-        showToast('&#9888; Unlock cancelled — a reason is required (#85).');
+        showToast('&#9888; Unlock cancelled — a reason is required.');
         break;
       }
       const r = await api('POST', `node/${sid}/unlock`, { reason });
@@ -11814,7 +11875,7 @@ function showDetails(sid, opts) {
       <div class="detail-row"><span class="detail-key">SAP Release</span><span class="detail-val">${escHtml(n.sap_release)}</span></div>
       <div class="detail-row"><span class="detail-key">Production</span><span class="detail-val">${n.is_production ? '<span style="color:#f85149">YES</span>' : 'No'}</span></div>
       <div class="detail-row"><span class="detail-key">Pwned</span><span class="detail-val">${n.pwned ? '<span style="color:#f0883e">&#9889; YES</span>' : 'No'}</span></div>
-      <div class="detail-row"><span class="detail-key">Locked (#85)</span><span class="detail-val">${n.locked ? `<span style="color:#f0b429">&#128274; YES${n.lock_auto ? ' (auto)' : ''}</span>${n.lock_reason ? ' — ' + escHtml(n.lock_reason) : ''}` : 'No'}</span></div>
+      <div class="detail-row"><span class="detail-key">Locked</span><span class="detail-val">${n.locked ? `<span style="color:#f0b429">&#128274; YES${n.lock_auto ? ' (auto)' : ''}</span>${n.lock_reason ? ' — ' + escHtml(n.lock_reason) : ''}` : 'No'}</span></div>
       ${(() => {
         // Password-spray hits (issue #69, PR5-de-gate).  Group by
         // authority tier so the operator sees at a glance whether

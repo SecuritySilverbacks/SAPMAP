@@ -192,7 +192,7 @@ def test_frontend_wires_lock_ui():
     assert "case 'lock_host'" in src and "case 'unlock_host'" in src
     assert "node/${sid}/lock" in src and "node/${sid}/unlock" in src
     assert "n.locked" in src          # badge + details row read the flag
-    assert "Locked (#85)" in src
+    assert '>Locked</span>' in src   # details-panel lock row (label only)
 
 
 def test_get_html_still_renders_with_lock_ui():
