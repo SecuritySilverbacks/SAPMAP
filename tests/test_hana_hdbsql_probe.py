@@ -78,12 +78,15 @@ def test_wrapper_still_carries_port_ladder():
 def test_wrapper_uses_probed_ports_first_when_supplied():
     """When SAPMAP has probed reachable HANA ports from its own
     network, those go at the top of the try-list — proven
-    listening beats guessed by port convention."""
+    listening beats guessed by port convention.  Since issue #16 each
+    attempt runs through the R() host-loop helper, so a probed port
+    appears as ``R <port>`` ahead of the ``R 3${N}15`` convention attempt."""
     script = _build_hana_wrapper_script(
         "IDE", "00",
         probed_ports=[(30215, "3NN15"), (30213, "3NN13")])
-    assert "[try probed 30215]" in script
-    assert "[try probed 30213]" in script
+    assert "R 30215" in script
+    assert "R 30213" in script
+    assert script.index("R 30215") < script.index("R 3${N}15")
 
 
 def test_find_hdbsql_via_gw_stub_returns_empty():
