@@ -1741,37 +1741,57 @@ def unlock_btp_subaccount(uuid: str, reason: str, by: str = "") -> str:
 
 
 @mcp.tool()
-def lock_whitelist(action: str = "list", pattern: str = "") -> str:
+def lock_whitelist(action: str = "list", pattern: str = "",
+                   scope: str = "") -> str:
     """Manage the auto-lock whitelist (pre-scan filter + auto-lock on
     discovery).
 
     Pattern is IP / CIDR / hostname / domain suffix.  When a newly-
     discovered host matches, the pre-scan filter refuses to open a
     socket against it and the node-creation funnel auto-locks it.
-    Whitelist rules survive restarts (they are persisted on
-    ``SAPMAPState``).
+
+    ``scope`` picks whether the add/remove is per-engagement (this
+    ``.sapmap`` only) or persistent across every launch:
+
+      * ``'session'`` — the live whitelist only; disappears when you
+        load a different engagement (or start fresh without loading
+        one).  Default on **add**.
+      * ``'global'`` — also written to ``states/.sapmap_lock_whitelist``
+        so the rule is in force on every future launch, independent of
+        which ``.sapmap`` is loaded.
+      * ``'all'`` — remove-only: strip the pattern from this session
+        AND from the persistent global file.  Default on **remove**.
+
+    The listing (``action='list'``) returns the live whitelist and a
+    ``global_patterns`` subset so a caller can tell session rules from
+    persistent ones.
 
     Args:
         action:  'list' (default) | 'add' | 'remove'
         pattern: e.g. "192.168.9.0/24", "ec2.amazonaws.com".  Required
                  for add / remove.
+        scope:   'session' | 'global' | 'all' (empty = server default).
     """
     a = (action or "list").strip().lower()
+    s = (scope or "").strip().lower()
     if a == "list":
         return json.dumps(_api("GET", "/api/lock_whitelist"))
     if a == "add":
         if not (pattern or "").strip():
             return json.dumps({
                 "error": "lock_whitelist add: 'pattern' is required"})
-        return json.dumps(_api("POST", "/api/lock_whitelist", {
-            "pattern": pattern,
-        }))
+        body = {"pattern": pattern}
+        if s:
+            body["scope"] = s
+        return json.dumps(_api("POST", "/api/lock_whitelist", body))
     if a == "remove":
         if not (pattern or "").strip():
             return json.dumps({
                 "error": "lock_whitelist remove: 'pattern' is required"})
-        return json.dumps(_api(
-            "DELETE", "/api/lock_whitelist", {"pattern": pattern}))
+        body = {"pattern": pattern}
+        if s:
+            body["scope"] = s
+        return json.dumps(_api("DELETE", "/api/lock_whitelist", body))
     return json.dumps({
         "error": f"lock_whitelist: unknown action {action!r} "
                  f"(expected 'list' | 'add' | 'remove')"})
