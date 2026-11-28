@@ -20760,7 +20760,7 @@ def create_app(api: SAPMAPApi) -> Bottle:
     @app.route("/api/actions/check_all_gw", method="POST")
     def actions_check_all_gw():
         response.content_type = "application/json"
-        nodes = list(api.state.nodes.values())
+        nodes = _lock.actionable_nodes(api.state)   # #85: skip locked hosts
         if len(nodes) < 2:
             return json.dumps({"error": "Need at least 2 systems on the map"})
 
@@ -20776,7 +20776,7 @@ def create_app(api: SAPMAPApi) -> Bottle:
     def actions_check_all_ms():
         """Check MS internal port (CVE-2020-6207) on all nodes."""
         response.content_type = "application/json"
-        nodes = list(api.state.nodes.values())
+        nodes = _lock.actionable_nodes(api.state)   # #85: skip locked hosts
 
         def _run():
             for node in nodes:
@@ -20791,7 +20791,7 @@ def create_app(api: SAPMAPApi) -> Bottle:
         """Probe every ABAP / double-stack node for CVE-2026-58240
         (MS ASCS_GW rogue registration).  Read-only."""
         response.content_type = "application/json"
-        nodes = [n for n in api.state.nodes.values()
+        nodes = [n for n in _lock.actionable_nodes(api.state)   # #85 skip locked
                  if "ABAP" in (n.system_type or "").upper()
                  or "DUAL" in (n.system_type or "").upper()]
         if not nodes:
@@ -20819,7 +20819,7 @@ def create_app(api: SAPMAPApi) -> Bottle:
         check is meaningful.
         """
         response.content_type = "application/json"
-        nodes = [n for n in api.state.nodes.values()
+        nodes = [n for n in _lock.actionable_nodes(api.state)   # #85 skip locked
                  if "JAVA" in (n.system_type or "").upper()]
         if not nodes:
             return json.dumps({"error": "No Java / double-stack systems on "
@@ -20847,7 +20847,7 @@ def create_app(api: SAPMAPApi) -> Bottle:
         `create_user_java` action).
         """
         response.content_type = "application/json"
-        nodes = [n for n in api.state.nodes.values()
+        nodes = [n for n in _lock.actionable_nodes(api.state)   # #85 skip locked
                  if "JAVA" in (n.system_type or "").upper()]
         if not nodes:
             return json.dumps({"error": "No Java / double-stack systems on "
@@ -20877,7 +20877,7 @@ def create_app(api: SAPMAPApi) -> Bottle:
         """
         response.content_type = "application/json"
         nodes = []
-        for n in api.state.nodes.values():
+        for n in _lock.actionable_nodes(api.state):   # #85: skip locked hosts
             st = (n.system_type or "").upper()
             if ("ABAP" in st or "JAVA" in st
                     or "WEB_DISPATCHER" in st
@@ -20915,7 +20915,7 @@ def create_app(api: SAPMAPApi) -> Bottle:
         """
         response.content_type = "application/json"
         nodes = []
-        for n in api.state.nodes.values():
+        for n in _lock.actionable_nodes(api.state):   # #85: skip locked hosts
             if "SAPROUTER" in (n.system_type or "").upper():
                 nodes.append(n)
                 continue
@@ -20986,7 +20986,7 @@ def create_app(api: SAPMAPApi) -> Bottle:
         yet fingerprint the MS HTTP port on."""
         response.content_type = "application/json"
         eligible = []
-        for n in api.state.nodes.values():
+        for n in _lock.actionable_nodes(api.state):   # #85: skip locked hosts
             st = (n.system_type or "").upper()
             if "SAPROUTER" in st:
                 continue
@@ -21030,7 +21030,7 @@ def create_app(api: SAPMAPApi) -> Bottle:
         """
         response.content_type = "application/json"
         targets = []
-        for n in api.state.nodes.values():
+        for n in _lock.actionable_nodes(api.state):   # #85: skip locked hosts
             is_router = "SAPROUTER" in (n.system_type or "").upper()
             if is_router:
                 targets.append((n, "router"))
@@ -21159,7 +21159,7 @@ def create_app(api: SAPMAPApi) -> Bottle:
         response.content_type = "application/json"
         data = request.json or {}
         attacker_ip = data.get("attacker_ip", "").strip()
-        nodes = list(api.state.nodes.values())
+        nodes = _lock.actionable_nodes(api.state)   # #85: skip locked hosts
 
         stop_event = threading.Event()
         key = "_check_all_betrusted"
@@ -21245,7 +21245,7 @@ def create_app(api: SAPMAPApi) -> Bottle:
             "ms_info": True,
             "default_creds": False,
         }
-        nodes = list(api.state.nodes.values())
+        nodes = _lock.actionable_nodes(api.state)   # #85: skip locked hosts
         if not nodes:
             return json.dumps({"error": "No systems on the map"})
 
