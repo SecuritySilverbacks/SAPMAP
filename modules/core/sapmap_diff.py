@@ -202,6 +202,10 @@ def compute_state_diff(baseline: SAPMAPState,
         "connections": {"added": [], "removed": [], "changed": []},
         "scc_nodes":   {"added": [], "removed": [], "changed": []},
         "host_control_nodes": {"added": [], "removed": [], "changed": []},
+        # Issue #85 — host-lock guardrail: which hosts / BTP subaccounts
+        # became (or stopped being) quarantined between the two snapshots.
+        "locked_hosts": {"added": [], "removed": []},
+        "locked_btp_subaccounts": {"added": [], "removed": []},
         "trust_chains": {"added": [], "removed": []},
         "created_users": {"added": [], "removed": []},
         # Password-spraying runs (issue #69, PR5).  Added entries
@@ -422,6 +426,37 @@ def compute_state_diff(baseline: SAPMAPState,
             "first_locked_at":  first[2] if len(first) >= 3 else "",
         })
 
+    # --- Host-lock guardrail (issue #85) ---
+    # Set-diff the lock registries so a newly-quarantined (or re-armed) host /
+    # BTP subaccount shows up between snapshots.  Host locks are keyed by the
+    # record 'host' pattern; BTP locks by subaccount uuid.
+    _base_lh = {(r.get("host") or "").strip(): r
+                for r in (getattr(baseline, "locked_hosts", None) or [])
+                if (r.get("host") or "").strip()}
+    _curr_lh = {(r.get("host") or "").strip(): r
+                for r in (getattr(current, "locked_hosts", None) or [])
+                if (r.get("host") or "").strip()}
+    for h in sorted(set(_curr_lh) - set(_base_lh)):
+        _r = _curr_lh[h]
+        diff["locked_hosts"]["added"].append(
+            {"host": h, "reason": _r.get("reason", ""),
+             "auto": bool(_r.get("auto"))})
+    for h in sorted(set(_base_lh) - set(_curr_lh)):
+        _r = _base_lh[h]
+        diff["locked_hosts"]["removed"].append(
+            {"host": h, "reason": _r.get("reason", ""),
+             "auto": bool(_r.get("auto"))})
+    _base_lb = {(r.get("uuid") or "").strip()
+                for r in (getattr(baseline, "locked_btp_subaccounts", None)
+                          or []) if (r.get("uuid") or "").strip()}
+    _curr_lb = {(r.get("uuid") or "").strip()
+                for r in (getattr(current, "locked_btp_subaccounts", None)
+                          or []) if (r.get("uuid") or "").strip()}
+    for u in sorted(_curr_lb - _base_lb):
+        diff["locked_btp_subaccounts"]["added"].append({"uuid": u})
+    for u in sorted(_base_lb - _curr_lb):
+        diff["locked_btp_subaccounts"]["removed"].append({"uuid": u})
+
     # --- Summary roll-up ---
     newly_pwned = [c["sid"] for c in diff["nodes"]["changed"]
                     if any(ch["field"] == "pwned" and ch["before"] is False
@@ -448,6 +483,11 @@ def compute_state_diff(baseline: SAPMAPState,
         "scc_removed":         len(diff["scc_nodes"]["removed"]),
         "hostcontrol_added":   len(diff["host_control_nodes"]["added"]),
         "hostcontrol_removed": len(diff["host_control_nodes"]["removed"]),
+        # Host-lock guardrail KPIs (issue #85).
+        "hosts_locked_added":   len(diff["locked_hosts"]["added"]),
+        "hosts_locked_removed": len(diff["locked_hosts"]["removed"]),
+        "btp_locked_added":     len(diff["locked_btp_subaccounts"]["added"]),
+        "btp_locked_removed":   len(diff["locked_btp_subaccounts"]["removed"]),
         "users_created":       len(diff["created_users"]["added"]),
         "users_removed":       len(diff["created_users"]["removed"]),
         # Password-spraying KPIs (PR5).
@@ -508,6 +548,8 @@ def build_diff_markdown(diff: dict) -> str:
         f"| **New chains reaching PRD** | **{s['new_chains_to_prd']}** |",
         f"| SCCs added       | {s['scc_added']} |",
         f"| SCCs removed     | {s['scc_removed']} |",
+        f"| 🔒 Hosts quarantined (delta) | {s.get('hosts_locked_added', 0)} |",
+        f"| 🔓 Hosts re-armed (delta) | {s.get('hosts_locked_removed', 0)} |",
         f"| SAPMAP users created (delta) | {s['users_created']} |",
         f"| SAPMAP users removed (delta) | {s['users_removed']} |",
         # Password-spraying KPIs (PR5).
@@ -684,6 +726,41 @@ def build_diff_markdown(diff: dict) -> str:
                         f"**{_md_esc(ch['after'])}**"
                     )
                 lines.append("")
+
+    # Host-lock guardrail (issue #85)
+    _lh = diff.get("locked_hosts", {}) or {}
+    _lb = diff.get("locked_btp_subaccounts", {}) or {}
+    if (_lh.get("added") or _lh.get("removed")
+            or _lb.get("added") or _lb.get("removed")):
+        lines += ["---", "", "## 🔒 Host-lock guardrail (delta)", ""]
+        if _lh.get("added"):
+            lines.append(f"### 🔒 Newly locked hosts ({len(_lh['added'])})")
+            lines.append("")
+            for h in _lh["added"]:
+                _auto = " — auto (whitelist)" if h.get("auto") else ""
+                _rsn = f": {_md_esc(h['reason'])}" if h.get("reason") else ""
+                lines.append(f"- {_md_esc(h['host'])}{_auto}{_rsn}")
+            lines.append("")
+        if _lh.get("removed"):
+            lines.append(f"### 🔓 Unlocked hosts ({len(_lh['removed'])})")
+            lines.append("")
+            for h in _lh["removed"]:
+                lines.append(f"- {_md_esc(h['host'])}")
+            lines.append("")
+        if _lb.get("added"):
+            lines.append(
+                f"### 🔒 Newly locked BTP subaccounts ({len(_lb['added'])})")
+            lines.append("")
+            for b in _lb["added"]:
+                lines.append(f"- {_md_esc(b['uuid'])}")
+            lines.append("")
+        if _lb.get("removed"):
+            lines.append(
+                f"### 🔓 Unlocked BTP subaccounts ({len(_lb['removed'])})")
+            lines.append("")
+            for b in _lb["removed"]:
+                lines.append(f"- {_md_esc(b['uuid'])}")
+            lines.append("")
 
     # Created users
     if diff["created_users"]["added"] or diff["created_users"]["removed"]:
@@ -945,6 +1022,29 @@ def build_diff_html(diff: dict) -> str:
     locked_added_html = locked_added_html or \
         '<div class="muted">none</div>'
 
+    # Host-lock guardrail (issue #85) — newly quarantined / re-armed.
+    _lh = diff.get("locked_hosts", {}) or {}
+    _lb = diff.get("locked_btp_subaccounts", {}) or {}
+    lock_rows_html = ""
+    for h in _lh.get("added", []):
+        _auto = ' <span class="badge">auto</span>' if h.get("auto") else ''
+        _rsn = (' &mdash; ' + _hesc(h.get("reason", ""))) if h.get("reason") else ''
+        lock_rows_html += (f'<div class="entry">&#128274; '
+                           f'<code>{_hesc(h.get("host", ""))}</code>'
+                           f'{_auto}{_rsn}</div>')
+    for b in _lb.get("added", []):
+        lock_rows_html += (f'<div class="entry">&#128274; BTP '
+                           f'<code>{_hesc(b.get("uuid", ""))}</code></div>')
+    for h in _lh.get("removed", []):
+        lock_rows_html += (f'<div class="entry removed">&#128275; '
+                           f'<code>{_hesc(h.get("host", ""))}</code> unlocked'
+                           f'</div>')
+    for b in _lb.get("removed", []):
+        lock_rows_html += (f'<div class="entry removed">&#128275; BTP '
+                           f'<code>{_hesc(b.get("uuid", ""))}</code> unlocked'
+                           f'</div>')
+    lock_rows_html = lock_rows_html or '<div class="muted">none</div>'
+
     return f"""<!DOCTYPE html>
 <html lang="en"><head>
 <meta charset="utf-8">
@@ -1042,6 +1142,8 @@ def build_diff_html(diff: dict) -> str:
     {_delta_kpi("Spray hits",             s.get('spray_hits_added', 0))}
     {_delta_kpi("Newly-locked users",     s.get('newly_locked_users', 0))}
     {_delta_kpi("Purple-mode runs",       s.get('purple_runs_added', 0))}
+    {_delta_kpi("Hosts quarantined",      s.get('hosts_locked_added', 0),
+                "excluded from contact")}
   </div>
 
   <section>
@@ -1068,6 +1170,11 @@ def build_diff_html(diff: dict) -> str:
     {spray_added_html}
     <h3>Newly-locked users &mdash; defender signal ({len(sr.get("locked_users_added", []))})</h3>
     {locked_added_html}
+  </section>
+
+  <section>
+    <h2>&#128274; Host-lock guardrail (issue #85)</h2>
+    {lock_rows_html}
   </section>
 
   <section>

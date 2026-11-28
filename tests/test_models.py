@@ -508,8 +508,15 @@ def test_state_stats_systems_excludes_hidden_bare_aws_nodes():
     the map by the frontend.  The status-bar 'Systems: N' counter
     used to include them anyway, so the operator saw '14 systems'
     while visually counting 12 boxes.  Fixed by mirroring the
-    _is_bare_aws_default_node filter in stats()."""
+    _is_bare_aws_default_node filter in stats().
+
+    Isolated from the issue-#85 auto-lock whitelist (which seeds
+    ec2/s3.amazonaws.com): a LOCKED bare-AWS placeholder is deliberately
+    force-shown (and so counted) — that path is covered in
+    test_lock_cloud_entity_pr4_85.  Here we clear the whitelist so the pure
+    bare-AWS hiding behaviour is tested on its own."""
     state = SAPMAPState()
+    state.lock_whitelist = []   # isolate from #85 auto-lock + force-show
     # Real node — should count
     state.add_node(SAPNode(sid="S4H", ip="192.168.2.209",
                              hostname="s4hanadev"))
@@ -584,8 +591,11 @@ def test_add_node_suppresses_plotted_finding_for_bare_aws_default():
     def _bare_aws(sid, host):
         return SAPNode(sid=sid, system_type="SAP", hostname=host, ip="")
 
-    # 1. Bare AWS default → no finding emitted
+    # 1. Bare AWS default → no finding emitted.  Clear the issue-#85 auto-lock
+    #    whitelist first: a LOCKED bare-AWS placeholder is force-shown (and so
+    #    DOES get its plotted finding) — tested in test_lock_cloud_entity_pr4.
     state = SAPMAPState()
+    state.lock_whitelist = []
     sapmap_findings.clear()
     state.add_node(_bare_aws("CSI1", "ec2.amazonaws.com"))
     plotted = [f for f in sapmap_findings.get_since(0)["findings"]
@@ -596,6 +606,7 @@ def test_add_node_suppresses_plotted_finding_for_bare_aws_default():
     # 2. Different bare AWS default (s3) → also suppressed
     sapmap_findings.clear()
     state = SAPMAPState()
+    state.lock_whitelist = []
     state.add_node(_bare_aws("CSI2", "s3.amazonaws.com"))
     plotted = [f for f in sapmap_findings.get_since(0)["findings"]
                if "plotted" in (f.get("msg") or "")]

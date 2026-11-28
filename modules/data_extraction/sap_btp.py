@@ -410,7 +410,11 @@ def extract_subaccount_id_from_destination_token(claims: dict) -> str:
     specific extended claim).  Returns ``""`` when not present."""
     ext = claims.get("ext_attr") or {}
     if isinstance(ext, dict):
-        return ext.get("subaccountid") or ext.get("zid") or ""
+        # Coerce to str: a crafted/compromised target token can set
+        # ext_attr.subaccountid to a non-string JSON value (number, list),
+        # and callers (incl. the issue-#85 lock guards) treat the result as a
+        # string — honour the -> str annotation so they can't crash on it.
+        return str(ext.get("subaccountid") or ext.get("zid") or "")
     return ""
 
 

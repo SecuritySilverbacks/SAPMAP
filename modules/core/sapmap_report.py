@@ -3337,7 +3337,33 @@ def _build_landscape_svg(state: SAPMAPState) -> str:
         return "#374151", "#1f2937"
 
     nodes_svg = []
+    # Issue #85 — host-lock guardrail: mark quarantined nodes on the snapshot.
+    try:
+        import sapmap_lock as _lock
+    except Exception:
+        _lock = None
+
+    def _append_lock_badge(bx, by):
+        # A padlock badge (top-left, opposite the ⚡ pwned bolt) marks a node
+        # excluded from further automated contact but kept on the map.
+        nodes_svg.append(
+            f'<circle cx="{bx:.1f}" cy="{by:.1f}" r="11" '
+            f'fill="#f0b429" stroke="#fff" stroke-width="2"/>')
+        nodes_svg.append(
+            f'<text x="{bx:.1f}" y="{by+4:.1f}" fill="#1f2937" '
+            f'font-size="12" font-weight="900" text-anchor="middle">🔒</text>')
+
     for kind, node in items:
+        _nlocked = False
+        if _lock is not None:
+            try:
+                if kind == "btp":
+                    _nlocked = _lock.is_btp_subaccount_locked(
+                        state, getattr(node, "uuid", ""))
+                else:
+                    _nlocked = _lock.is_locked(state, node)
+            except Exception:
+                _nlocked = False
         if kind == "sap":
             sid = node.sid
             host_text = node.hostname or node.ip or ""
@@ -3391,6 +3417,8 @@ def _build_landscape_svg(state: SAPMAPState) -> str:
                     f'fill="#fff" font-size="13" font-weight="900" '
                     f'text-anchor="middle">⚡</text>'
                 )
+            if _nlocked:
+                _append_lock_badge(x + 12, y + 12)
         elif kind == "scc":   # hexagonal frame
             host = getattr(node, "host", "")
             ver = getattr(node, "version", "") or "?"
@@ -3443,6 +3471,8 @@ def _build_landscape_svg(state: SAPMAPState) -> str:
                     f'fill="#fff" font-size="13" font-weight="900" '
                     f'text-anchor="middle">⚡</text>'
                 )
+            if _nlocked:
+                _append_lock_badge(x + 14, y + 14)
         else:   # btp — cloud silhouette
             uuid = getattr(node, "uuid", "")
             label = (getattr(node, "display_name", "")
@@ -3505,13 +3535,15 @@ def _build_landscape_svg(state: SAPMAPState) -> str:
                     f'<text x="{x+box_w-14:.1f}" y="{y+18:.1f}" '
                     f'fill="#fff" font-size="13" font-weight="900" '
                     f'text-anchor="middle">⚡</text>')
+            if _nlocked:
+                _append_lock_badge(x + 16, y + 16)
 
     # ------------------------------------------------------------------
     # Legend (small, lower-right)
     # ------------------------------------------------------------------
     legend = (
-        f'<g transform="translate({width-310:.1f},{height-46:.1f})">'
-        f'<rect x="0" y="0" width="298" height="36" rx="6" ry="6" '
+        f'<g transform="translate({width-372:.1f},{height-46:.1f})">'
+        f'<rect x="0" y="0" width="360" height="36" rx="6" ry="6" '
         f'fill="#fff" stroke="#e5e7eb" stroke-width="1"/>'
         f'<rect x="10" y="10" width="14" height="14" rx="3" '
         f'fill="#1d4ed8"/><text x="30" y="22" font-size="10" '
@@ -3529,6 +3561,10 @@ def _build_landscape_svg(state: SAPMAPState) -> str:
         f'<circle cx="222" cy="17" r="6" fill="#f59e0b"/>'
         f'<text x="233" y="22" font-size="10" fill="#374151" '
         f'font-family="-apple-system,Segoe UI,sans-serif">⚡ pwned</text>'
+        # Issue #85 — padlock = locked / quarantined (excluded from contact)
+        f'<circle cx="294" cy="17" r="6" fill="#f0b429"/>'
+        f'<text x="305" y="22" font-size="10" fill="#374151" '
+        f'font-family="-apple-system,Segoe UI,sans-serif">🔒 locked</text>'
         f'</g>'
     )
 
@@ -4916,6 +4952,20 @@ def build_html_report(state: SAPMAPState,
     total_systems = len(nodes) + len(sccs) + len(btp_subs) + len(hostctls)
     total_pwned = len(pwned) + scc_pwned + btp_pwned + hostctl_pwned
     pct_pwned = (100 * total_pwned // total_systems) if total_systems else 0
+    # Issue #85 — count quarantined (locked) entities for the KPI card: SAP
+    # nodes / SCC / Host Agents on a locked host, plus UUID-locked BTP
+    # subaccounts.  Locked entities stay counted in total_systems (visible).
+    locked_count = 0
+    try:
+        import sapmap_lock as _lock85
+        locked_count = (
+            sum(1 for n in nodes if _lock85.is_locked(state, n))
+            + sum(1 for s in sccs.values() if _lock85.is_locked(state, s))
+            + sum(1 for h in hostctls.values() if _lock85.is_locked(state, h))
+            + len([1 for r in (getattr(state, "locked_btp_subaccounts", None)
+                               or []) if (r.get("uuid") or "").strip()]))
+    except Exception:
+        locked_count = 0
     # Edge counts.  "Total" includes every RFC / HTTP / synthetic
     # destination on the map; "SAP_ALL" surfaces the biggest-blast-
     # radius edges so the KPI card reads as a risk number, not just a
@@ -5576,6 +5626,10 @@ def build_html_report(state: SAPMAPState,
                   else "none in scope")),
                 "#f85149" if btp_pwned else
                 ("#0969da" if btp_subs else "#d0d7de"))}
+    {_kpi_card("Hosts quarantined", str(locked_count),
+                "locked — excluded from contact" if locked_count
+                else "none locked",
+                "#f0b429" if locked_count else "#d0d7de")}
     {_kpi_card("SNC-enforced systems",
                 str(_count_snc_enforced(state)),
                 ("needs looted PSE or operator SNC posture"

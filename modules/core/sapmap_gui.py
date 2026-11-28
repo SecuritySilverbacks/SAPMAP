@@ -3169,10 +3169,35 @@ class SAPMAPApi:
                 _hcd["locked"] = _hrec is not None
                 _hcd["lock_reason"] = (_hrec or {}).get("reason", "")
                 _hcd["lock_auto"] = bool((_hrec or {}).get("auto"))
+            # SAP Cloud Connector nodes are host-keyed too (#85 cloud/relay),
+            # so they share the host-scoped records — a lock on a co-located
+            # SAP node or on the connector's own host/IP lands here.
+            _scc_payload = d.get("scc_nodes") or {}
+            for _sh, _scc_obj in (getattr(self.state, "scc_nodes", None)
+                                  or {}).items():
+                _scd = _scc_payload.get(_sh)
+                if not isinstance(_scd, dict):
+                    continue
+                _srec = _lock.locked_record_for(self.state, _scc_obj)
+                _scd["locked"] = _srec is not None
+                _scd["lock_reason"] = (_srec or {}).get("reason", "")
+                _scd["lock_auto"] = bool((_srec or {}).get("auto"))
+            # BTP subaccounts are UUID-keyed (no host) — their lock lives in a
+            # separate store, and they are manual-lock only (no auto/whitelist).
+            _btp_payload = d.get("btp_subaccounts") or {}
+            for _bu, _btpd in _btp_payload.items():
+                if not isinstance(_btpd, dict):
+                    continue
+                _brec = _lock.locked_btp_record_for(self.state, _bu)
+                _btpd["locked"] = _brec is not None
+                _btpd["lock_reason"] = (_brec or {}).get("reason", "")
+                _btpd["lock_auto"] = False
             d["locked_hosts"] = [dict(r)
                                  for r in (self.state.locked_hosts or [])]
             d["unlock_log"] = [dict(r)
                                for r in (self.state.unlock_log or [])]
+            d["locked_btp_subaccounts"] = [
+                dict(r) for r in (self.state.locked_btp_subaccounts or [])]
         except Exception:
             pass
         return d
@@ -4378,6 +4403,105 @@ def create_app(api: SAPMAPApi) -> Bottle:
             removed += _lock.unlock_host(api.state, h, reason, by=by)
         return {"ok": True, "unlocked_records": removed}
 
+    # SAP Cloud Connector boxes are host-keyed too (#85 cloud/relay), so they
+    # get their own host-scoped lock/unlock routes — NOT <sid> routes, so the
+    # before_request gate ignores them and lock management stays reachable on a
+    # locked connector.  The box spans the connector's own canonical hosts
+    # UNION any co-located SAP node, mirroring _hostcontrol_box_hosts, so a lock
+    # placed via the SAP node and one placed via the connector stay in sync.
+    def _scc_box_hosts(sn):
+        scc_hosts = set(_lock.canonical_hosts(sn))
+        box = set(scc_hosts)
+        if scc_hosts:
+            for n in (getattr(api.state, "nodes", None) or {}).values():
+                if _lock.canonical_hosts(n) & scc_hosts:   # co-located
+                    box |= _lock.canonical_hosts(n)
+        return sorted(box)
+
+    def _scc_locked_response(host, sn, action):
+        """Issue #85 — if the SCC host is locked, emit a visible operator-
+        console line, set 423, and return the JSON body the caller should
+        return; else None.  The SCC active routes (probe / pull / extract /
+        relay-probe / hash-dump) are <host> routes the <sid> before_request
+        gate can't see, so each guards here (the contact chokepoint).  Keyed
+        off the SCC node's own canonical hosts so a lock on its host OR ip —
+        or on a co-located SAP node — lands.  Passive routes that only read
+        already-collected loot (analyse_pp, decrypt_ssfs) are NOT gated."""
+        if sn is not None and _lock.is_locked(api.state, sn):
+            response.status = 423
+            _console_lock_blocked(host, f"SCC {action}")
+            return json.dumps({
+                "error": "host_locked",
+                "message": ("Cloud Connector host is LOCKED — unlock it with a "
+                            "recorded reason to re-arm live testing."),
+            })
+        return None
+
+    @app.route("/api/scc/<host>/lock", method="POST")
+    def api_scc_lock(host):
+        sn = (getattr(api.state, "scc_nodes", None) or {}).get(host)
+        if sn is None:
+            response.status = 404
+            return {"error": "scc_not_found"}
+        body = request.json or {}
+        reason = (body.get("reason") or "").strip()
+        by = (body.get("by") or "").strip()
+        hosts = _scc_box_hosts(sn) or [host]
+        recs = [_lock.lock_host(api.state, h, reason, by=by) for h in hosts]
+        locked = sorted({r["host"] for r in recs if r})
+        return {"ok": True, "locked_hosts": locked,
+                "message": f"Locked Cloud Connector on {len(locked)} host(s)."}
+
+    @app.route("/api/scc/<host>/unlock", method="POST")
+    def api_scc_unlock(host):
+        sn = (getattr(api.state, "scc_nodes", None) or {}).get(host)
+        if sn is None:
+            response.status = 404
+            return {"error": "scc_not_found"}
+        body = request.json or {}
+        reason = (body.get("reason") or "").strip()
+        by = (body.get("by") or "").strip()
+        if not reason:
+            response.status = 400
+            return {"error": "reason_required",
+                    "message": "Unlocking requires a recorded reason."}
+        removed = 0
+        for h in (_scc_box_hosts(sn) or [host]):
+            removed += _lock.unlock_host(api.state, h, reason, by=by)
+        return {"ok": True, "unlocked_records": removed}
+
+    # BTP subaccounts are UUID-keyed (no host), so they get their own
+    # UUID-keyed lock/unlock routes and a dedicated store (#85 cloud/relay).
+    # Not <sid> routes → the before_request gate ignores them.
+    @app.route("/api/btp/subaccount/<uuid>/lock", method="POST")
+    def api_btp_subaccount_lock(uuid):
+        sub = (getattr(api.state, "btp_subaccounts", None) or {}).get(uuid)
+        if sub is None:
+            response.status = 404
+            return {"error": "btp_subaccount_not_found"}
+        body = request.json or {}
+        reason = (body.get("reason") or "").strip()
+        by = (body.get("by") or "").strip()
+        rec = _lock.lock_btp_subaccount(api.state, uuid, reason, by=by)
+        return {"ok": True, "locked_uuid": (rec or {}).get("uuid", uuid),
+                "message": "Locked BTP subaccount."}
+
+    @app.route("/api/btp/subaccount/<uuid>/unlock", method="POST")
+    def api_btp_subaccount_unlock(uuid):
+        sub = (getattr(api.state, "btp_subaccounts", None) or {}).get(uuid)
+        if sub is None:
+            response.status = 404
+            return {"error": "btp_subaccount_not_found"}
+        body = request.json or {}
+        reason = (body.get("reason") or "").strip()
+        by = (body.get("by") or "").strip()
+        if not reason:
+            response.status = 400
+            return {"error": "reason_required",
+                    "message": "Unlocking requires a recorded reason."}
+        removed = _lock.unlock_btp_subaccount(api.state, uuid, reason, by=by)
+        return {"ok": True, "unlocked_records": removed}
+
     @app.route("/api/locks", method="GET")
     def api_locks_list():
         return {
@@ -4761,6 +4885,9 @@ def create_app(api: SAPMAPApi) -> Bottle:
         sn = api.state.scc_nodes.get(host)
         if not sn:
             return json.dumps({"error": f"SCC node {host} not found"})
+        _blk = _scc_locked_response(host, sn, "probe creds")
+        if _blk is not None:
+            return _blk
 
         def _run():
             _task_start(f"scc:{host}:probe_creds", f"SCC {host}: probing default creds")
@@ -4802,6 +4929,9 @@ def create_app(api: SAPMAPApi) -> Bottle:
         sn = api.state.scc_nodes.get(host)
         if not sn:
             return json.dumps({"error": f"SCC node {host} not found"})
+        _blk = _scc_locked_response(host, sn, "pull mappings")
+        if _blk is not None:
+            return _blk
         data = request.json or {}
         user = data.get("username", "")
         pwd = data.get("password", "")
@@ -5217,6 +5347,9 @@ def create_app(api: SAPMAPApi) -> Bottle:
         sn = api.state.scc_nodes.get(host)
         if not sn:
             return json.dumps({"error": f"SCC node {host} not found"})
+        _blk = _scc_locked_response(host, sn, "extract keystore")
+        if _blk is not None:
+            return _blk
         data = request.json or {}
         user = data.get("username", "")
         pwd = data.get("password", "")
@@ -5544,6 +5677,9 @@ def create_app(api: SAPMAPApi) -> Bottle:
         sn = api.state.scc_nodes.get(host)
         if not sn:
             return json.dumps({"error": f"SCC node {host} not found"})
+        _blk = _scc_locked_response(host, sn, "probe mappings")
+        if _blk is not None:
+            return _blk
         if not sn.mappings:
             return json.dumps({"error": "no mappings on this SCC — pull them first"})
 
@@ -5728,6 +5864,9 @@ def create_app(api: SAPMAPApi) -> Bottle:
         sn = api.state.scc_nodes.get(host)
         if not sn:
             return json.dumps({"error": f"SCC node {host} not found"})
+        _blk = _scc_locked_response(host, sn, "download user hashes")
+        if _blk is not None:
+            return _blk
 
         import re as _re
         xml_bytes = None
@@ -7591,6 +7730,25 @@ def create_app(api: SAPMAPApi) -> Bottle:
                 "No BTP subaccount bound to this SCC — run BTP "
                 "enumerate with a cf token first"})
 
+        # Issue #85 — the PP-impersonation probe CREATES, reads and DELETES a
+        # destination on the subaccount's region API and tunnels through the
+        # SCC.  This is a <sid> route, so the before_request gate only refuses
+        # it when the ON-PREM node is locked; guard here too when the resolved
+        # BTP subaccount OR the Cloud Connector is locked (the cloud/relay
+        # contact the guardrail must exclude).  Refuse BEFORE touching the
+        # token / env / probe thread.
+        if _lock.is_btp_subaccount_locked(api.state, subaccount_uuid):
+            response.status = 423
+            _console_lock_blocked(f"BTP:{(subaccount_uuid or '')[:8]}",
+                                  "verify PP impersonation")
+            return json.dumps({"error": "host_locked",
+                               "message": "BTP subaccount is LOCKED — unlock it "
+                                          "with a recorded reason to re-arm."})
+        _blk = _scc_locked_response(scc_host, scc_node,
+                                    "verify PP impersonation")
+        if _blk is not None:
+            return _blk
+
         # Pick the token: prefer the region attached to the
         # subaccount we just resolved, fall back to any single
         # token in the store.
@@ -7952,6 +8110,19 @@ def create_app(api: SAPMAPApi) -> Bottle:
                 extract_subdomain_from_token,
             )
             from sapmap_models import BTPSubaccountNode
+            # Issue #85 — this internal auto-sweep bypasses the HTTP layer, so
+            # the lock guard lives here.  The token's bound subaccount UUID is
+            # in its ext_attr.subaccountid claim (already decoded into
+            # ``claims``) — resolve it offline and skip the pull for a locked
+            # subaccount before any region-API contact.
+            _mint_uuid = extract_subaccount_id_from_destination_token(claims)
+            if _mint_uuid and _lock.is_btp_subaccount_locked(
+                    api.state, _mint_uuid):
+                _console_lock_blocked(f"BTP:{_mint_uuid[:8]}",
+                                      "post-mint enumerate")
+                print(f"[!] {sid}: post-mint enumerate skipped — BTP "
+                      f"subaccount {_mint_uuid[:8]} is LOCKED (#85)")
+                return {"error": "host_locked"}
             dests, err, sub_uuid = (
                 pull_destinations_via_destination_token(
                     token, region))
@@ -22504,6 +22675,19 @@ def create_app(api: SAPMAPApi) -> Bottle:
         if not token:
             return json.dumps({"ok": False,
                                "error": f"No token stored for region {region!r}"})
+        # Issue #85 — the destination-service token carries its bound
+        # subaccount UUID in the ext_attr.subaccountid claim; resolve it
+        # OFFLINE (no network) so a locked subaccount is refused BEFORE any
+        # region-API contact.  A subaccount never seen can't be locked, so a
+        # first-time pull is unaffected.
+        _pre_uuid = extract_subaccount_id_from_destination_token(
+            decode_token_claims(token))
+        if _pre_uuid and _lock.is_btp_subaccount_locked(api.state, _pre_uuid):
+            response.status = 423
+            _console_lock_blocked(f"BTP:{_pre_uuid[:8]}", "pull destinations")
+            return json.dumps({"ok": False, "error": "host_locked",
+                               "message": "BTP subaccount is LOCKED — unlock it "
+                                          "with a recorded reason to re-arm."})
         try:
             dests, err, sub_uuid = pull_destinations_via_destination_token(
                 token, region)
@@ -22747,6 +22931,16 @@ def create_app(api: SAPMAPApi) -> Bottle:
             return json.dumps({"ok": False,
                                "error": f"Unknown BTP subaccount {uuid!r}.  "
                                          "Run /api/btp/enumerate first."})
+        # Issue #85 — a locked subaccount is excluded from further automated
+        # contact; the destination pull reads its secrets, so refuse it (the
+        # subaccount stays visible on the map).
+        if _lock.is_btp_subaccount_locked(api.state, uuid):
+            response.status = 423
+            _console_lock_blocked(f"BTP:{(uuid or '')[:8]}",
+                                  "pull destinations")
+            return json.dumps({"ok": False, "error": "host_locked",
+                               "message": "BTP subaccount is LOCKED — unlock it "
+                                          "with a recorded reason to re-arm."})
         token = api.btp_tokens.get(sub.region) or ""
         if not token:
             return json.dumps({"ok": False,

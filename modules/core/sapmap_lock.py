@@ -362,6 +362,95 @@ def unlock_node(state, node, reason: str, *, by: str = "", now: str = "") -> int
 
 
 # ---------------------------------------------------------------------------
+# BTP subaccount lock (UUID-keyed — issue #85, cloud/relay coverage)
+# ---------------------------------------------------------------------------
+# A BTP subaccount is identified ONLY by its UUID — it has no host/IP the
+# host matcher can key on:
+#   * its region-API host (api.cf.<region>.hana.ondemand.com) is SHARED by
+#     every subaccount in the region, so locking it would quarantine them all;
+#   * its destination URLs point at ON-PREM targets (independently host-
+#     lockable), not at the subaccount itself.
+# So a locked subaccount gets its own UUID-keyed store
+# (state.locked_btp_subaccounts), parallel to locked_hosts, with the SAME
+# recorded-reason unlock discipline.  The host whitelist does NOT apply (there
+# is no host to match) — subaccounts are manual-lock only.  Enforcement is at
+# the region-API destination/credential pull chokepoints, which resolve the
+# subaccount UUID (path param, or offline from the destination-token claim)
+# before any network contact.
+
+def _btp_records(state) -> list:
+    return getattr(state, "locked_btp_subaccounts", None) or []
+
+
+def locked_btp_record_for(state, uuid: str):
+    """The lock record for a BTP subaccount UUID, else None."""
+    u = str(uuid or "").strip()      # str(): a crafted token claim may be non-str
+    if not u:
+        return None
+    for rec in _btp_records(state):
+        if (rec.get("uuid") or "").strip() == u:
+            return rec
+    return None
+
+
+def is_btp_subaccount_locked(state, uuid: str) -> bool:
+    """True if the BTP subaccount UUID is locked — the keystone check the
+    region-API pull chokepoints call."""
+    return locked_btp_record_for(state, uuid) is not None
+
+
+def lock_btp_subaccount(state, uuid: str, reason: str = "", *, by: str = "",
+                        now: str = ""):
+    """Add (or refresh) a lock record for one BTP subaccount.  Idempotent:
+    re-locking keeps the original ``locked_at``.  Returns the record, or None
+    for an empty uuid."""
+    u = str(uuid or "").strip()
+    if not u:
+        return None
+    recs = state.locked_btp_subaccounts
+    for rec in recs:
+        if (rec.get("uuid") or "").strip() == u:
+            if reason:
+                rec["reason"] = reason
+            return rec
+    rec = {
+        "uuid": u,
+        "reason": reason or "",
+        "locked_at": now or _now_iso(),
+        "locked_by": by or "",
+    }
+    recs.append(rec)
+    return rec
+
+
+def unlock_btp_subaccount(state, uuid: str, reason: str, *, by: str = "",
+                          now: str = "") -> int:
+    """Remove the lock record for a BTP subaccount and append to
+    ``unlock_log`` (keyed ``BTP:<uuid>`` so it shares the one audit trail).
+    REQUIRES a non-empty reason — the recorded-reason guarantee.  Returns the
+    number of records removed."""
+    if not (reason or "").strip():
+        raise ValueError("unlock requires a recorded reason (issue #85)")
+    u = str(uuid or "").strip()
+    recs = state.locked_btp_subaccounts
+    kept, removed = [], 0
+    for r in recs:
+        if (r.get("uuid") or "").strip() == u:
+            removed += 1
+        else:
+            kept.append(r)
+    state.locked_btp_subaccounts = kept
+    if removed:
+        state.unlock_log.append({
+            "host": f"BTP:{u}",
+            "reason": reason.strip(),
+            "at": now or _now_iso(),
+            "by": by or "",
+        })
+    return removed
+
+
+# ---------------------------------------------------------------------------
 # HTTP-gate route classification (single source of truth)
 # ---------------------------------------------------------------------------
 # The before_request gate in sapmap_gui imports these.  Kept here (not in
