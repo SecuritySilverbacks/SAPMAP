@@ -834,6 +834,13 @@ def _materialise_btp_target(state: SAPMAPState,
         discovered_via_btp=True,
     )
     state.nodes[sid] = placeholder
+    # Issue #85 — BTP destinations are a prime source of whitelisted cloud
+    # hosts (s3/ec2.amazonaws.com); this direct write bypasses add_node, so
+    # auto-lock here or a discovered whitelisted backend would never be gated.
+    try:
+        state._auto_lock(placeholder)
+    except Exception:
+        pass
     return sid
 
 

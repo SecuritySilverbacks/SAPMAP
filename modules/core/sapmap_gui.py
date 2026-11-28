@@ -2911,7 +2911,22 @@ class SAPMAPApi:
             # Pass advanced params via module-level config
             sapmap_scanner.ALIVE_TIMEOUT = alive_timeout
 
-            targets = sapmap_scanner.parse_targets(targets_str)
+            # Issue #85 — drop locked / whitelisted hosts BEFORE scanning (the
+            # only layer that stops first-contact against a host with no node
+            # yet).  Surface what was excluded so the skip is never silent.
+            targets, _skipped = sapmap_scanner.filter_scan_targets(
+                targets_str, self.state)
+            if _skipped:
+                _shosts = sorted({str(h) for h, _ in _skipped})
+                _preview = ", ".join(_shosts[:8])
+                _more = "" if len(_shosts) <= 8 else f" (+{len(_shosts)-8} more)"
+                print(f"[#] Lock/whitelist: excluded {len(_skipped)} scan "
+                      f"target(s) from this scan — {_preview}{_more}")
+                _add_console_line(
+                    datetime.now().strftime("%H:%M:%S"),
+                    "&#128274; Excluded " + str(len(_skipped)) + " locked / "
+                    "whitelisted target(s) from scanning (see log).",
+                    "cl-warn")
             if not targets:
                 print("[-] No valid targets found")
                 self.scan_state = "error"
@@ -4368,7 +4383,74 @@ def create_app(api: SAPMAPApi) -> Bottle:
         return {
             "locked_hosts": [dict(r) for r in (api.state.locked_hosts or [])],
             "unlock_log": [dict(r) for r in (api.state.unlock_log or [])],
+            "lock_whitelist": list(api.state.lock_whitelist or []),
         }
+
+    # -- Issue #85: auto-lock whitelist edit API --------------------------
+    # Hostname / domain / CIDR patterns; a discovered host matching one is
+    # auto-locked on discovery (SAPMAPState._auto_lock) and dropped before
+    # scanning (sapmap_scanner.filter_scan_targets).  NOT <sid> routes (the
+    # lock gate ignores them) and NOT in WRITE_ROUTES — editing a safety
+    # control stays reachable in read-only mode, same as lock/unlock.
+    @app.route("/api/lock_whitelist", method="GET")
+    def api_lock_whitelist_get():
+        return {"lock_whitelist": list(api.state.lock_whitelist or [])}
+
+    @app.route("/api/lock_whitelist", method="POST")
+    def api_lock_whitelist_add():
+        body = request.json or {}
+        pattern = (body.get("pattern") or "").strip()
+        if not pattern:
+            response.status = 400
+            return {"error": "pattern_required"}
+        existing = {p.strip().lower()
+                    for p in (api.state.lock_whitelist or [])}
+        added = pattern.lower() not in existing
+        if added:
+            api.state.lock_whitelist.append(pattern)
+        # Retroactively auto-lock already-discovered nodes the new pattern
+        # covers, so adding a pattern takes effect immediately (not only on
+        # the next discovery).  Locking needs no reason (only unlock does).
+        locked_hosts = set()
+        if added:
+            for n in list(api.state.nodes.values()):
+                for rec in (_lock.apply_auto_lock(api.state, n) or []):
+                    if rec:
+                        locked_hosts.add(rec.get("host", ""))
+            if locked_hosts:
+                def _esc(s):
+                    return (str(s).replace("&", "&amp;")
+                                  .replace("<", "&lt;").replace(">", "&gt;"))
+                _hlist = ", ".join(sorted(h for h in locked_hosts if h))[:120]
+                _add_console_line(
+                    datetime.now().strftime("%H:%M:%S"),
+                    "&#128274; Whitelist '" + _esc(pattern) + "' added — "
+                    "auto-locked " + str(len(locked_hosts))
+                    + " already-discovered host(s): " + _esc(_hlist),
+                    "cl-warn")
+        return {"ok": True, "added": added,
+                "lock_whitelist": list(api.state.lock_whitelist or []),
+                "auto_locked_hosts": sorted(h for h in locked_hosts if h)}
+
+    @app.route("/api/lock_whitelist", method="DELETE")
+    def api_lock_whitelist_remove():
+        body = request.json or {}
+        pattern = (body.get("pattern") or "").strip()
+        if not pattern:
+            response.status = 400
+            return {"error": "pattern_required"}
+        pl = pattern.lower()
+        before = list(api.state.lock_whitelist or [])
+        api.state.lock_whitelist = [p for p in before
+                                    if p.strip().lower() != pl]
+        removed = len(before) - len(api.state.lock_whitelist)
+        # Removing a pattern stops FUTURE auto-(re)locking only — it does NOT
+        # unlock hosts already locked by it (unlocking requires a recorded
+        # reason, the #85 invariant).  This is exactly how an operator makes a
+        # manual unlock permanent: unlock (with a reason), then drop the
+        # pattern so the next discovery won't re-lock it.
+        return {"ok": True, "removed": removed,
+                "lock_whitelist": list(api.state.lock_whitelist or [])}
 
     # -- Serve the SPA --
     @app.route("/")
@@ -7397,6 +7479,10 @@ def create_app(api: SAPMAPApi) -> Bottle:
             if promoted.sid == sid:
                 promoted.discovered_via_btp = False
                 api.state.nodes[sid] = promoted
+                # Issue #85 — in-place promote REPLACES the node (bypasses
+                # add_node) and may fill in a newly-resolved hostname; re-check
+                # the whitelist against the promoted identity.
+                api.state._auto_lock(promoted)
                 print(f"[+] Standard scan promoted {sid} in place "
                       f"({promoted.system_type or 'unknown'})")
                 return
@@ -8742,11 +8828,17 @@ def create_app(api: SAPMAPApi) -> Bottle:
             # This node IS the SAProuter
             saprouter_prefix = f"/H/{router_ip}/S/{router_port}"
 
-        # Collect targets
+        # Collect targets.  Issue #85 — the internal (router-tunnelled) scan is
+        # a first-contact path just like the direct scan, so it MUST apply the
+        # same lock/whitelist pre-scan filter (the HTTP gate only checks the
+        # ROUTER node's own lock state, not the scan TARGETS behind it).
+        _rs_skipped = []
         target_ips = []
         targets_str = (data.get("targets") or "").strip()
         if targets_str:
-            target_ips = sapmap_scanner.parse_targets(targets_str)
+            target_ips, _rs_sk = sapmap_scanner.filter_scan_targets(
+                targets_str, api.state)
+            _rs_skipped.extend(_rs_sk)
 
         auto_targets = data.get("auto_targets", not bool(targets_str))
         if auto_targets and node.saprouter_info:
@@ -8756,12 +8848,31 @@ def create_app(api: SAPMAPApi) -> Bottle:
                 print(f"[*] {sid}: Auto-extracted {len(router_targets)} target(s) "
                       f"from router info: {router_targets[:5]}"
                       f"{'...' if len(router_targets) > 5 else ''}")
-                # Merge, deduplicate, preserve order
+                # Merge, deduplicate, preserve order — but drop any auto target
+                # that is locked or whitelisted (these come straight from the
+                # router's own config and would otherwise be probed unfiltered).
                 existing = set(target_ips)
                 for t in router_targets:
+                    if _lock.is_host_locked(api.state, t):
+                        _rs_skipped.append((t, "locked"))
+                        continue
+                    if _lock.whitelist_match(api.state, t):
+                        _rs_skipped.append((t, "whitelist"))
+                        continue
                     if t not in existing:
                         target_ips.append(t)
                         existing.add(t)
+
+        if _rs_skipped:
+            _rs_hosts = sorted({str(h) for h, _ in _rs_skipped})
+            _rs_prev = ", ".join(_rs_hosts[:8])
+            _rs_more = "" if len(_rs_hosts) <= 8 else f" (+{len(_rs_hosts)-8} more)"
+            print(f"[#] {sid}: Lock/whitelist excluded {len(_rs_skipped)} "
+                  f"router-scan target(s) — {_rs_prev}{_rs_more}")
+            _add_console_line(
+                datetime.now().strftime("%H:%M:%S"),
+                "&#128274; Excluded " + str(len(_rs_skipped)) + " locked / "
+                "whitelisted router-scan target(s) (see log).", "cl-warn")
 
         if not target_ips:
             return json.dumps({"error": "No targets specified and no router info available. "

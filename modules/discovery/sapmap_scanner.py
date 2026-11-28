@@ -236,6 +236,104 @@ def parse_targets(target_str: str) -> list:
 
 
 # ---------------------------------------------------------------------------
+# Issue #85 — pre-scan lock/whitelist filter
+# ---------------------------------------------------------------------------
+# A locked host (or a host matching the auto-lock whitelist) must be excluded
+# from scanning BEFORE any packet leaves — this is the only layer that can
+# stop first-contact / a CIDR re-scan of a host for which no node exists yet
+# (the node-creation funnel's apply_auto_lock only fires once a node is made).
+# Two stages are needed because parse_targets resolves a hostname to an IP and
+# DISCARDS the hostname, so a hostname/domain whitelist entry would never get
+# a chance to match post-resolution.
+
+def _iter_target_atoms(target_str: str):
+    """Yield raw target atoms (``@file`` and comma expanded) WITHOUT resolving
+    hostnames or expanding CIDR/ranges, so a per-atom whitelist check sees the
+    original hostname/domain the operator typed."""
+    s = (target_str or "").strip()
+    if not s:
+        return
+    if s.startswith("@") or os.path.isfile(s):
+        fp = s.lstrip("@")
+        try:
+            with open(fp, "r") as f:
+                for line in f:
+                    line = line.strip()
+                    if line and not line.startswith("#"):
+                        yield from _iter_target_atoms(line)
+        except Exception:
+            pass
+        return
+    if "," in s:
+        for part in s.split(","):
+            yield from _iter_target_atoms(part.strip())
+        return
+    yield s
+
+
+def _atom_is_literal_host(atom: str) -> bool:
+    """True if ``atom`` is a single hostname/domain — not an IP, CIDR, or IP
+    range — i.e. the shape a hostname/domain whitelist entry can match before
+    DNS resolution throws the hostname away."""
+    a = (atom or "").strip()
+    if not a or "/" in a:
+        return False
+    if "-" in a and not a.startswith("-"):
+        left = a.split("-")[0].strip()
+        try:
+            ipaddress.ip_address(left)
+            return False          # IP range like 10.0.0.1-254
+        except ValueError:
+            pass                  # hostnames contain hyphens too — fall through
+    try:
+        ipaddress.ip_address(a)
+        return False              # bare IP
+    except ValueError:
+        return True               # hostname / domain
+
+
+def filter_scan_targets(target_str: str, state):
+    """Expand ``target_str`` to scannable IPs, EXCLUDING any target covered by
+    a lock record or the auto-lock whitelist (issue #85).
+
+    Returns ``(allowed_ips, skipped)`` where ``skipped`` is a list of
+    ``(target_or_ip, reason)`` with reason ``'locked'`` or ``'whitelist'``.
+    With ``state`` None (or the policy module unavailable) it behaves exactly
+    like iterating ``parse_targets`` — no filtering, full back-compat."""
+    try:
+        import sapmap_lock as _lock
+    except Exception:
+        _lock = None
+    enabled = _lock is not None and state is not None
+    # A bare IP can only be excluded by an IP/CIDR rule; when none exist (the
+    # common case — the shipped whitelist seed is all hostnames), skip the
+    # per-IP check so a large-CIDR sweep isn't paying to parse every host
+    # against patterns that can't match it.
+    ip_stage = enabled and _lock.has_ip_scoped_rules(state)
+    allowed, skipped = [], []
+    for atom in _iter_target_atoms(target_str):
+        # Stage 1 — literal hostname/domain, before resolution.
+        if enabled and _atom_is_literal_host(atom):
+            if _lock.is_host_locked(state, atom):
+                skipped.append((atom, "locked"))
+                continue
+            if _lock.whitelist_match(state, atom):
+                skipped.append((atom, "whitelist"))
+                continue
+        # Stage 2 — resolved / expanded IPs.
+        for ip in parse_targets(atom):
+            if ip_stage:
+                if _lock.is_host_locked(state, ip):
+                    skipped.append((ip, "locked"))
+                    continue
+                if _lock.whitelist_match(state, ip):
+                    skipped.append((ip, "whitelist"))
+                    continue
+            allowed.append(ip)
+    return allowed, skipped
+
+
+# ---------------------------------------------------------------------------
 # Host alive detection
 # ---------------------------------------------------------------------------
 

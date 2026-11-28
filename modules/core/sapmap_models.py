@@ -2851,6 +2851,24 @@ class SNCCredential:
 # SAPMAPState — full session state (serializable)
 # ---------------------------------------------------------------------------
 
+# Issue #85 — default auto-lock whitelist (editable).  Any discovered host
+# matching one of these patterns is auto-locked on discovery (excluded from
+# all further automated contact) while staying visible.  Seeded with the
+# reporter's examples: SAP's own download / support infrastructure and the
+# AWS service endpoints that shipped SAP landscapes resolve Type-G CSI
+# placeholders to — none of which are legitimate pentest targets.  Patterns
+# are dot-anchored hostnames/domains (see sapmap_lock.host_matches); operators
+# edit the live list via /api/lock_whitelist (a removed entry makes an unlock
+# permanent, since auto-lock re-locks a still-whitelisted host on rediscovery).
+DEFAULT_LOCK_WHITELIST = [
+    "notesdownloads.sap.com",
+    "documents.support.sap.com",
+    "apps.support.sap.com",
+    "s3.amazonaws.com",
+    "ec2.amazonaws.com",
+]
+
+
 @dataclass
 class SAPMAPState:
     """Complete SAPMAP session state — nodes, connections, tracking, config."""
@@ -2940,6 +2958,14 @@ class SAPMAPState:
     # inheriting shared state can see a protection was deliberately lifted
     # and by whom.  Each entry: {host, reason, at, by}.
     unlock_log: list = field(default_factory=list)
+    # Issue #85 — auto-lock whitelist: hostname / domain / CIDR patterns; a
+    # discovered host matching one is auto-locked (excluded from contact) on
+    # discovery.  Seeded with DEFAULT_LOCK_WHITELIST; editable at runtime.  A
+    # fresh state starts seeded; a loaded .sapmap honours its stored list
+    # (even an empty one — so an operator who cleared it keeps it cleared),
+    # while a legacy file WITHOUT the key is seeded on load (new protection).
+    lock_whitelist: list = field(
+        default_factory=lambda: list(DEFAULT_LOCK_WHITELIST))
     timestamp: str = ""
     version: str = "1.0"
 
@@ -3051,6 +3077,23 @@ class SAPMAPState:
         anchor = n_ip or n_host
         return f"{node.sid}@{anchor}"
 
+    def _auto_lock(self, node) -> None:
+        """Issue #85 — auto-lock-on-discovery funnel hook.  If any of
+        ``node``'s canonical hosts matches ``lock_whitelist``, lock those
+        hosts (host-scoped, idempotent).  Called from every node-creation
+        site — ``add_node`` and the direct-write sites that bypass it
+        (``rename_node_sid``, ``materialise_type_g_target``, the gui/autopwn
+        placeholder-promotion writes) — so auto-lock also RE-locks a
+        whitelisted host that was manually unlocked, on its next discovery
+        (remove the whitelist entry to make an unlock permanent).  Lazily
+        imports the policy module and never raises: a lock failure must not
+        break node admission (defensive, like the other funnel hooks)."""
+        try:
+            import sapmap_lock as _lock
+            _lock.apply_auto_lock(self, node)
+        except Exception:
+            pass
+
     def add_node(self, node: SAPNode) -> None:
         # Resolve storage key: usually node.sid, but split same-SID
         # collisions on different physical hosts (SAP Diagnostics
@@ -3096,6 +3139,10 @@ class SAPMAPState:
             node.recompute_instance_roles()
         except Exception:
             pass
+        # Issue #85 — auto-lock-on-discovery / auto-relock.  Runs on EVERY
+        # add_node (new or re-discovered), so a whitelisted host the operator
+        # manually unlocked re-locks on its next discovery pass.
+        self._auto_lock(node)
         if is_new:
             # Suppress the "New system plotted" finding for the two
             # SAP-shipped ec2/s3 CSI Type-G placeholders that the
@@ -3210,6 +3257,9 @@ class SAPMAPState:
         node = self.nodes.pop(old_sid)
         node.sid = new_sid
         self.nodes[new_sid] = node
+        # Issue #85 — a rename is usually a placeholder→real promotion that
+        # fills in the hostname; re-check the whitelist (idempotent).
+        self._auto_lock(node)
 
         for c in self.connections:
             if c.source_sid == old_sid:
@@ -3760,6 +3810,11 @@ class SAPMAPState:
         else:
             placeholder.discovered_via_rfc_g = True
         self.nodes[sid] = placeholder
+        # Issue #85 — Type-G / BTP destination targets are exactly where the
+        # whitelist's cloud examples (s3/ec2.amazonaws.com) materialise as
+        # placeholder nodes; this direct write bypasses add_node, so auto-lock
+        # here or they would never be gated.
+        self._auto_lock(placeholder)
         conn.target_sid = sid
         conn.target_host = "" if is_ip else host
         conn.target_ip = host if is_ip else ""
@@ -4315,6 +4370,7 @@ class SAPMAPState:
             # Issue #85 — host-scoped lock guardrail state.
             "locked_hosts": [dict(r) for r in (self.locked_hosts or [])],
             "unlock_log": [dict(r) for r in (self.unlock_log or [])],
+            "lock_whitelist": [str(p) for p in (self.lock_whitelist or [])],
         }
 
     @classmethod
@@ -4371,6 +4427,14 @@ class SAPMAPState:
                               if isinstance(r, dict)]
         state.unlock_log = [dict(r) for r in (d.get("unlock_log") or [])
                             if isinstance(r, dict)]
+        # Auto-lock whitelist (issue #85): a stored list is honoured verbatim
+        # (an empty [] means the operator cleared it — keep it cleared); a
+        # legacy file that predates the feature (key ABSENT) keeps the fresh
+        # seed the dataclass default already put on `state`.
+        if "lock_whitelist" in d:
+            state.lock_whitelist = [str(p).strip()
+                                    for p in (d.get("lock_whitelist") or [])
+                                    if str(p).strip()]
         # One-shot dedup pass: fold FQDN-keyed placeholder BTP nodes
         # (from earlier materialise_type_g_target runs) into any
         # real-UUID node that shares the same subdomain.  Handles
