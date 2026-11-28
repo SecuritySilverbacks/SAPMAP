@@ -93,6 +93,11 @@ Supported actions:
     tier3_arm_death_star, tier3_disarm_death_star,
     # Kernel-proxied cert-auth exploitation (X.509 Type G destinations)
     cert_dest_probe,
+    # Issue #85 — host-scoped lock guardrail (scoping)
+    lock_host, unlock_host,
+    lock_scc, unlock_scc,
+    lock_btp_subaccount, unlock_btp_subaccount,
+    lock_whitelist_add, lock_whitelist_remove,
     # Macros (expanded at load time into multiple sub-steps)
     java_pipeline
 """
@@ -1273,6 +1278,95 @@ def _map_step(step: dict) -> tuple:
             "client_id": step.get("client_id", ""),
             "client_secret": _read_token(
                 step.get("client_secret", "")),
+        }, True)
+
+    # -----------------------------------------------------------------
+    # Issue #85 — lock guardrail verbs (scoping)
+    # -----------------------------------------------------------------
+    # The lock guardrail quarantines a host from any further automated
+    # contact (scan / probe / RFC / exploit / propagation) while
+    # keeping it visible in the map / diff / report.  These verbs make
+    # locking scriptable so a playbook can carve out out-of-scope
+    # hosts up front, or re-arm a lock after a time-boxed unlock
+    # finishes.
+    #
+    # The matching HTTP endpoints are passive (safe on a locked host)
+    # so an operator can always lock or unlock from a script.
+    if action == "lock_host":
+        # Lock a SAP node host.  All co-located SIDs on the same host
+        # are covered automatically (host-scoped, not per-SID).
+        #   target: SID of the SAP node to lock
+        #   reason: free-text reason (recommended for team
+        #           traceability — ends up in the lock record)
+        return ("POST", f"/api/node/{target}/lock", {
+            "reason": step.get("reason", ""),
+            "by":     step.get("by", ""),
+        }, True)
+
+    if action == "unlock_host":
+        # Unlock a SAP node host.  A non-empty reason is REQUIRED
+        # (the backend rejects a blank reason with HTTP 400) — it
+        # ends up in the audit log alongside who recorded it.
+        #   target: SID of the SAP node to unlock
+        #   reason: free-text (why the quarantine was lifted)
+        return ("POST", f"/api/node/{target}/unlock", {
+            "reason": step.get("reason", ""),
+            "by":     step.get("by", ""),
+        }, True)
+
+    if action == "lock_scc":
+        # Lock a SAP Cloud Connector host.  Any co-located SAP node on
+        # the same box is covered too (same host-scoped policy).
+        #   target: SCC host (IP or hostname — what the map shows)
+        #   reason: free-text reason
+        return ("POST", f"/api/scc/{target}/lock", {
+            "reason": step.get("reason", ""),
+            "by":     step.get("by", ""),
+        }, True)
+
+    if action == "unlock_scc":
+        # Unlock a SAP Cloud Connector host.  Non-empty reason required.
+        return ("POST", f"/api/scc/{target}/unlock", {
+            "reason": step.get("reason", ""),
+            "by":     step.get("by", ""),
+        }, True)
+
+    if action == "lock_btp_subaccount":
+        # Lock a BTP subaccount (UUID-keyed, since a subaccount has no
+        # host).  The destination-pull endpoints refuse to run against
+        # a locked UUID; discovery (/api/btp/enumerate) stays open so
+        # the map can still list what's out there.
+        #   target: subaccount UUID (what the map shows)
+        #   reason: free-text reason
+        return ("POST", f"/api/btp/subaccount/{target}/lock", {
+            "reason": step.get("reason", ""),
+            "by":     step.get("by", ""),
+        }, True)
+
+    if action == "unlock_btp_subaccount":
+        # Unlock a BTP subaccount.  Non-empty reason required.
+        return ("POST", f"/api/btp/subaccount/{target}/unlock", {
+            "reason": step.get("reason", ""),
+            "by":     step.get("by", ""),
+        }, True)
+
+    if action == "lock_whitelist_add":
+        # Add a rule to the auto-lock whitelist.  Pattern is an IP /
+        # CIDR / hostname / domain suffix; the pre-scan filter refuses
+        # to open a socket against a matching host, and the node-
+        # creation funnel auto-locks it.
+        #   pattern: e.g. "192.168.9.0/24", "ec2.amazonaws.com"
+        return ("POST", "/api/lock_whitelist", {
+            "pattern": (step.get("pattern") or "").strip(),
+        }, True)
+
+    if action == "lock_whitelist_remove":
+        # Remove a whitelist rule by its ``pattern`` string.  Hosts
+        # already locked by it stay locked (unlocking requires a
+        # recorded reason — the #85 invariant); this just stops future
+        # auto-(re)locking.
+        return ("DELETE", "/api/lock_whitelist", {
+            "pattern": (step.get("pattern") or "").strip(),
         }, True)
 
     raise ValueError(f"Unknown action: {action}")

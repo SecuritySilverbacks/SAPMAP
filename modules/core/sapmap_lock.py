@@ -523,3 +523,71 @@ def route_is_reviewed(rule: str, method: str) -> bool:
     if (method or "").upper() != "GET":
         return True
     return rule in PASSIVE_GET_ROUTES or rule in ACTIVE_GET_ROUTES
+
+
+# ---------------------------------------------------------------------------
+# SCC host-scoped + BTP subaccount-scoped route classification (PR5)
+# ---------------------------------------------------------------------------
+# SCC routes are keyed on the connector host (``<host>``), BTP on the
+# subaccount UUID (``<uuid>``).  These routes don't flow through the central
+# <sid> before_request gate — each handler calls into this module directly
+# (``_scc_locked_response`` for SCC, ``is_btp_subaccount_locked`` for BTP).
+# Classifying them here keeps the single-source-of-truth property of PR1 and
+# lets ``tests/test_lock_pr5_surfacing_85.py`` enforce the same completeness
+# invariant on the cloud/relay surface: a NEW contact route that forgets its
+# guard turns the suite red instead of silently leaking contact.
+
+# SCC host routes that CONTACT the Cloud Connector (admin API / backup pull /
+# unauth hash dump) — must be guarded with ``_scc_locked_response`` in-handler.
+SCC_ACTIVE_HOST_ROUTES = frozenset({
+    "/api/scc/<host>/probe_creds",
+    "/api/scc/<host>/pull_mappings",
+    "/api/scc/<host>/probe_mappings",
+    "/api/scc/<host>/extract_keystore",
+    "/api/scc/<host>/download_user_hashes",
+})
+
+# SCC host routes that do NOT contact the connector:
+#   * lock/unlock are management (like <sid>/lock);
+#   * set_credentials is a local store write (no network);
+#   * analyse_pp / decrypt_ssfs read loot files;
+#   * lookup_hashes_online reaches hashes.com, not the connector;
+#   * DELETE just removes the row from the local map.
+SCC_PASSIVE_HOST_ROUTES = frozenset({
+    "/api/scc/<host>/lock",
+    "/api/scc/<host>/unlock",
+    "/api/scc/<host>/set_credentials",
+    "/api/scc/<host>/analyse_pp",
+    "/api/scc/<host>/decrypt_ssfs",
+    "/api/scc/<host>/lookup_hashes_online",
+    "/api/scc/<host>",                 # DELETE — local map removal
+})
+
+# BTP subaccount routes that CONTACT the cloud region API — must be guarded
+# with ``is_btp_subaccount_locked`` in-handler.
+BTP_ACTIVE_UUID_ROUTES = frozenset({
+    "/api/btp/pull_destinations/<uuid>",
+})
+
+# BTP subaccount routes that do NOT contact the cloud region API:
+#   * lock/unlock are management;
+#   * DELETE just removes the row from the local map.
+BTP_PASSIVE_UUID_ROUTES = frozenset({
+    "/api/btp/subaccount/<uuid>/lock",
+    "/api/btp/subaccount/<uuid>/unlock",
+    "/api/btp/subaccount/<uuid>",      # DELETE — local map removal
+})
+
+
+def scc_host_route_is_reviewed(rule: str) -> bool:
+    """True if an ``/api/scc/<host>/...`` route is explicitly classified
+    (active-contact vs passive-local).  Un-classified routes fail the PR5
+    completeness test so a new SCC route can never silently skip the lock
+    guard."""
+    return rule in SCC_ACTIVE_HOST_ROUTES or rule in SCC_PASSIVE_HOST_ROUTES
+
+
+def btp_uuid_route_is_reviewed(rule: str) -> bool:
+    """True if an ``/api/btp/.../<uuid>...`` route is explicitly classified.
+    Same rationale as ``scc_host_route_is_reviewed``."""
+    return rule in BTP_ACTIVE_UUID_ROUTES or rule in BTP_PASSIVE_UUID_ROUTES

@@ -1612,6 +1612,171 @@ def run_sapmap_action(action: str, target: str = "",
     return json.dumps(resp)
 
 
+# ===== TOOLS: Lock guardrail (issue #85) =====
+
+@mcp.tool()
+def list_locked() -> str:
+    """List everything currently quarantined by the lock guardrail (#85).
+
+    Returns a summary of:
+      * locked_hosts — SAP + Host Agent + SCC co-located boxes (host-keyed)
+      * locked_btp_subaccounts — BTP subaccounts (UUID-keyed, no host)
+      * lock_whitelist — auto-lock rules (pattern, note, auto_lock flag)
+      * unlock_log — audit trail of every lift (reason, by, at)
+
+    Each entry is safe to inspect — none of these calls contact the
+    locked target.  The guardrail is explained in the SAPMAP wiki
+    ("Lock guardrail") and in the engagement report's host-lock section.
+    """
+    state = _api("GET", "/api/state")
+    return json.dumps({
+        "locked_hosts":
+            state.get("locked_hosts", []) or [],
+        "locked_btp_subaccounts":
+            state.get("locked_btp_subaccounts", []) or [],
+        "lock_whitelist":
+            state.get("lock_whitelist", []) or [],
+        "unlock_log":
+            state.get("unlock_log", []) or [],
+    }, indent=2)
+
+
+@mcp.tool()
+def lock_host(sid: str, reason: str = "", by: str = "") -> str:
+    """Quarantine a SAP node's host from any further automated contact.
+
+    Host-scoped: every co-located SID on the same box is covered.  The
+    host stays fully visible in the map, diff and report — only active
+    operations (scan / probe / RFC / vuln check / exploitation /
+    propagation) are blocked.
+
+    Args:
+        sid:    Target node SID (its host is what gets locked)
+        reason: Free-text reason (recorded for team traceability)
+        by:     Operator name (optional; audit log)
+    """
+    return json.dumps(_api("POST", f"/api/node/{sid}/lock", {
+        "reason": reason, "by": by,
+    }))
+
+
+@mcp.tool()
+def unlock_host(sid: str, reason: str, by: str = "") -> str:
+    """Lift the host-scoped lock for this SAP node.
+
+    A non-empty reason is REQUIRED (the backend returns HTTP 400 on a
+    blank reason) — it ends up in the unlock audit log.  Re-arming
+    happens automatically on the next discovery wave if the host
+    still matches a whitelist rule.
+
+    Args:
+        sid:    Target node SID
+        reason: Why the quarantine is being lifted (required)
+        by:     Operator name (optional; audit log)
+    """
+    return json.dumps(_api("POST", f"/api/node/{sid}/unlock", {
+        "reason": reason, "by": by,
+    }))
+
+
+@mcp.tool()
+def lock_scc_host(host: str, reason: str = "", by: str = "") -> str:
+    """Quarantine a SAP Cloud Connector host.
+
+    Co-located SAP nodes on the same box are covered too (one host,
+    one lock).  Only probe / pull / extract / hash-download routes
+    are blocked — loot-only actions (analyse_pp, decrypt_ssfs, online
+    hash lookup) stay available.
+
+    Args:
+        host:   SCC host (IP or hostname — what the map shows)
+        reason: Free-text reason (recorded)
+        by:     Operator name (optional)
+    """
+    import urllib.parse
+    return json.dumps(_api(
+        "POST", f"/api/scc/{urllib.parse.quote(host, safe='')}/lock",
+        {"reason": reason, "by": by}))
+
+
+@mcp.tool()
+def unlock_scc_host(host: str, reason: str, by: str = "") -> str:
+    """Lift the lock on a SAP Cloud Connector host.  Non-empty reason
+    required."""
+    import urllib.parse
+    return json.dumps(_api(
+        "POST", f"/api/scc/{urllib.parse.quote(host, safe='')}/unlock",
+        {"reason": reason, "by": by}))
+
+
+@mcp.tool()
+def lock_btp_subaccount(uuid: str, reason: str = "", by: str = "") -> str:
+    """Quarantine a BTP subaccount (UUID-keyed, since a subaccount has no
+    host).
+
+    Blocks the destination-pull endpoints against this subaccount.
+    Region-wide discovery (/api/btp/enumerate) stays open — the lock
+    is per-subaccount, not per-region.
+
+    Args:
+        uuid:   Subaccount UUID (what the map shows)
+        reason: Free-text reason (recorded)
+        by:     Operator name (optional)
+    """
+    import urllib.parse
+    return json.dumps(_api(
+        "POST",
+        f"/api/btp/subaccount/{urllib.parse.quote(uuid, safe='')}/lock",
+        {"reason": reason, "by": by}))
+
+
+@mcp.tool()
+def unlock_btp_subaccount(uuid: str, reason: str, by: str = "") -> str:
+    """Lift the lock on a BTP subaccount.  Non-empty reason required."""
+    import urllib.parse
+    return json.dumps(_api(
+        "POST",
+        f"/api/btp/subaccount/{urllib.parse.quote(uuid, safe='')}/unlock",
+        {"reason": reason, "by": by}))
+
+
+@mcp.tool()
+def lock_whitelist(action: str = "list", pattern: str = "") -> str:
+    """Manage the auto-lock whitelist (pre-scan filter + auto-lock on
+    discovery).
+
+    Pattern is IP / CIDR / hostname / domain suffix.  When a newly-
+    discovered host matches, the pre-scan filter refuses to open a
+    socket against it and the node-creation funnel auto-locks it.
+    Whitelist rules survive restarts (they are persisted on
+    ``SAPMAPState``).
+
+    Args:
+        action:  'list' (default) | 'add' | 'remove'
+        pattern: e.g. "192.168.9.0/24", "ec2.amazonaws.com".  Required
+                 for add / remove.
+    """
+    a = (action or "list").strip().lower()
+    if a == "list":
+        return json.dumps(_api("GET", "/api/lock_whitelist"))
+    if a == "add":
+        if not (pattern or "").strip():
+            return json.dumps({
+                "error": "lock_whitelist add: 'pattern' is required"})
+        return json.dumps(_api("POST", "/api/lock_whitelist", {
+            "pattern": pattern,
+        }))
+    if a == "remove":
+        if not (pattern or "").strip():
+            return json.dumps({
+                "error": "lock_whitelist remove: 'pattern' is required"})
+        return json.dumps(_api(
+            "DELETE", "/api/lock_whitelist", {"pattern": pattern}))
+    return json.dumps({
+        "error": f"lock_whitelist: unknown action {action!r} "
+                 f"(expected 'list' | 'add' | 'remove')"})
+
+
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------

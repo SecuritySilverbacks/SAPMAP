@@ -1529,6 +1529,151 @@ def _cert_auth_destinations_section(state: SAPMAPState) -> list:
     return out
 
 
+def _lock_section(state: SAPMAPState) -> list:
+    """Issue #85 host-lock guardrail — a scoping / methodology section.
+
+    Lists every host, SCC, Host Agent and BTP subaccount that was
+    quarantined for this engagement: the reason, when it was locked,
+    by whom, and whether the lock was recorded by the operator or
+    produced by an auto-lock whitelist rule.  Appends the unlock
+    audit log so a reviewer can see every time a lock was lifted and
+    why.  Returns ``[]`` when nothing was locked — the section is
+    omitted rather than printing an empty block.
+
+    The lock state stays visible in the map, diff and per-system
+    table; this section explains **why** the live tool-contact numbers
+    for those entries read zero.
+    """
+    locked_hosts = list(getattr(state, "locked_hosts", []) or [])
+    locked_btp = list(getattr(state, "locked_btp_subaccounts", []) or [])
+    whitelist = list(getattr(state, "lock_whitelist", []) or [])
+    unlock_log = list(getattr(state, "unlock_log", []) or [])
+    # Render ONLY when an actual scoping decision was made — a locked host /
+    # BTP, or a recorded unlock.  The whitelist alone (which has a default
+    # seed for cloud-provider noise) is not a scoping ACTION for this
+    # engagement, so an empty state with just the seeded whitelist omits the
+    # section rather than printing a near-empty block.
+    if not (locked_hosts or locked_btp or unlock_log):
+        return []
+
+    out = ["## Scoping & the host-lock guardrail", ""]
+    out.append(
+        "SAPMAP's lock guardrail (issue #85) marks a host (or a BTP "
+        "subaccount) as *out of scope* for this engagement.  A locked "
+        "entity stays fully visible on the map — its topology, prior "
+        "cached findings and trust-graph position all show normally — "
+        "but every active operation (scan, probe, RFC, vuln check, "
+        "exploitation, propagation) refuses to touch it with a `423 "
+        "Locked` response.  **Zero contact numbers on a locked entity "
+        "reflect this scoping choice, not the host's actual risk "
+        "posture.**  Lifting a lock requires a recorded reason — the "
+        "audit log at the bottom of this section captures every unlock "
+        "the engagement team recorded.")
+    out.append("")
+
+    # Per sapmap_lock.lock_host (locked_hosts) and lock_btp_subaccount
+    # (locked_btp_subaccounts), records carry ``locked_by`` + ``locked_at``
+    # (NOT ``by``/``at``) and an ``auto`` bool (NOT ``source``); auto-lock
+    # entries also carry the matched ``whitelist_pattern``.  unlock_log is
+    # the only store that uses ``by``/``at`` — intentional, since those
+    # records are built by ``unlock_host`` with the shorter spelling.
+
+    def _row(r: dict) -> str:
+        host = (r.get("host") or "").strip() or "—"
+        reason = (r.get("reason") or "").strip()
+        patt = (r.get("whitelist_pattern") or "").strip()
+        is_auto = bool(r.get("auto"))
+        if is_auto and patt and patt not in reason:
+            reason = (f"{reason} (whitelist: {patt})"
+                      if reason else f"whitelist match: {patt}")
+        by = (r.get("locked_by") or "").strip() or "—"
+        at = (r.get("locked_at") or "").strip() or "—"
+        src_cell = "auto-lock" if is_auto else "manual"
+        return (f"| `{_esc(host)}` | {_esc(src_cell)} | "
+                f"{_esc(reason or '—')} | {_esc(by)} | {_esc(at)} |")
+
+    if locked_hosts:
+        out.append("### Locked hosts")
+        out.append("")
+        out.append(
+            "Every co-located SAP node, Host Agent or Cloud Connector "
+            "sharing one of these hosts is covered by the same record "
+            "(host-scoped, not per-SID).  Auto-lock entries carry the "
+            "matching whitelist pattern inside the reason.")
+        out.append("")
+        out.append("| Host | Source | Reason | By | Locked at |")
+        out.append("| --- | --- | --- | --- | --- |")
+        for r in locked_hosts:
+            if isinstance(r, dict):
+                out.append(_row(r))
+        out.append("")
+
+    if locked_btp:
+        out.append("### Locked BTP subaccounts")
+        out.append("")
+        out.append(
+            "BTP subaccounts have no host, so they lock by UUID.  The "
+            "whitelist does not apply to subaccounts (nothing to match "
+            "on) — these are manual-lock only.  Region-wide discovery "
+            "(`/api/btp/enumerate`) stays open; the quarantine is "
+            "per-subaccount, not per-region.")
+        out.append("")
+        out.append("| Subaccount UUID | Reason | By | Locked at |")
+        out.append("| --- | --- | --- | --- |")
+        for r in locked_btp:
+            if not isinstance(r, dict):
+                continue
+            uuid = (r.get("uuid") or "").strip() or "—"
+            reason = (r.get("reason") or "").strip() or "—"
+            by = (r.get("locked_by") or "").strip() or "—"
+            at = (r.get("locked_at") or "").strip() or "—"
+            out.append(f"| `{_esc(uuid)}` | {_esc(reason)} | "
+                       f"{_esc(by)} | {_esc(at)} |")
+        out.append("")
+
+    if whitelist:
+        out.append("### Auto-lock whitelist rules")
+        out.append("")
+        out.append(
+            "Patterns the operator pre-registered so that any matching "
+            "host discovered during the engagement is auto-locked and "
+            "skipped by the pre-scan filter — the quickest way to carve "
+            "out an entire subnet or cloud-provider range.  Each pattern "
+            "is an IP, CIDR, hostname or domain suffix.")
+        out.append("")
+        out.append("| Pattern |")
+        out.append("| --- |")
+        for patt in whitelist:
+            s = str(patt or "").strip()
+            if s:
+                out.append(f"| `{_esc(s)}` |")
+        out.append("")
+
+    if unlock_log:
+        out.append("### Unlock audit log")
+        out.append("")
+        out.append(
+            "Every lift of a quarantine, in order.  A non-empty reason "
+            "is required by the engine, so this log is a complete "
+            "record of every time the engagement team chose to step out "
+            "of scope.")
+        out.append("")
+        out.append("| Host / UUID | Reason | By | At |")
+        out.append("| --- | --- | --- | --- |")
+        for r in unlock_log:
+            if not isinstance(r, dict):
+                continue
+            host = (r.get("host") or "").strip() or "—"
+            reason = (r.get("reason") or "").strip() or "—"
+            by = (r.get("by") or "").strip() or "—"
+            at = (r.get("at") or "").strip() or "—"
+            out.append(f"| `{_esc(host)}` | {_esc(reason)} | "
+                       f"{_esc(by)} | {_esc(at)} |")
+        out.append("")
+
+    return out
+
+
 def _snc_identity_section(state: SAPMAPState) -> list:
     """Looted-PSE SNC client identities (issue #137 wallet).
 
@@ -3151,6 +3296,14 @@ def build_markdown_report(state: SAPMAPState,
         sections.append("---")
         sections.append("")
         sections.extend(snc_identity_section)
+    # Issue #85 — host-lock guardrail scoping section.  Placed late so it
+    # reads as methodology/scoping context for the numbers above (which
+    # exclude locked entities' live contact) rather than as a finding.
+    lock_section = _lock_section(state)
+    if lock_section:
+        sections.append("---")
+        sections.append("")
+        sections.extend(lock_section)
     for extra in (_impact_section(state),
                   _secstore_section(state),
                   _dbcon_section(state),
@@ -4791,6 +4944,156 @@ def _html_snc_identity_section(state: SAPMAPState) -> str:
         f'<tbody>{"".join(rows)}</tbody></table></section>')
 
 
+def _html_lock_section(state: SAPMAPState) -> str:
+    """Issue #85 host-lock guardrail — HTML sibling of _lock_section.
+
+    Returns ``''`` when nothing is locked so the section is simply
+    omitted from the report.  Mirrors the markdown structure: narrative
+    block, then one table per dimension (hosts, BTP subaccounts,
+    whitelist rules), then the unlock audit log.
+    """
+    locked_hosts = list(getattr(state, "locked_hosts", []) or [])
+    locked_btp = list(getattr(state, "locked_btp_subaccounts", []) or [])
+    whitelist = list(getattr(state, "lock_whitelist", []) or [])
+    unlock_log = list(getattr(state, "unlock_log", []) or [])
+    # Same gating as _lock_section (its markdown sibling): the seeded
+    # whitelist alone does not trigger the section.
+    if not (locked_hosts or locked_btp or unlock_log):
+        return ""
+
+    # Record-key contract for the HTML section (mirrors _lock_section):
+    # locked_hosts / locked_btp_subaccounts records carry ``locked_by`` +
+    # ``locked_at`` (NOT ``by``/``at``) and an ``auto`` bool (NOT ``source``);
+    # auto-lock entries also carry the matched ``whitelist_pattern``.
+    # unlock_log is the only store that uses the short ``by``/``at``
+    # spelling — written by ``unlock_host``.
+
+    parts = [
+        '<section id="sec-lock-guardrail">'
+        '<h2>🔒 Scoping &amp; the host-lock guardrail</h2>'
+        '<p style="font-size:12px;color:#6b7280;margin:0 0 12px">'
+        'SAPMAP\'s lock guardrail (issue #85) marks a host — or a BTP '
+        'subaccount — as <b>out of scope</b> for this engagement.  A '
+        'locked entity stays fully visible on the map; its topology, '
+        'cached findings and trust-graph position all show normally.  '
+        'But every active operation (scan, probe, RFC, vuln check, '
+        'exploitation, propagation) refuses to touch it with a <code>'
+        '423 Locked</code>.  <b>Zero contact numbers on a locked entity '
+        'reflect this scoping choice, not the host\'s actual risk '
+        'posture.</b>  Lifting a lock requires a recorded reason — the '
+        'audit log at the bottom of this section captures every unlock '
+        'the engagement team recorded.</p>'
+    ]
+
+    if locked_hosts:
+        rows = []
+        for r in locked_hosts:
+            if not isinstance(r, dict):
+                continue
+            is_auto = bool(r.get("auto"))
+            reason = (r.get("reason") or "").strip()
+            patt = (r.get("whitelist_pattern") or "").strip()
+            if is_auto and patt and patt not in reason:
+                reason = (f"{reason} (whitelist: {patt})"
+                          if reason else f"whitelist match: {patt}")
+            rows.append(
+                f'<tr>'
+                f'<td class="mono"><b>{_hesc(r.get("host") or "—")}</b></td>'
+                f'<td>{"auto-lock" if is_auto else "manual"}</td>'
+                f'<td>{_hesc(reason or "—")}</td>'
+                f'<td>{_hesc(r.get("locked_by") or "—")}</td>'
+                f'<td style="font-size:11px">'
+                f'{_hesc(r.get("locked_at") or "—")}</td>'
+                f'</tr>')
+        parts.append(
+            '<h3 style="margin:18px 0 6px;font-size:14px">'
+            'Locked hosts</h3>'
+            '<p style="font-size:12px;color:#6b7280;margin:0 0 8px">'
+            'Every co-located SAP node, Host Agent or Cloud Connector on '
+            'one of these hosts is covered (host-scoped, not per-SID).  '
+            'Auto-lock entries carry the matching whitelist pattern '
+            'inside the reason.</p>'
+            '<table class="grid"><thead><tr>'
+            '<th>Host</th><th>Source</th><th>Reason</th><th>By</th>'
+            '<th>Locked at</th></tr></thead>'
+            f'<tbody>{"".join(rows)}</tbody></table>')
+
+    if locked_btp:
+        rows = []
+        for r in locked_btp:
+            if not isinstance(r, dict):
+                continue
+            rows.append(
+                f'<tr>'
+                f'<td class="mono"><b>{_hesc(r.get("uuid") or "—")}</b></td>'
+                f'<td>{_hesc(r.get("reason") or "—")}</td>'
+                f'<td>{_hesc(r.get("locked_by") or "—")}</td>'
+                f'<td style="font-size:11px">'
+                f'{_hesc(r.get("locked_at") or "—")}</td>'
+                f'</tr>')
+        parts.append(
+            '<h3 style="margin:18px 0 6px;font-size:14px">'
+            'Locked BTP subaccounts</h3>'
+            '<p style="font-size:12px;color:#6b7280;margin:0 0 8px">'
+            'BTP subaccounts have no host, so they lock by UUID.  The '
+            'whitelist does not apply to subaccounts (nothing to match '
+            'on) — these are manual-lock only.  Region-wide discovery '
+            'stays open; the quarantine is per-subaccount, not '
+            'per-region.</p>'
+            '<table class="grid"><thead><tr>'
+            '<th>Subaccount UUID</th><th>Reason</th>'
+            '<th>By</th><th>Locked at</th></tr></thead>'
+            f'<tbody>{"".join(rows)}</tbody></table>')
+
+    if whitelist:
+        rows = []
+        for patt in whitelist:
+            s = str(patt or "").strip()
+            if s:
+                rows.append(
+                    f'<tr><td class="mono"><b>{_hesc(s)}</b></td></tr>')
+        parts.append(
+            '<h3 style="margin:18px 0 6px;font-size:14px">'
+            'Auto-lock whitelist rules</h3>'
+            '<p style="font-size:12px;color:#6b7280;margin:0 0 8px">'
+            'Patterns pre-registered so any matching host discovered '
+            'during the engagement is auto-locked and skipped by the '
+            'pre-scan filter.  Each pattern is an IP, CIDR, hostname '
+            'or domain suffix.</p>'
+            '<table class="grid"><thead><tr>'
+            '<th>Pattern</th></tr></thead>'
+            f'<tbody>{"".join(rows)}</tbody></table>')
+
+    if unlock_log:
+        rows = []
+        for r in unlock_log:
+            if not isinstance(r, dict):
+                continue
+            rows.append(
+                f'<tr>'
+                f'<td class="mono"><b>{_hesc(r.get("host") or "—")}</b></td>'
+                f'<td>{_hesc(r.get("reason") or "—")}</td>'
+                f'<td>{_hesc(r.get("by") or "—")}</td>'
+                f'<td style="font-size:11px">'
+                f'{_hesc(r.get("at") or "—")}</td>'
+                f'</tr>')
+        parts.append(
+            '<h3 style="margin:18px 0 6px;font-size:14px">'
+            'Unlock audit log</h3>'
+            '<p style="font-size:12px;color:#6b7280;margin:0 0 8px">'
+            'Every lift of a quarantine, in order.  A non-empty reason '
+            'is required by the engine, so this log is a complete '
+            'record of every time the engagement team chose to step out '
+            'of scope.</p>'
+            '<table class="grid"><thead><tr>'
+            '<th>Host / UUID</th><th>Reason</th><th>By</th>'
+            '<th>At</th></tr></thead>'
+            f'<tbody>{"".join(rows)}</tbody></table>')
+
+    parts.append('</section>')
+    return "".join(parts)
+
+
 def _html_cert_auth_destinations_section(state: SAPMAPState) -> str:
     """Cert-authenticated Type-G / H HTTP destinations."""
     rows_data: list[tuple[str, str, str, str, str, bool]] = []
@@ -5377,6 +5680,8 @@ def build_html_report(state: SAPMAPState,
     cloud_lat_section_html = _html_cloud_lateral_section(state)
     cert_dest_section_html = _html_cert_auth_destinations_section(state)
     snc_identity_section_html = _html_snc_identity_section(state)
+    # Issue #85 — host-lock guardrail scoping section.
+    lock_section_html = _html_lock_section(state)
     attack_coverage_html = _html_attack_coverage_section(state)
     compliance_coverage_html = _html_compliance_coverage_section(state)
     blast_radius_section_html = _html_blast_radius_section(state)
@@ -5422,6 +5727,8 @@ def build_html_report(state: SAPMAPState,
                               bool(cert_dest_section_html)),
         ("sec-snc-identity",  "🔐 SNC client identity (looted PSEs)",
                               bool(snc_identity_section_html)),
+        ("sec-lock-guardrail", "🔒 Scoping & the host-lock guardrail",
+                              bool(lock_section_html)),
         ("sec-medinfo",       "ℹ️ Medium & informational findings",
                               bool(med_info_html)),
         ("sec-impact",        "💰 Business impact",
@@ -5726,6 +6033,8 @@ def build_html_report(state: SAPMAPState,
 
   {cert_dest_section_html}
   {snc_identity_section_html}
+
+  {lock_section_html}
 
   {med_info_html}
 
