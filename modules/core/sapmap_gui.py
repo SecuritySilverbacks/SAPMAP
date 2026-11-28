@@ -966,6 +966,32 @@ def _add_console_line(ts, text, css_class="cl-info"):
         _console_lines.append({"ts": ts, "text": text, "cls": css_class})
 
 
+def _console_lock_blocked(host, action):
+    """Issue #85 — drop a VISIBLE operator-console line when an IN-PROCESS
+    contact is refused because its target host is locked.  The HTTP
+    before_request gate emits its own line for path-keyed <sid> routes; the
+    body-/connection-keyed BTP family and the create-then-probe enrich paths
+    never reach that gate (their target is resolved from the request body or
+    an internal caller bypasses the HTTP layer entirely), so each in-process
+    guard calls this to keep the refusal from being silent.
+
+    The console buffer is rendered into the DOM via innerHTML on a
+    CALLER-escapes contract, so EVERY dynamic token — the action label and
+    above all the target self-reported host — is HTML-escaped here, or a
+    crafted hostname captured during discovery would be stored XSS in the
+    operator's browser.  No '#85' in the operator-facing text (kept only in
+    code comments / stdout logs)."""
+    def _esc(s):
+        return (str(s).replace("&", "&amp;")
+                      .replace("<", "&lt;").replace(">", "&gt;"))
+    _add_console_line(
+        datetime.now().strftime("%H:%M:%S"),
+        "&#128274; Blocked " + _esc(action) + " — host "
+        + _esc(host or "?") + " is LOCKED; unlock it with a recorded "
+        "reason to re-arm live testing.",
+        "cl-warn")
+
+
 # ---- Wire findings → console: every emit_finding() also shows up in the
 # console pane with severity-specific styling, so nothing is ever hidden.
 _SEV_TO_CSS = {
@@ -3535,6 +3561,19 @@ def landscape_post_import_discover(state, sid: str,
     node = state.get_node(sid)
     if not node:
         return {"status": "skip", "reason": "node_not_found"}
+    # Issue #85 — create-then-probe guard: landscape-XML import adds the node
+    # (inventory stays visible), then this per-node sweep runs RFC_SYSTEM_INFO
+    # + DIAG client enumeration — live contact.  If the imported host is
+    # locked (host-scoped), skip the probe.  Module-scope, so it guards the
+    # ``_landscape_post_import_scan_loop`` caller too (single source of truth).
+    import sapmap_lock as _lock
+    if _lock.is_locked(state, node):
+        _rec = _lock.locked_record_for(state, node) or {}
+        _console_lock_blocked(_rec.get("host") or node.ip or node.hostname,
+                              f"Post-import discovery {sid}")
+        print(f"[!] {sid}: host is LOCKED (#85) — post-import discovery "
+              f"(RFC_SYSTEM_INFO + client enum) skipped")
+        return {"status": "skip", "reason": "host_locked"}
     # Instance selection — prefer an instance with a REAL dispatcher
     # (3200-3299) or gateway (3300-3399) port in its ports map,
     # falling back to any instance with a parseable instance_nr.
@@ -7198,6 +7237,17 @@ def create_app(api: SAPMAPApi) -> Bottle:
             return False
         host = node.ip or node.hostname
         if not host:
+            return False
+        # Issue #85 — the standard-scan chokepoint.  A locked host is excluded
+        # from further automated contact, and this function is the ONE funnel
+        # every auto-scan goes through (manual promote, placeholder promote,
+        # and — the body-keyed bypass this guard closes — the auto-scan of a
+        # fresh on-prem placeholder linked by a BTP destination pull, which
+        # fires IN-PROCESS and never crosses the HTTP lock gate).
+        if _lock.is_locked(api.state, node):
+            _console_lock_blocked(host, f"Standard scan {sid}")
+            print(f"[!] {sid}: host {host} is LOCKED (#85) — standard scan "
+                  f"skipped")
             return False
         cfg = api.state.scan_config or {}
         inst_from = int(cfg.get("inst_from", 0))
@@ -19928,6 +19978,18 @@ def create_app(api: SAPMAPApi) -> Bottle:
 
         # Auto-enrich via RFC_SYSTEM_INFO in background
         def _enrich():
+            # Issue #85 — create-then-probe guard.  /api/node/add always ADDS
+            # the node (inventory stays visible), but if its host is already
+            # locked — host-scoped, e.g. another SID on the same host was
+            # locked earlier — the RFC_SYSTEM_INFO probe below is live contact
+            # and must be skipped.  add_node + this probe run inside the one
+            # admitted request, so the path-keyed HTTP gate never sees it.
+            if _lock.is_locked(api.state, node):
+                _console_lock_blocked(node.ip or node.hostname,
+                                      f"Auto-enrich {sid}")
+                print(f"[!] {sid}: host is LOCKED (#85) — added to map but "
+                      f"auto-enrich (RFC_SYSTEM_INFO) skipped")
+                return
             host = node.ip or node.hostname
             gw_port = int(f"33{nr}")
             inst_nrs = [nr]
@@ -22678,6 +22740,43 @@ def create_app(api: SAPMAPApi) -> Bottle:
         pwd = conn.secstore_password or ""
         target = (api.state.get_node(conn.target_sid)
                   if conn.target_sid else None)
+        # Issue #85 — connection-keyed lock guard.  This body runs for BOTH
+        # the /api/btp/test_destination route AND the cert-auth-mint
+        # auto-sweep; neither is a <sid> route the HTTP gate can key on, so
+        # the guard lives here (the one contact chokepoint).  Refuse the probe
+        # when the mapped target node is on a locked host, or — for an
+        # unmapped / HTTP-only destination — when the destination URL host
+        # itself is locked.  Fail-safe: block if EITHER identity is locked.
+        _blocked_host = ""
+        if target is not None and _lock.is_locked(api.state, target):
+            _blocked_host = (_lock.locked_record_for(api.state, target)
+                             or {}).get("host") or (conn.target_sid or "?")
+        elif conn.http_url:
+            from urllib.parse import urlparse as _urlparse
+            # http_url is self-reported destination data (attacker-influenced,
+            # like the hostname _console_lock_blocked escapes).  A malformed
+            # value — e.g. a bad IPv6 literal 'http://[::1' — makes urlparse /
+            # .hostname raise ValueError; left unhandled it would kill this
+            # _bg thread (its wrapper has no except), leave conn.tested False
+            # and hang the modal poller.  Treat an unparseable URL as "no host
+            # to match" and fall through: we can't prove it's locked, and the
+            # downstream HTTP probe fails on the same URL anyway — no contact
+            # to a locked host slips past.
+            try:
+                _uh = (_urlparse(conn.http_url).hostname or "")
+            except ValueError:
+                _uh = ""
+            if _uh and _lock.is_host_locked(api.state, _uh):
+                _blocked_host = _uh
+        if _blocked_host:
+            conn.tested = True
+            conn.check_error = ("target host is LOCKED — unlock it with a "
+                                "recorded reason to re-arm live testing")
+            _console_lock_blocked(_blocked_host,
+                                  f"BTP test {source_sid}→{dest_name}")
+            print(f"[!] BTP test {source_sid}→{dest_name}: target host "
+                  f"{_blocked_host} is LOCKED (#85) — probe skipped")
+            return
         is_rfc = (conn.conn_type or "").lower() == "rfc"
         print(f"[*] BTP test: {source_sid} → {dest_name} "
               f"(type={conn.conn_type or 'rfc'}, "
@@ -22928,6 +23027,26 @@ def create_app(api: SAPMAPApi) -> Bottle:
             return json.dumps({"error":
                 f"connection {source_sid} → {dest_name} → "
                 f"{target_sid} not found"})
+        # Issue #85 — body-keyed target.  propagate_from_node already refuses
+        # a locked target in-process (returns no users), but that is silent
+        # and still spins up a background task; resolve the body's target_sid
+        # here so the operator gets the same 423 + console feedback the HTTP
+        # gate gives a path-keyed <sid> route.
+        _tnode = api.state.get_node(target_sid)
+        if _tnode is not None and _lock.is_locked(api.state, _tnode):
+            _rec = _lock.locked_record_for(api.state, _tnode) or {}
+            _console_lock_blocked(_rec.get("host") or target_sid,
+                                  f"BTP create user {source_sid}→"
+                                  f"{target_sid}")
+            response.status = "423 Locked"
+            return json.dumps({
+                "error": "host_locked",
+                "message": ("Target host is LOCKED and excluded from further "
+                            "automated contact.  Unlock it with a recorded "
+                            "reason to re-arm live testing."),
+                "host": _rec.get("host", ""),
+                "reason": _rec.get("reason", ""),
+            })
         if not conn.logon_successful:
             return json.dumps({"error":
                 "Run Test Connection first — propagation requires a "
