@@ -2981,6 +2981,14 @@ class SAPMAPState:
     # while a legacy file WITHOUT the key is seeded on load (new protection).
     lock_whitelist: list = field(
         default_factory=lambda: list(DEFAULT_LOCK_WHITELIST))
+    # Issue #85 follow-up — patterns that came from the persistent global
+    # whitelist file (``states/.sapmap_lock_whitelist.json``).  Non-serialized:
+    # it's a runtime index onto the dotfile, repopulated at __post_init__ /
+    # from_dict time via ``sapmap_state.apply_global_lock_whitelist``.  Kept as
+    # a lower-cased set so remove/add can tell a global-origin pattern from a
+    # session-only one (and update the file accordingly).
+    global_lock_whitelist_patterns: set = field(
+        default_factory=set, repr=False, compare=False)
     # Issue #85 — BTP subaccounts are identified only by a UUID (no host/IP
     # the host matcher can key on), so a locked subaccount gets its own
     # UUID-keyed store parallel to locked_hosts.  Each record:
@@ -2995,6 +3003,17 @@ class SAPMAPState:
     def __post_init__(self):
         if not self.timestamp:
             self.timestamp = datetime.now().isoformat()
+        # Issue #85 follow-up — fold the persistent global auto-lock
+        # whitelist into this state so a rule the operator saved on an
+        # earlier run applies on EVERY launch, independent of which .sapmap
+        # they loaded (or whether they loaded one at all).  Lazy import +
+        # swallow errors: a missing / unreadable dotfile must never block
+        # state construction (defensive, like `_auto_lock`).
+        try:
+            import sapmap_state as _state
+            _state.apply_global_lock_whitelist(self)
+        except Exception:
+            pass
 
     # -- Looted-PSE SNC client identities (issue #137) --
 
@@ -4460,6 +4479,17 @@ class SAPMAPState:
             state.lock_whitelist = [str(p).strip()
                                     for p in (d.get("lock_whitelist") or [])
                                     if str(p).strip()]
+            # Follow-up: __post_init__ already merged the persistent global
+            # whitelist into state.lock_whitelist, but the per-state list we
+            # just assigned has overwritten it.  Re-apply so the operator's
+            # permanent rules survive loading an older engagement's state —
+            # the whole point of this follow-up.  The meta set keeps the
+            # earlier pattern list intact across the re-apply.
+            try:
+                import sapmap_state as _state
+                _state.apply_global_lock_whitelist(state)
+            except Exception:
+                pass
         state.locked_btp_subaccounts = [
             dict(r) for r in (d.get("locked_btp_subaccounts") or [])
             if isinstance(r, dict)]

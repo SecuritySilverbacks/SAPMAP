@@ -4518,25 +4518,76 @@ def create_app(api: SAPMAPApi) -> Bottle:
     # control stays reachable in read-only mode, same as lock/unlock.
     @app.route("/api/lock_whitelist", method="GET")
     def api_lock_whitelist_get():
-        return {"lock_whitelist": list(api.state.lock_whitelist or [])}
+        # Follow-up: ``global_patterns`` names the subset of ``lock_whitelist``
+        # that came from the persistent global dotfile — the GUI shows them
+        # with a "global" badge so an operator can tell a cross-session rule
+        # from a per-engagement one.  Case-preserving for display; the UI
+        # compares case-insensitively.
+        meta = getattr(api.state,
+                       "global_lock_whitelist_patterns", None) or set()
+        glob = [p for p in (api.state.lock_whitelist or [])
+                if str(p).strip().lower() in meta]
+        return {"lock_whitelist": list(api.state.lock_whitelist or []),
+                "global_patterns": glob}
 
     @app.route("/api/lock_whitelist", method="POST")
     def api_lock_whitelist_add():
         body = request.json or {}
-        pattern = (body.get("pattern") or "").strip()
+        pattern = str(body.get("pattern") or "").strip()
+        scope = str(body.get("scope") or "session").strip().lower()
+        if scope not in ("session", "global"):
+            response.status = 400
+            return {"error": "invalid_scope",
+                    "message": "scope must be 'session' or 'global'"}
         if not pattern:
             response.status = 400
             return {"error": "pattern_required"}
         existing = {p.strip().lower()
                     for p in (api.state.lock_whitelist or [])}
-        added = pattern.lower() not in existing
-        if added:
+        pl = pattern.lower()
+        added_to_state = pl not in existing
+        if added_to_state:
             api.state.lock_whitelist.append(pattern)
+        # Persist to the global dotfile when scope=global.  Promoting a
+        # pattern that was already session-local to global is also valid —
+        # the dotfile write happens whether or not the live list grew.
+        # The whole read-modify-write is wrapped in ``whitelist_write_lock``
+        # so a peer SAPMAP process can't lose this edit to a race.  The
+        # save returns a bool so we can report persistence truthfully
+        # (silent-fail would mislead the operator — review finding).
+        persisted = False
+        if scope == "global":
+            try:
+                from sapmap_state import (load_global_lock_whitelist,
+                                          save_global_lock_whitelist,
+                                          whitelist_write_lock)
+                with whitelist_write_lock():
+                    patterns = load_global_lock_whitelist()
+                    if pl not in {str(p).strip().lower() for p in patterns}:
+                        patterns.append(pattern)
+                    persisted = bool(save_global_lock_whitelist(
+                        patterns, by=str(body.get("by") or "")))
+                if persisted:
+                    meta = getattr(api.state,
+                                   "global_lock_whitelist_patterns", None)
+                    if meta is None:
+                        meta = set()
+                        try:
+                            api.state.global_lock_whitelist_patterns = meta
+                        except Exception:
+                            meta = set()
+                    meta.add(pl)
+            except Exception as e:
+                try:
+                    logger.warning(f"Could not persist global whitelist: {e}")
+                except Exception:
+                    pass
+                persisted = False
         # Retroactively auto-lock already-discovered nodes the new pattern
         # covers, so adding a pattern takes effect immediately (not only on
         # the next discovery).  Locking needs no reason (only unlock does).
         locked_hosts = set()
-        if added:
+        if added_to_state:
             for n in list(api.state.nodes.values()):
                 for rec in (_lock.apply_auto_lock(api.state, n) or []):
                     if rec:
@@ -4552,29 +4603,92 @@ def create_app(api: SAPMAPApi) -> Bottle:
                     "auto-locked " + str(len(locked_hosts))
                     + " already-discovered host(s): " + _esc(_hlist),
                     "cl-warn")
-        return {"ok": True, "added": added,
+        meta = getattr(api.state,
+                       "global_lock_whitelist_patterns", None) or set()
+        glob = [p for p in (api.state.lock_whitelist or [])
+                if str(p).strip().lower() in meta]
+        return {"ok": True,
+                "added": added_to_state,
+                "scope": scope,
+                "persisted_global": persisted,
                 "lock_whitelist": list(api.state.lock_whitelist or []),
+                "global_patterns": glob,
                 "auto_locked_hosts": sorted(h for h in locked_hosts if h)}
 
     @app.route("/api/lock_whitelist", method="DELETE")
     def api_lock_whitelist_remove():
         body = request.json or {}
-        pattern = (body.get("pattern") or "").strip()
+        pattern = str(body.get("pattern") or "").strip()
+        # Default scope is SESSION on remove — that's back-compat with every
+        # pre-follow-up caller (curl / older playbook / older MCP client)
+        # which previously only touched the live list.  A caller that
+        # explicitly wants the persistent dotfile touched too must pass
+        # ``scope='global'`` or ``'all'``.  The GUI Remove button sends
+        # ``scope: 'all'`` explicitly — which matches operator intent
+        # when clicking Remove on a row rendered with the "global" badge.
+        scope = str(body.get("scope") or "session").strip().lower()
+        if scope not in ("session", "global", "all"):
+            response.status = 400
+            return {"error": "invalid_scope",
+                    "message": "scope must be 'session', 'global' or 'all'"}
         if not pattern:
             response.status = 400
             return {"error": "pattern_required"}
         pl = pattern.lower()
+        # Session-side removal: every scope clears the pattern from the live
+        # list — ``scope='session'`` *also* leaves the global dotfile alone
+        # (see below) so state will re-grow it on next load, but the live
+        # whitelist still drops it immediately.  Removing a pattern stops
+        # FUTURE auto-(re)locking only — it does NOT unlock hosts already
+        # locked by it (unlocking requires a recorded reason, the #85
+        # invariant).  To make a manual unlock permanent, unlock first
+        # (with a reason) and then remove the pattern.
         before = list(api.state.lock_whitelist or [])
         api.state.lock_whitelist = [p for p in before
                                     if p.strip().lower() != pl]
-        removed = len(before) - len(api.state.lock_whitelist)
-        # Removing a pattern stops FUTURE auto-(re)locking only — it does NOT
-        # unlock hosts already locked by it (unlocking requires a recorded
-        # reason, the #85 invariant).  This is exactly how an operator makes a
-        # manual unlock permanent: unlock (with a reason), then drop the
-        # pattern so the next discovery won't re-lock it.
-        return {"ok": True, "removed": removed,
-                "lock_whitelist": list(api.state.lock_whitelist or [])}
+        removed_session = len(before) - len(api.state.lock_whitelist)
+        # Global-side removal: drop it from the dotfile too, so a FUTURE
+        # launch doesn't re-graft it.  ``scope='session'`` leaves the file
+        # alone on purpose — an operator can use it to temporarily disable
+        # a permanent rule for one engagement without losing it from the
+        # dotfile.  Wrapped in ``whitelist_write_lock`` so a peer SAPMAP
+        # process doing a concurrent add doesn't lose the add to this
+        # remove's read-modify-write.
+        removed_global = False
+        if scope in ("global", "all"):
+            try:
+                from sapmap_state import (load_global_lock_whitelist,
+                                          save_global_lock_whitelist,
+                                          whitelist_write_lock)
+                with whitelist_write_lock():
+                    patterns = load_global_lock_whitelist()
+                    kept = [p for p in patterns
+                            if str(p).strip().lower() != pl]
+                    if len(kept) != len(patterns):
+                        if save_global_lock_whitelist(
+                                kept, by=str(body.get("by") or "")):
+                            removed_global = True
+                if removed_global:
+                    meta = getattr(api.state,
+                                   "global_lock_whitelist_patterns", None)
+                    if isinstance(meta, set):
+                        meta.discard(pl)
+            except Exception as e:
+                try:
+                    logger.warning(
+                        f"Could not update global whitelist: {e}")
+                except Exception:
+                    pass
+        meta = getattr(api.state,
+                       "global_lock_whitelist_patterns", None) or set()
+        glob = [p for p in (api.state.lock_whitelist or [])
+                if str(p).strip().lower() in meta]
+        return {"ok": True,
+                "removed": removed_session,
+                "removed_global": removed_global,
+                "scope": scope,
+                "lock_whitelist": list(api.state.lock_whitelist or []),
+                "global_patterns": glob}
 
     # -- Serve the SPA --
     @app.route("/")

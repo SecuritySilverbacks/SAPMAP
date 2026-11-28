@@ -56,6 +56,12 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(
 STATE_DIR = os.path.join(PROJECT_ROOT, "states")
 RFC_CACHE_FILE = os.path.join(STATE_DIR, ".sapmap_rfc_cache.json")
 DEST_LOG_FILE = os.path.join(STATE_DIR, ".sapmap_created_destinations.json")
+# Issue #85 follow-up — persistent global auto-lock whitelist that survives
+# leaving the application.  Patterns here are merged into every state's
+# ``lock_whitelist`` at __post_init__ / from_dict time so a rule like
+# "my lab's always-out-of-scope /24" is enforced on every launch, independent
+# of which .sapmap engagement file is loaded.
+LOCK_WHITELIST_FILE = os.path.join(STATE_DIR, ".sapmap_lock_whitelist.json")
 
 # Default loot directory — separate from state files. Contains downloaded
 # secrets, hashes, table dumps, BIA exports etc., organized by category
@@ -449,6 +455,198 @@ def auto_save_path() -> str:
     _ensure_state_dir()
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     return os.path.join(STATE_DIR, f"sapmap_autosave_{ts}.sapmap")
+
+
+# ---------------------------------------------------------------------------
+# Persistent global auto-lock whitelist (issue #85 follow-up — survives
+# leaving the application, independent of which .sapmap is loaded)
+# ---------------------------------------------------------------------------
+# Patterns written here are merged into every SAPMAPState's ``lock_whitelist``
+# at construction / load time, so an operator's permanent out-of-scope rules
+# (e.g. "my lab's /24" or "*.corp.example") are always in effect on every
+# launch without having to re-save a state file.  The file is plain JSON —
+# safe to inspect and hand-edit:
+#   {
+#     "version": 1,
+#     "patterns": ["notesdownloads.sap.com", "192.0.2.0/24", ...],
+#     "updated_at": "2026-11-28T...Z",
+#     "updated_by": "alice"
+#   }
+
+
+def global_lock_whitelist_path() -> str:
+    """Return the on-disk path of the persistent global whitelist file."""
+    return LOCK_WHITELIST_FILE
+
+
+def load_global_lock_whitelist() -> list:
+    """Load the persistent global whitelist.  Returns a de-duplicated list of
+    pattern strings.  Missing / unreadable / malformed → empty list (never
+    raises) — the guardrail still works with the per-state whitelist only."""
+    try:
+        if not os.path.exists(LOCK_WHITELIST_FILE):
+            return []
+        with open(LOCK_WHITELIST_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            return []
+        raw = data.get("patterns") or []
+        if not isinstance(raw, list):
+            return []
+        seen, out = set(), []
+        for p in raw:
+            s = str(p).strip()
+            if not s:
+                continue
+            key = s.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(s)
+        return out
+    except Exception as e:
+        logger.warning(f"Could not load global lock whitelist: {e}")
+        return []
+
+
+def save_global_lock_whitelist(patterns, *, by: str = "") -> bool:
+    """Persist the global whitelist atomically (``tempfile.mkstemp`` in the
+    same directory + ``os.replace``).  Writes a de-duplicated, order-
+    preserving list.  Returns ``True`` on success, ``False`` when the write
+    failed (disk full, read-only mount, permission denied) — the caller
+    must NOT claim the rule is now persistent on a ``False`` return.  Never
+    raises: a transient write failure must never take down the GUI request.
+
+    Uses ``tempfile.mkstemp`` with a randomised filename so a pre-planted
+    symlink at a fixed ``.tmp`` path cannot redirect the write to an
+    attacker-chosen target (the project ``states/`` directory is operator-
+    owned, but we still write only to a randomly-named sibling and rename
+    into place).  Does NOT lock — callers doing a read-modify-write should
+    wrap their load + save in ``whitelist_write_lock()`` so two SAPMAP
+    processes don't lose each other's edits.
+    """
+    _ensure_state_dir()
+    seen, out = set(), []
+    for p in (patterns or []):
+        s = str(p).strip()
+        if not s:
+            continue
+        key = s.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(s)
+    payload = {
+        "version": 1,
+        "patterns": out,
+        "updated_at": datetime.now().isoformat(),
+        "updated_by": str(by or ""),
+    }
+    tmp_path = None
+    try:
+        import tempfile
+        fd, tmp_path = tempfile.mkstemp(
+            prefix=".sapmap_lock_whitelist.", suffix=".tmp",
+            dir=STATE_DIR)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(payload, f, indent=2)
+        except Exception:
+            try:
+                os.close(fd)
+            except Exception:
+                pass
+            raise
+        os.replace(tmp_path, LOCK_WHITELIST_FILE)
+        return True
+    except Exception as e:
+        logger.warning(f"Could not persist global lock whitelist: {e}")
+        if tmp_path is not None:
+            try:
+                if os.path.exists(tmp_path):
+                    os.remove(tmp_path)
+            except Exception:
+                pass
+        return False
+
+
+import contextlib as _contextlib
+
+
+@_contextlib.contextmanager
+def whitelist_write_lock():
+    """Serialize a read-modify-write on the global whitelist file across
+    two SAPMAP processes.  A caller holds the lock across its
+    ``load_global_lock_whitelist()`` + ``save_global_lock_whitelist()``
+    pair, so a concurrent peer's edits can never be lost to a
+    load-then-save race.  On platforms without ``fcntl`` (Windows) this
+    is a no-op (last-writer-wins, same as before the follow-up)."""
+    lock_fh = None
+    try:
+        import fcntl
+    except Exception:
+        fcntl = None
+    if fcntl is not None:
+        try:
+            _ensure_state_dir()
+            lock_fh = open(LOCK_WHITELIST_FILE + ".lock", "a+")
+            fcntl.flock(lock_fh.fileno(), fcntl.LOCK_EX)
+        except Exception:
+            lock_fh = None
+    try:
+        yield
+    finally:
+        if lock_fh is not None and fcntl is not None:
+            try:
+                fcntl.flock(lock_fh.fileno(), fcntl.LOCK_UN)
+            except Exception:
+                pass
+            try:
+                lock_fh.close()
+            except Exception:
+                pass
+
+
+def apply_global_lock_whitelist(state: SAPMAPState) -> list:
+    """Merge the persistent global whitelist into ``state.lock_whitelist``
+    and mark each merged pattern in the non-serialized
+    ``global_lock_whitelist_patterns`` meta set (so a later remove can also
+    clear it from the global file).  Returns the patterns that were newly
+    added to the live list (empty when the state already carried every one
+    — including the DEFAULT_LOCK_WHITELIST seed overlap).
+
+    Called from ``SAPMAPState.__post_init__`` and ``from_dict`` so a fresh
+    state AND a loaded .sapmap both pick up the operator's permanent rules.
+    """
+    patterns = load_global_lock_whitelist()
+    if not patterns:
+        return []
+    existing = {str(p).strip().lower()
+                for p in (state.lock_whitelist or [])
+                if str(p).strip()}
+    newly_added = []
+    # Track every global pattern on the meta set regardless of whether it's
+    # already in state.lock_whitelist — a remove-global later must still be
+    # able to recognise it as a persistent rule.
+    meta = getattr(state, "global_lock_whitelist_patterns", None)
+    if meta is None:
+        meta = set()
+        try:
+            state.global_lock_whitelist_patterns = meta
+        except Exception:
+            # Non-SAPMAPState (shouldn't happen) — fall back to just appending
+            # without remembering the provenance.
+            meta = set()
+    for p in patterns:
+        key = p.strip().lower()
+        if not key:
+            continue
+        meta.add(key)
+        if key not in existing:
+            state.lock_whitelist.append(p)
+            existing.add(key)
+            newly_added.append(p)
+    return newly_added
 
 
 def list_saved_states() -> list:

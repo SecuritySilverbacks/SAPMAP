@@ -1631,7 +1631,20 @@ def _lock_section(state: SAPMAPState) -> list:
                        f"{_esc(by)} | {_esc(at)} |")
         out.append("")
 
-    if whitelist:
+    # Issue #85 follow-up: the whitelist is the UNION of per-engagement
+    # rules and the operator's persistent global whitelist dotfile.  The
+    # engagement report must show ONLY the engagement-scoped rules —
+    # leaking an operator's private global config (home-lab names, internal
+    # corp CIDRs) into a deliverable the customer reads would be an
+    # information disclosure.  A one-line note acknowledges that a global
+    # layer exists (so a reviewer isn't surprised by auto-lock activity on
+    # a host that doesn't appear here) without naming its patterns.
+    global_meta = {str(p).strip().lower() for p
+                   in (getattr(state, "global_lock_whitelist_patterns", None)
+                       or set())}
+    engagement_patterns = [p for p in whitelist
+                           if str(p).strip().lower() not in global_meta]
+    if engagement_patterns:
         out.append("### Auto-lock whitelist rules")
         out.append("")
         out.append(
@@ -1640,13 +1653,31 @@ def _lock_section(state: SAPMAPState) -> list:
             "skipped by the pre-scan filter — the quickest way to carve "
             "out an entire subnet or cloud-provider range.  Each pattern "
             "is an IP, CIDR, hostname or domain suffix.")
+        if global_meta:
+            out.append("")
+            out.append(
+                "> An additional **persistent global whitelist** was also "
+                "in effect during this engagement (from "
+                "`states/.sapmap_lock_whitelist.json` on the operator "
+                "workstation).  Its patterns are the operator's standing "
+                "out-of-scope list and are omitted here by design.")
         out.append("")
         out.append("| Pattern |")
         out.append("| --- |")
-        for patt in whitelist:
+        for patt in engagement_patterns:
             s = str(patt or "").strip()
             if s:
                 out.append(f"| `{_esc(s)}` |")
+        out.append("")
+    elif global_meta:
+        out.append("### Auto-lock whitelist rules")
+        out.append("")
+        out.append(
+            "No engagement-specific whitelist rules were added, but a "
+            "**persistent global whitelist** was in effect on the operator "
+            "workstation (`states/.sapmap_lock_whitelist.json`).  Its "
+            "patterns are the operator's standing out-of-scope list "
+            "and are omitted here by design.")
         out.append("")
 
     if unlock_log:
@@ -5045,9 +5076,26 @@ def _html_lock_section(state: SAPMAPState) -> str:
             '<th>By</th><th>Locked at</th></tr></thead>'
             f'<tbody>{"".join(rows)}</tbody></table>')
 
-    if whitelist:
+    # Issue #85 follow-up: hide operator's private global rules from the
+    # engagement deliverable (see _lock_section for the full rationale).
+    global_meta = {str(p).strip().lower() for p
+                   in (getattr(state, "global_lock_whitelist_patterns", None)
+                       or set())}
+    engagement_patterns = [p for p in whitelist
+                           if str(p).strip().lower() not in global_meta]
+    _global_note = ''
+    if global_meta:
+        _global_note = (
+            '<p style="font-size:12px;color:#6b7280;margin:0 0 8px">'
+            '<b>Note:</b> a <b>persistent global whitelist</b> on the '
+            'operator workstation '
+            '(<code>states/.sapmap_lock_whitelist.json</code>) was also '
+            'in effect during this engagement.  Its patterns are the '
+            "operator's standing out-of-scope list and are omitted "
+            'here by design.</p>')
+    if engagement_patterns:
         rows = []
-        for patt in whitelist:
+        for patt in engagement_patterns:
             s = str(patt or "").strip()
             if s:
                 rows.append(
@@ -5060,9 +5108,14 @@ def _html_lock_section(state: SAPMAPState) -> str:
             'during the engagement is auto-locked and skipped by the '
             'pre-scan filter.  Each pattern is an IP, CIDR, hostname '
             'or domain suffix.</p>'
+            + _global_note +
             '<table class="grid"><thead><tr>'
             '<th>Pattern</th></tr></thead>'
             f'<tbody>{"".join(rows)}</tbody></table>')
+    elif global_meta:
+        parts.append(
+            '<h3 style="margin:18px 0 6px;font-size:14px">'
+            'Auto-lock whitelist rules</h3>' + _global_note)
 
     if unlock_log:
         rows = []

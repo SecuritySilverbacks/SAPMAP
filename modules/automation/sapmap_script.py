@@ -128,6 +128,30 @@ def _local_ip():
         return ""
 
 
+def _whitelist_scope(step: dict) -> str:
+    """Resolve the ``scope`` field for the lock_whitelist_* verbs.
+
+    Accepts either an explicit ``scope: 'session'|'global'|'all'`` or the
+    ``global: true/false`` shorthand.  Returns ``''`` when the step is
+    quiet about scope — the body field is then omitted and the server
+    picks its default (``session`` on add, ``all`` on remove), which
+    keeps playbooks written before this follow-up functionally identical.
+    """
+    # ``str(...)`` first so a YAML author who writes ``scope: 123`` /
+    # ``scope: true`` gets a clean "unknown scope" response from the
+    # server rather than an AttributeError crash inside _map_step
+    # (adversarial-review fix: non-string truthy values survived the
+    # ``or ""`` fallback).
+    raw = str(step.get("scope") or "").strip().lower()
+    if raw:
+        return raw
+    if step.get("global") is True:
+        return "global"
+    if step.get("global") is False:
+        return "session"
+    return ""
+
+
 def _map_step(step: dict) -> tuple:
     """Map a script step to (method, path, payload).
 
@@ -1356,18 +1380,30 @@ def _map_step(step: dict) -> tuple:
         # to open a socket against a matching host, and the node-
         # creation funnel auto-locks it.
         #   pattern: e.g. "192.168.9.0/24", "ec2.amazonaws.com"
-        return ("POST", "/api/lock_whitelist", {
-            "pattern": (step.get("pattern") or "").strip(),
-        }, True)
+        #   scope:   "session" (default; this engagement's .sapmap only)
+        #            or "global" (persisted across launches, independent
+        #            of which .sapmap is loaded).  ``global: true`` is
+        #            accepted as a shorthand.
+        _scope = _whitelist_scope(step)
+        _body = {"pattern": (step.get("pattern") or "").strip()}
+        if _scope:
+            _body["scope"] = _scope
+        return ("POST", "/api/lock_whitelist", _body, True)
 
     if action == "lock_whitelist_remove":
         # Remove a whitelist rule by its ``pattern`` string.  Hosts
         # already locked by it stay locked (unlocking requires a
         # recorded reason — the #85 invariant); this just stops future
         # auto-(re)locking.
-        return ("DELETE", "/api/lock_whitelist", {
-            "pattern": (step.get("pattern") or "").strip(),
-        }, True)
+        #   scope:   "all" (default — remove from this session AND from
+        #            the persistent global dotfile if it is there),
+        #            "session" (this engagement only; global file
+        #            untouched), or "global" (same as "all").
+        _scope = _whitelist_scope(step)
+        _body = {"pattern": (step.get("pattern") or "").strip()}
+        if _scope:
+            _body["scope"] = _scope
+        return ("DELETE", "/api/lock_whitelist", _body, True)
 
     raise ValueError(f"Unknown action: {action}")
 

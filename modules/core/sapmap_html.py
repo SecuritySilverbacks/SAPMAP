@@ -2940,6 +2940,15 @@ body {
              onkeydown="if(event.key==='Enter'){event.preventDefault();addLockWhitelistPattern();}">
       <button class="btn btn-primary" onclick="addLockWhitelistPattern()">Add</button>
     </div>
+    <div style="margin-top:6px;font-size:12px;color:#8b949e">
+      <label style="cursor:pointer;user-select:none">
+        <input type="checkbox" id="lock-whitelist-global" style="vertical-align:middle;margin-right:4px">
+        Make <b>permanent</b> across all SAPMAP sessions
+        <span style="color:#6e7681">(saved to
+        <code>states/.sapmap_lock_whitelist.json</code>; survives
+        reloading other engagements)</span>
+      </label>
+    </div>
     <div class="form-actions">
       <button class="btn" onclick="closeModal('lock-whitelist-modal')">Close</button>
     </div>
@@ -17620,6 +17629,10 @@ async function showLockWhitelistModal() {
   await renderLockWhitelist();
   const inp = document.getElementById('lock-whitelist-input');
   if (inp) { inp.value = ''; inp.focus(); }
+  // Reset the "permanent" checkbox so a per-engagement add doesn't
+  // accidentally inherit the previous session's intent.
+  const g = document.getElementById('lock-whitelist-global');
+  if (g) g.checked = false;
 }
 async function renderLockWhitelist() {
   const box = document.getElementById('lock-whitelist-list');
@@ -17638,6 +17651,10 @@ async function renderLockWhitelist() {
     return;
   }
   const patterns = data.lock_whitelist;
+  // Case-insensitive lookup so "EC2.amazonaws.com" vs "ec2.amazonaws.com"
+  // still resolves to the same global entry.
+  const globalSet = new Set(((data.global_patterns || []).map(
+    function(p) { return String(p).toLowerCase(); })));
   if (!patterns.length) {
     box.innerHTML = '<div style="color:#8b949e;font-size:12px;padding:8px">'
       + 'No whitelist patterns &mdash; nothing is auto-locked.</div>';
@@ -17648,9 +17665,16 @@ async function renderLockWhitelist() {
   // a JS-literal (and can't inject).  escHtml escapes quotes, and
   // getAttribute decodes the entities back to the original pattern.
   box.innerHTML = patterns.map(function(p) {
+    const isGlobal = globalSet.has(String(p).toLowerCase());
+    const badge = isGlobal
+      ? '<span title="Persistent across all SAPMAP sessions (states/.sapmap_lock_whitelist.json)" '
+        + 'style="font-size:10px;color:#58a6ff;border:1px solid #30363d;'
+        + 'border-radius:4px;padding:1px 6px;margin-left:8px">global</span>'
+      : '';
     return '<div style="display:flex;justify-content:space-between;'
       + 'align-items:center;padding:4px 6px;border-bottom:1px solid #21262d">'
-      + '<code style="font-size:12px">' + escHtml(p) + '</code>'
+      + '<span><code style="font-size:12px">' + escHtml(p) + '</code>'
+      + badge + '</span>'
       + '<button class="btn wl-remove" data-pattern="' + escHtml(p) + '" '
       + 'style="padding:2px 8px;font-size:11px">Remove</button></div>';
   }).join('');
@@ -17664,24 +17688,39 @@ async function addLockWhitelistPattern() {
   const inp = document.getElementById('lock-whitelist-input');
   const pattern = (inp.value || '').trim();
   if (!pattern) return;
+  const g = document.getElementById('lock-whitelist-global');
+  const scope = (g && g.checked) ? 'global' : 'session';
   let res;
-  try { res = await api('POST', 'lock_whitelist', { pattern }); }
+  try { res = await api('POST', 'lock_whitelist', { pattern, scope }); }
   catch (_) { alert('Could not reach the server to add the pattern. Try again.'); return; }
   if (res && res.error) { alert(res.error); return; }
   inp.value = '';
+  if (g) g.checked = false;
   await renderLockWhitelist();
   const locked = (res && res.auto_locked_hosts) || [];
   if (locked.length) {
     try {
-      showToast('&#128274; Added &mdash; auto-locked ' + locked.length
-        + ' already-discovered host(s).');
+      const where = res.persisted_global
+        ? ' (permanent — all sessions)'
+        : '';
+      showToast('&#128274; Added' + where + ' &mdash; auto-locked '
+        + locked.length + ' already-discovered host(s).');
     } catch (_) {}
     startPolling();
+  } else if (res && res.persisted_global) {
+    try { showToast('&#128274; Added &mdash; saved across all SAPMAP sessions.'); }
+    catch (_) {}
   }
 }
 async function removeLockWhitelistPattern(pattern) {
+  // The server defaults DELETE to scope='session' so pre-follow-up
+  // external callers can't accidentally wipe a permanent rule.  The GUI
+  // Remove button is an explicit operator action, so it sends
+  // scope='all' — strip the pattern from this session AND from the
+  // persistent global file, matching the expectation that clicking
+  // Remove really means remove.
   let res;
-  try { res = await api('DELETE', 'lock_whitelist', { pattern }); }
+  try { res = await api('DELETE', 'lock_whitelist', { pattern, scope: 'all' }); }
   catch (_) { alert('Could not reach the server to remove the pattern. Try again.'); return; }
   if (res && res.error) { alert(res.error); return; }
   await renderLockWhitelist();

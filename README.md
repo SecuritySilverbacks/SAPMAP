@@ -61,7 +61,11 @@ lift ends up in an audit log that the engagement report surfaces verbatim.
 - **Auto-lock whitelist** — pre-register IP / CIDR / hostname / domain
   patterns (e.g. `ec2.amazonaws.com`, `192.168.9.0/24`).  Any matching host
   discovered later is auto-locked and the pre-scan filter refuses to even
-  open a socket against it.
+  open a socket against it.  Rules can be scoped to the current engagement
+  (default) or marked **permanent** — persisted to
+  `states/.sapmap_lock_whitelist.json` and auto-loaded on every launch,
+  so an operator's standing out-of-scope list survives leaving the
+  application.
 - **Scripted scenarios** — `lock_host`, `unlock_host`, `lock_scc`, `unlock_scc`,
   `lock_btp_subaccount`, `unlock_btp_subaccount`, `lock_whitelist_add` and
   `lock_whitelist_remove` are first-class actions.
