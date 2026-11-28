@@ -2922,6 +2922,24 @@ class SAPMAPState:
     # which one is live; "" = use the operator posture.  Keyed by cred_id.
     snc_credentials: dict = field(default_factory=dict)  # cred_id -> SNCCredential
     active_snc_cred_id: str = ""
+    # Issue #85 — host-scoped lock guardrail.  A locked HOST is excluded
+    # from ALL further automated contact (scan/probe/RFC/vuln/exploit/
+    # propagate) while staying fully visible in the map/inventory/diff/
+    # report.  Host-scoped, NOT per-SID: on a shared host every node/SID on
+    # it is covered, and because the state lives here (not on a node) it
+    # survives the wholesale node-replace in add_node for free.  Enforcement
+    # + matching live in modules/core/sapmap_lock.py; this is just the
+    # persisted state.  Each record:
+    #   {host, reason, auto: bool, whitelist_pattern, locked_at, locked_by}
+    # A LIST (not a set) to carry that metadata and avoid the #92 set-
+    # rehydration dance.  Legacy .sapmap files load with an empty list
+    # (unlocked) — back-compat, no migration.
+    locked_hosts: list = field(default_factory=list)
+    # Audit trail of explicit unlock actions (issue #85).  Unlocking REQUIRES
+    # a recorded reason — team/compliance traceability, so a new operator
+    # inheriting shared state can see a protection was deliberately lifted
+    # and by whom.  Each entry: {host, reason, at, by}.
+    unlock_log: list = field(default_factory=list)
     timestamp: str = ""
     version: str = "1.0"
 
@@ -4294,6 +4312,9 @@ class SAPMAPState:
                 cid: c.to_dict() for cid, c in self.snc_credentials.items()
             },
             "active_snc_cred_id": self.active_snc_cred_id,
+            # Issue #85 — host-scoped lock guardrail state.
+            "locked_hosts": [dict(r) for r in (self.locked_hosts or [])],
+            "unlock_log": [dict(r) for r in (self.unlock_log or [])],
         }
 
     @classmethod
@@ -4344,6 +4365,12 @@ class SAPMAPState:
         for cid, cred_d in (d.get("snc_credentials", {}) or {}).items():
             state.snc_credentials[cid] = SNCCredential.from_dict(cred_d)
         state.active_snc_cred_id = str(d.get("active_snc_cred_id", "") or "")
+        # Issue #85 — host-scoped lock guardrail.  Legacy files without the
+        # key load unlocked (empty lists); each record is a plain dict.
+        state.locked_hosts = [dict(r) for r in (d.get("locked_hosts") or [])
+                              if isinstance(r, dict)]
+        state.unlock_log = [dict(r) for r in (d.get("unlock_log") or [])
+                            if isinstance(r, dict)]
         # One-shot dedup pass: fold FQDN-keyed placeholder BTP nodes
         # (from earlier materialise_type_g_target runs) into any
         # real-UUID node that shares the same subdomain.  Handles
