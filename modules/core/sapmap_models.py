@@ -2724,7 +2724,7 @@ _BARE_AWS_DEFAULT_HOST_RE = _re.compile(
     r'^(ec2|s3)([.-][a-z0-9.-]+)?\.amazonaws\.com$', _re.IGNORECASE)
 
 
-def _is_bare_aws_default_node(node) -> bool:
+def _is_bare_aws_default_node(node, state=None) -> bool:
     """Return True when `node` is a placeholder auto-materialised
     from one of the two SAP-shipped Type-G HTTP destinations
     (CSI_AWS_EC2, CSI_AWS_S3) that ship with every S/4 system and
@@ -2735,6 +2735,12 @@ def _is_bare_aws_default_node(node) -> bool:
     these placeholders from the map.  Called from `add_node` so we
     don't emit the misleading "New SAP system plotted" INFO
     finding for a node the operator will never see on the map.
+
+    Issue #85 force-show: when ``state`` is supplied and the node is on a
+    LOCKED host (e.g. auto-locked via the ec2/s3 whitelist seed), it is NOT
+    treated as bare — a quarantined placeholder must stay VISIBLE so the
+    operator can see what was excluded from contact.  Mirrors folding
+    ``n.locked`` into the JS twin's enrichment check.
     """
     if node is None:
         return False
@@ -2743,6 +2749,15 @@ def _is_bare_aws_default_node(node) -> bool:
     if (not _BARE_AWS_DEFAULT_HOST_RE.match(host)
             and not _BARE_AWS_DEFAULT_HOST_RE.match(ip)):
         return False
+    # A locked placeholder must stay on the map — never hide a quarantined
+    # host (issue #85).  Best-effort: only when a state is passed in.
+    if state is not None:
+        try:
+            import sapmap_lock as _lock
+            if _lock.is_locked(state, node):
+                return False
+        except Exception:
+            pass
     # If anything real has already landed on the node, it stops
     # being a "bare" default — pwn state, credentials, findings,
     # real open ports.
@@ -2966,6 +2981,14 @@ class SAPMAPState:
     # while a legacy file WITHOUT the key is seeded on load (new protection).
     lock_whitelist: list = field(
         default_factory=lambda: list(DEFAULT_LOCK_WHITELIST))
+    # Issue #85 — BTP subaccounts are identified only by a UUID (no host/IP
+    # the host matcher can key on), so a locked subaccount gets its own
+    # UUID-keyed store parallel to locked_hosts.  Each record:
+    #   {uuid, reason, locked_at, locked_by}
+    # Legacy .sapmap files without the key load unlocked.  The host whitelist
+    # does not apply here (no host to match) — subaccounts are manual-lock
+    # only; enforcement + matching live in modules/core/sapmap_lock.py.
+    locked_btp_subaccounts: list = field(default_factory=list)
     timestamp: str = ""
     version: str = "1.0"
 
@@ -3149,7 +3172,7 @@ class SAPMAPState:
             # front-end explicitly hides — otherwise the operator
             # sees an INFO ping about a system that never appears
             # on the map, which is confusing.
-            _visible_on_map = not _is_bare_aws_default_node(node)
+            _visible_on_map = not _is_bare_aws_default_node(node, self)
             if _visible_on_map:
                 try:
                     from sapmap_findings import emit_finding
@@ -4299,7 +4322,7 @@ class SAPMAPState:
         # counting them here would make the status-bar disagree
         # with what the operator sees ("14 systems" vs "I count 12").
         visible_sap_nodes = [n for n in self.nodes.values()
-                              if not _is_bare_aws_default_node(n)]
+                              if not _is_bare_aws_default_node(n, self)]
         # SAProuter nodes already live in self.nodes (SAPNode with
         # .saprouter set), so they are counted via len(self.nodes).
         # SCCs, BTP subaccounts, and DBCON edges are tracked
@@ -4371,6 +4394,8 @@ class SAPMAPState:
             "locked_hosts": [dict(r) for r in (self.locked_hosts or [])],
             "unlock_log": [dict(r) for r in (self.unlock_log or [])],
             "lock_whitelist": [str(p) for p in (self.lock_whitelist or [])],
+            "locked_btp_subaccounts": [
+                dict(r) for r in (self.locked_btp_subaccounts or [])],
         }
 
     @classmethod
@@ -4435,6 +4460,9 @@ class SAPMAPState:
             state.lock_whitelist = [str(p).strip()
                                     for p in (d.get("lock_whitelist") or [])
                                     if str(p).strip()]
+        state.locked_btp_subaccounts = [
+            dict(r) for r in (d.get("locked_btp_subaccounts") or [])
+            if isinstance(r, dict)]
         # One-shot dedup pass: fold FQDN-keyed placeholder BTP nodes
         # (from earlier materialise_type_g_target runs) into any
         # real-UUID node that shares the same subdomain.  Handles

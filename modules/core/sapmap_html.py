@@ -1807,6 +1807,9 @@ body {
     </div>
   </div>
   <div class="ctx-sep"></div>
+  <div class="ctx-item" id="scc-ctx-lock" data-action="scc_lock" title="LOCK this Cloud Connector: exclude it AND every co-located SAP system on this box from all further automated contact, while keeping it visible on the map and in the report.">&#128274; Lock (exclude from contact)</div>
+  <div class="ctx-item" id="scc-ctx-unlock" data-action="scc_unlock" title="UNLOCK this Cloud Connector: re-arm live testing. Requires a recorded reason.">&#128275; Unlock (requires reason)</div>
+  <div class="ctx-sep"></div>
   <div class="ctx-item" data-action="scc_delete" style="color:#f85149">&#128465; Remove from Map</div>
 </div>
 
@@ -1822,6 +1825,9 @@ body {
   <div class="ctx-item" data-action="btp_copy_uuid">&#128203; Copy Subaccount UUID</div>
   <div class="ctx-item" data-action="btp_copy_subdomain">&#128203; Copy Subdomain</div>
   <div class="ctx-item" data-action="btp_copy_region">&#128203; Copy Region</div>
+  <div class="ctx-sep"></div>
+  <div class="ctx-item" id="btp-ctx-lock" data-action="btp_lock" title="LOCK this BTP subaccount: exclude it from all further automated region-API contact (destination / credential pulls), while keeping it visible on the map and in the report.">&#128274; Lock (exclude from contact)</div>
+  <div class="ctx-item" id="btp-ctx-unlock" data-action="btp_unlock" title="UNLOCK this BTP subaccount: re-arm region-API contact. Requires a recorded reason.">&#128275; Unlock (requires reason)</div>
   <div class="ctx-sep"></div>
   <div class="ctx-item" data-action="btp_remove" style="color:#f85149">&#128465; Remove from Map</div>
 </div>
@@ -4581,7 +4587,8 @@ function _isBareAwsDefaultNode(n) {
     || n.gw_vulnerable || n.ms_vulnerable
     || n.cve_2025_31324_vulnerable || n.cve_2020_6287_vulnerable
     || n.cve_2022_22536_vulnerable
-    || anyRealPort);
+    || anyRealPort
+    || n.locked);   // issue #85: a locked placeholder stays visible
   return !hasEnrichment;
 }
 
@@ -6036,6 +6043,18 @@ function updateMap() {
     if (sn.pwned) {
       html += pwnedTagSvg(x + BOX_W + 8, y);
     }
+    // Issue #85 — host-lock padlock (left of the box; the hex's bottom corners
+    // already carry the CVE / PP badges).  A locked Cloud Connector stays fully
+    // drawn; the padlock flags it as excluded from further automated contact.
+    if (sn.locked) {
+      html += `<text x="${x-10}" y="${y+22}" font-size="18" text-anchor="end"`
+           + ` fill="#f0b429" stroke="#0d1117" stroke-width="2.5"`
+           + ` paint-order="stroke" dominant-baseline="middle">&#128274;`
+           + `<title>LOCKED`
+           + `${sn.lock_auto ? ' — auto (whitelist)' : ''}`
+           + `${sn.lock_reason ? ': ' + escHtml(sn.lock_reason) : ''}`
+           + ` — excluded from further automated contact.</title></text>`;
+    }
 
     // Body lines — host first (IP or hostname), then details
     let ty = y + 42;
@@ -6196,6 +6215,17 @@ function updateMap() {
     // POWNED tag (top-right)
     if (bn.pwned) {
       html += pwnedTagSvg(x + BOX_W + 2, y + 10);
+    }
+    // Issue #85 — a locked BTP subaccount stays fully drawn; the padlock (left
+    // of the cloud) flags it as excluded from further automated region-API
+    // contact.  BTP locks are UUID-keyed and manual-only (no auto/whitelist).
+    if (bn.locked) {
+      html += `<text x="${x-6}" y="${y+40}" font-size="18" text-anchor="end"`
+           + ` fill="#f0b429" stroke="#0d1117" stroke-width="2.5"`
+           + ` paint-order="stroke" dominant-baseline="middle">&#128274;`
+           + `<title>LOCKED`
+           + `${bn.lock_reason ? ': ' + escHtml(bn.lock_reason) : ''}`
+           + ` — excluded from further automated contact.</title></text>`;
     }
 
     // Body lines — region / subdomain / counts
@@ -8492,6 +8522,12 @@ function showSCCCtxMenu(e, host) {
     if (suggActions.has(item.getAttribute('data-action'))) item.classList.add('ctx-highlighted');
   });
 
+  // Issue #85 — toggle Lock vs Unlock by the derived lock state.
+  const _sccLock = document.getElementById('scc-ctx-lock');
+  const _sccUnlock = document.getElementById('scc-ctx-unlock');
+  if (_sccLock) _sccLock.style.display = (sn && sn.locked) ? 'none' : '';
+  if (_sccUnlock) _sccUnlock.style.display = (sn && sn.locked) ? '' : 'none';
+
   menu.classList.add('visible');
   // Position with viewport clamp
   const w = menu.offsetWidth || 280;
@@ -8636,9 +8672,36 @@ document.getElementById('scc-ctx-menu').addEventListener('click', function(e) {
     case 'scc_extract_keystore':  sccExtractKeystore(host); break;
     case 'scc_download_hashes':  sccDownloadHashes(host); break;
     case 'scc_analyse_pp':        sccAnalysePP(host); break;
+    case 'scc_lock':              sccLockHost(host); break;
+    case 'scc_unlock':            sccUnlockHost(host); break;
     case 'scc_delete':            sccRemoveFromMap(host); break;
   }
 });
+
+function sccLockHost(host) {
+  // Issue #85 — host-scoped lock on the Cloud Connector's box (covers every
+  // co-located SAP system too).  Reason optional at lock time.
+  const reason = prompt(
+    'Lock this Cloud Connector (and every co-located SAP system) —\n'
+    + 'exclude it from all further automated contact.\nOptional reason:', '');
+  if (reason === null) return;
+  api('POST', `scc/${encodeURIComponent(host)}/lock`, { reason })
+    .then(r => { if (r && r.message) showToast('&#128274; ' + escHtml(r.message)); });
+}
+
+function sccUnlockHost(host) {
+  // Issue #85 — unlock REQUIRES a recorded reason (traceability).
+  const reason = prompt(
+    'Unlock this Cloud Connector — this RE-ARMS live testing.\n'
+    + 'Recorded reason (REQUIRED):', '');
+  if (reason === null) return;
+  if (!reason.trim()) {
+    showToast('&#9888; Unlock cancelled — a reason is required.');
+    return;
+  }
+  api('POST', `scc/${encodeURIComponent(host)}/unlock`, { reason })
+    .then(r => { if (r && r.ok) showToast('&#128275; Cloud Connector unlocked — live testing re-armed.'); });
+}
 
 async function sccRemoveFromMap(host) {
   if (!confirm('Remove SCC ' + host + ' from the map? (Local-only; will reappear on next scan if still present.)')) return;
@@ -8703,6 +8766,11 @@ function showBTPCtxMenu(e, uuid) {
   const linkedCount = (bn.destinations || [])
     .filter(d => d && d.linked_target_sid).length;
   setEnabled('btp_highlight_links', linkedCount > 0);
+  // Issue #85 — toggle Lock vs Unlock by the derived lock state.
+  const _btpLock = document.getElementById('btp-ctx-lock');
+  const _btpUnlock = document.getElementById('btp-ctx-unlock');
+  if (_btpLock) _btpLock.style.display = bn.locked ? 'none' : '';
+  if (_btpUnlock) _btpUnlock.style.display = bn.locked ? '' : 'none';
   menu.classList.add('visible');
   const w = menu.offsetWidth || 280;
   const h = menu.offsetHeight || 200;
@@ -8749,6 +8817,12 @@ document.getElementById('btp-ctx-menu').addEventListener('click', function(e) {
       break;
     case 'btp_copy_region':
       _copyToClipboard(bn.region || '', 'region');
+      break;
+    case 'btp_lock':
+      btpLockSubaccount(uuid);
+      break;
+    case 'btp_unlock':
+      btpUnlockSubaccount(uuid);
       break;
     case 'btp_remove':
       btpRemoveFromMap(uuid);
@@ -9320,6 +9394,33 @@ async function btpRemoveFromMap(uuid) {
     const r = await api('DELETE', `btp/subaccount/${encodeURIComponent(uuid)}`);
     if (r && r.error) showToast('BTP delete failed: ' + r.error, 'error');
   } catch (e) { showToast('BTP delete error: ' + e, 'error'); }
+}
+
+function btpLockSubaccount(uuid) {
+  // Issue #85 — UUID-keyed lock: exclude this subaccount from all further
+  // automated region-API contact (destination / credential pulls).  Reason
+  // optional at lock time.
+  const reason = prompt(
+    'Lock this BTP subaccount — exclude it from all further automated\n'
+    + 'region-API contact (destination / credential pulls).\nOptional reason:',
+    '');
+  if (reason === null) return;
+  api('POST', `btp/subaccount/${encodeURIComponent(uuid)}/lock`, { reason })
+    .then(r => { if (r && r.message) showToast('&#128274; ' + escHtml(r.message)); });
+}
+
+function btpUnlockSubaccount(uuid) {
+  // Issue #85 — unlock REQUIRES a recorded reason (traceability).
+  const reason = prompt(
+    'Unlock this BTP subaccount — this RE-ARMS region-API contact.\n'
+    + 'Recorded reason (REQUIRED):', '');
+  if (reason === null) return;
+  if (!reason.trim()) {
+    showToast('&#9888; Unlock cancelled — a reason is required.');
+    return;
+  }
+  api('POST', `btp/subaccount/${encodeURIComponent(uuid)}/unlock`, { reason })
+    .then(r => { if (r && r.ok) showToast('&#128275; BTP subaccount unlocked — region-API contact re-armed.'); });
 }
 
 function _copyToClipboard(text, label) {
@@ -12803,6 +12904,7 @@ function showSCCDetail(host, opts) {
       <div class="detail-row"><span class="detail-key">Server hdr</span><span class="detail-val">${escHtml(sn.server_header || '?')}</span></div>
       <div class="detail-row"><span class="detail-key">UI reachable</span><span class="detail-val">${sn.admin_ui_reachable ? '<span style="color:#3fb950">Yes</span>' : 'No'}</span></div>
       <div class="detail-row"><span class="detail-key">Pwned</span><span class="detail-val">${sn.pwned ? '<span style="color:#f0883e">&#9889; YES</span>' : 'No'}</span></div>
+      <div class="detail-row"><span class="detail-key">Locked</span><span class="detail-val">${sn.locked ? '<span style="color:#f0b429">&#128274; YES' + (sn.lock_auto ? ' (auto)' : '') + (sn.lock_reason ? ' &mdash; ' + escHtml(sn.lock_reason) : '') + '</span>' : 'No'}</span></div>
     </div>
     <div class="detail-section">
       <h4>TLS Fingerprint</h4>
@@ -14095,6 +14197,7 @@ function showBTPDetail(uuid, opts) {
       <div class="detail-row"><span class="detail-key">Subdomain</span><span class="detail-val">${escHtml(bn.subdomain || '?')}</span></div>
       <div class="detail-row"><span class="detail-key">Global account</span><span class="detail-val">${escHtml(bn.parent_global_account || '—')}</span></div>
       <div class="detail-row"><span class="detail-key">Pwned</span><span class="detail-val">${bn.pwned ? '<span style="color:#f0883e">&#9889; YES</span>' : 'No'}</span></div>
+      <div class="detail-row"><span class="detail-key">Locked</span><span class="detail-val">${bn.locked ? '<span style="color:#f0b429">&#128274; YES' + (bn.lock_reason ? ' &mdash; ' + escHtml(bn.lock_reason) : '') + '</span>' : 'No'}</span></div>
       <div class="detail-row"><span class="detail-key">Enumerated by</span><span class="detail-val">${escHtml(bn.enumerated_via_user || bn.enumerated_via_email || '?')}</span></div>
       <div class="detail-row"><span class="detail-key">Enumerated at</span><span class="detail-val" style="font-size:11px">${escHtml(bn.enumerated_at || '?')}</span></div>
     </div>
