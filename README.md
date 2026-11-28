@@ -45,12 +45,39 @@ python3 sapmap.py --pure-rfc          # launch the GUI on the recommended pure-P
 RFC backend, no SAP NW RFC SDK download required. The native SDK remains supported as an
 alternative. See the wiki for the SDK path, Docker, read-only mode, and CLI options.
 
+## Scoping — the lock guardrail
+
+SAPMAP ships a **host-scoped lock guardrail** (issue #85) so that an engagement
+can carve out-of-scope hosts, Cloud Connectors and BTP subaccounts *before*
+discovery runs, and keep them out of every subsequent automated contact.  A
+locked entity stays fully visible on the map — its topology, prior cached
+findings and trust-graph position all render normally — but every active
+operation (scan, probe, RFC, vuln check, exploitation, propagation) refuses to
+touch it with a `423 Locked`.  Unlocking requires a recorded reason, and every
+lift ends up in an audit log that the engagement report surfaces verbatim.
+
+- **Manual locks** — right-click any SAP node / SCC / BTP subaccount on the
+  map → **🔒 Lock**.  Enter a reason to unlock.
+- **Auto-lock whitelist** — pre-register IP / CIDR / hostname / domain
+  patterns (e.g. `ec2.amazonaws.com`, `192.168.9.0/24`).  Any matching host
+  discovered later is auto-locked and the pre-scan filter refuses to even
+  open a socket against it.
+- **Scripted scenarios** — `lock_host`, `unlock_host`, `lock_scc`, `unlock_scc`,
+  `lock_btp_subaccount`, `unlock_btp_subaccount`, `lock_whitelist_add` and
+  `lock_whitelist_remove` are first-class actions.
+- **MCP server** — `list_locked`, `lock_host`, `unlock_host`, `lock_scc_host`,
+  `unlock_scc_host`, `lock_btp_subaccount`, `unlock_btp_subaccount` and
+  `lock_whitelist` are exposed as tools.
+
+The guardrail is explained in detail in the SAPMAP wiki
+([Lock guardrail](https://github.com/SecuritySilverbacks/SAPMAP/wiki/Lock-Guardrail)).
+
 ## Documentation
 
 Full documentation lives in the **[SAPMAP Wiki](https://github.com/SecuritySilverbacks/SAPMAP/wiki)**:
 
 - [Installation](https://github.com/SecuritySilverbacks/SAPMAP/wiki/Installation) · [Launch & CLI Options](https://github.com/SecuritySilverbacks/SAPMAP/wiki/Launch-and-CLI-Options) · [Pure-Python RFC Backend](https://github.com/SecuritySilverbacks/SAPMAP/wiki/Pure-Python-RFC-Backend)
-- [Web GUI](https://github.com/SecuritySilverbacks/SAPMAP/wiki/Web-GUI) · [Kill-Chain Player](https://github.com/SecuritySilverbacks/SAPMAP/wiki/Kill-Chain-Player) · [Blast Radius](https://github.com/SecuritySilverbacks/SAPMAP/wiki/Blast-Radius) · [Defense-in-Depth Rings](https://github.com/SecuritySilverbacks/SAPMAP/wiki/Defense-in-Depth-Rings) · [Scanning](https://github.com/SecuritySilverbacks/SAPMAP/wiki/Scanning) · [Read-Only Mode](https://github.com/SecuritySilverbacks/SAPMAP/wiki/Read-Only-Mode) · [Configuration](https://github.com/SecuritySilverbacks/SAPMAP/wiki/Configuration)
+- [Web GUI](https://github.com/SecuritySilverbacks/SAPMAP/wiki/Web-GUI) · [Kill-Chain Player](https://github.com/SecuritySilverbacks/SAPMAP/wiki/Kill-Chain-Player) · [Blast Radius](https://github.com/SecuritySilverbacks/SAPMAP/wiki/Blast-Radius) · [Defense-in-Depth Rings](https://github.com/SecuritySilverbacks/SAPMAP/wiki/Defense-in-Depth-Rings) · [Scanning](https://github.com/SecuritySilverbacks/SAPMAP/wiki/Scanning) · [Lock Guardrail](https://github.com/SecuritySilverbacks/SAPMAP/wiki/Lock-Guardrail) · [Read-Only Mode](https://github.com/SecuritySilverbacks/SAPMAP/wiki/Read-Only-Mode) · [Configuration](https://github.com/SecuritySilverbacks/SAPMAP/wiki/Configuration)
 - [Capabilities](https://github.com/SecuritySilverbacks/SAPMAP/wiki/Discovery-and-Enumeration) — discovery, exploitation, [AutoPwn](https://github.com/SecuritySilverbacks/SAPMAP/wiki/AutoPwn), LPE, lateral movement, BTP/SCC, evasion, and more
 - [SNC Support](https://github.com/SecuritySilverbacks/SAPMAP/wiki/SNC-Support) — operator posture for RFC-over-SNC, plus the looted-PSE client identity (a PSE pulled off a pwned box used as the SNC client identity for every system that trusts it; auto-populates on forge; saprfclib 0.2.0 native path for RSA, CommonCryptoLib for EC).  SAPMAP classifies every scanned target with an 8-value [SNC posture](https://github.com/SecuritySilverbacks/SAPMAP/wiki/SNC-Posture) verdict (`none` / `optional` / `enforced_no_creds` / `enforced_handshake_failed` / `enforced_logon_failed` / `reachable_auth` / `no_sap_signal`) instead of leaving SNC-only systems as "dead" (issue #167)
 - [Scripted Scenarios](https://github.com/SecuritySilverbacks/SAPMAP/wiki/Scripted-Scenarios) · [MCP Server](https://github.com/SecuritySilverbacks/SAPMAP/wiki/MCP-Server)
