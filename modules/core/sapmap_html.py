@@ -1667,6 +1667,7 @@ body {
   <div class="ctx-item" id="map-ctx-check-all-snc" data-action="map_check_all_snc">&#128274; Check All SNC Posture</div>
   <div class="ctx-item" data-action="map_attack_coverage">&#9876;&#65039; ATT&amp;CK Coverage Matrix</div>
   <div class="ctx-item" data-action="map_analyze_chains">&#128279; Analyze Trust Chains</div>
+  <div class="ctx-item" data-action="map_lock_whitelist" title="Edit the auto-lock whitelist — hosts matching a pattern are auto-locked on discovery and excluded from scanning (issue #85).">&#128274; Auto-Lock Whitelist&hellip;</div>
   <div class="ctx-sep"></div>
   <div class="ctx-item" data-action="map_fit">&#128208; Fit to Window</div>
   <div class="ctx-item" data-action="map_reset_layout">&#128260; Reset Layout</div>
@@ -2909,6 +2910,32 @@ body {
     <div class="form-actions">
       <button class="btn btn-primary" onclick="addSystem()">Add System</button>
       <button class="btn" onclick="closeModal('add-system-modal')">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<!-- Auto-Lock Whitelist Modal (issue #85) -->
+<div class="modal-overlay" id="lock-whitelist-modal">
+  <div class="modal" style="min-width:460px">
+    <h3>&#128274; Auto-Lock Whitelist</h3>
+    <p style="font-size:12px;color:#8b949e;margin-bottom:10px">
+      A discovered host matching any pattern below is <b>auto-locked</b> —
+      excluded from all further automated contact (scan, probe, RFC, exploit,
+      propagate) while staying visible on the map — and is dropped <b>before
+      scanning</b>. Patterns are a hostname, a dot-anchored domain
+      (<code>support.sap.com</code> also covers <code>*.support.sap.com</code>),
+      or a CIDR (<code>10.0.0.0/24</code>). Removing a pattern does <b>not</b>
+      unlock a host already locked by it (unlocking needs a recorded reason);
+      it only stops the next discovery from re-locking it.
+    </p>
+    <div id="lock-whitelist-list" style="max-height:240px;overflow:auto;border:1px solid #30363d;border-radius:6px;padding:4px;margin-bottom:10px;background:#0d1117"></div>
+    <div class="form-row" style="display:flex;gap:6px;align-items:center">
+      <input type="text" id="lock-whitelist-input" placeholder="e.g. apps.support.sap.com or 10.0.0.0/24" style="flex:1"
+             onkeydown="if(event.key==='Enter'){event.preventDefault();addLockWhitelistPattern();}">
+      <button class="btn btn-primary" onclick="addLockWhitelistPattern()">Add</button>
+    </div>
+    <div class="form-actions">
+      <button class="btn" onclick="closeModal('lock-whitelist-modal')">Close</button>
     </div>
   </div>
 </div>
@@ -17484,6 +17511,79 @@ async function addSystem() {
   startPolling();
 }
 
+// --- Auto-lock whitelist editor (issue #85) ---
+async function showLockWhitelistModal() {
+  document.getElementById('lock-whitelist-modal').classList.add('visible');
+  await renderLockWhitelist();
+  const inp = document.getElementById('lock-whitelist-input');
+  if (inp) { inp.value = ''; inp.focus(); }
+}
+async function renderLockWhitelist() {
+  const box = document.getElementById('lock-whitelist-list');
+  if (!box) return;
+  let data = null;
+  try { data = await api('GET', 'lock_whitelist'); } catch (_) { data = null; }
+  // A successful GET always returns a lock_whitelist ARRAY (possibly empty);
+  // anything else means the load failed.  Show an explicit error rather than
+  // the reassuring "nothing is auto-locked" — server-side enforcement is
+  // still in force, so claiming the safety control is empty would mislead.
+  if (!data || !Array.isArray(data.lock_whitelist)) {
+    box.innerHTML = '<div style="color:#f85149;font-size:12px;padding:8px">'
+      + '&#9888; Could not load the whitelist (server unreachable). '
+      + 'Auto-lock is still enforced server-side; close and reopen to retry.'
+      + '</div>';
+    return;
+  }
+  const patterns = data.lock_whitelist;
+  if (!patterns.length) {
+    box.innerHTML = '<div style="color:#8b949e;font-size:12px;padding:8px">'
+      + 'No whitelist patterns &mdash; nothing is auto-locked.</div>';
+    return;
+  }
+  // Build with an escHtml'd data-pattern attribute + addEventListener rather
+  // than an inline onclick, so a pattern string never has to be escaped into
+  // a JS-literal (and can't inject).  escHtml escapes quotes, and
+  // getAttribute decodes the entities back to the original pattern.
+  box.innerHTML = patterns.map(function(p) {
+    return '<div style="display:flex;justify-content:space-between;'
+      + 'align-items:center;padding:4px 6px;border-bottom:1px solid #21262d">'
+      + '<code style="font-size:12px">' + escHtml(p) + '</code>'
+      + '<button class="btn wl-remove" data-pattern="' + escHtml(p) + '" '
+      + 'style="padding:2px 8px;font-size:11px">Remove</button></div>';
+  }).join('');
+  box.querySelectorAll('.wl-remove').forEach(function(btn) {
+    btn.addEventListener('click', function() {
+      removeLockWhitelistPattern(btn.getAttribute('data-pattern'));
+    });
+  });
+}
+async function addLockWhitelistPattern() {
+  const inp = document.getElementById('lock-whitelist-input');
+  const pattern = (inp.value || '').trim();
+  if (!pattern) return;
+  let res;
+  try { res = await api('POST', 'lock_whitelist', { pattern }); }
+  catch (_) { alert('Could not reach the server to add the pattern. Try again.'); return; }
+  if (res && res.error) { alert(res.error); return; }
+  inp.value = '';
+  await renderLockWhitelist();
+  const locked = (res && res.auto_locked_hosts) || [];
+  if (locked.length) {
+    try {
+      showToast('&#128274; Added &mdash; auto-locked ' + locked.length
+        + ' already-discovered host(s).');
+    } catch (_) {}
+    startPolling();
+  }
+}
+async function removeLockWhitelistPattern(pattern) {
+  let res;
+  try { res = await api('DELETE', 'lock_whitelist', { pattern }); }
+  catch (_) { alert('Could not reach the server to remove the pattern. Try again.'); return; }
+  if (res && res.error) { alert(res.error); return; }
+  await renderLockWhitelist();
+}
+
 function showTcpipModal(sid) {524
   document.getElementById('tcpip-source-info').textContent = `Source: ${sid}`;
   const sel = document.getElementById('tcpip-target');
@@ -23331,6 +23431,7 @@ document.getElementById('map-ctx-menu').addEventListener('click', function(e) {
     case 'map_check_all_snc': checkAllSnc(); break;
     case 'map_attack_coverage': showAttackCoverage(); break;
     case 'map_analyze_chains': analyzeChains(); break;
+    case 'map_lock_whitelist': showLockWhitelistModal(); break;
     case 'map_fit': fitMap(); break;
     case 'map_reset_layout': resetLayout(); break;
   }

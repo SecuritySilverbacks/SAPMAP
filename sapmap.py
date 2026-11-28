@@ -677,9 +677,15 @@ def _auto_save_on_exit(api):
 
 def _cli_scan(api, args):
     """Run a scan from the command line without GUI."""
-    from sapmap_scanner import parse_targets, discover_systems
+    from sapmap_scanner import filter_scan_targets, discover_systems
 
-    targets = parse_targets(args.targets)
+    # Issue #85 — exclude locked / whitelisted hosts before scanning.
+    targets, skipped = filter_scan_targets(args.targets, api.state)
+    if skipped:
+        shosts = sorted({str(h) for h, _ in skipped})
+        print(f"[#] Lock/whitelist: excluded {len(skipped)} target(s) from "
+              f"scanning — {', '.join(shosts[:8])}"
+              f"{'' if len(shosts) <= 8 else f' (+{len(shosts)-8} more)'}")
     if not targets:
         print("[-] No valid targets")
         sys.exit(1)

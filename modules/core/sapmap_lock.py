@@ -21,9 +21,10 @@ Design notes
   host is refused unless its route rule is in ``PASSIVE_ROUTES``.
 * **Unlock requires a recorded reason** (team / compliance traceability).
 
-This PR (manual lock, SAP nodes) does not yet implement the auto-lock
-whitelist or the pre-scan filter — those land in a later PR and will reuse
-``host_matches`` here.
+The auto-lock whitelist (``whitelist_match`` / ``apply_auto_lock``) reuses
+``host_matches`` here; it is driven from the node-creation funnel
+(``SAPMAPState._auto_lock``) and the scanner pre-scan filter
+(``sapmap_scanner.filter_scan_targets``).
 """
 from __future__ import annotations
 
@@ -149,9 +150,55 @@ def is_host_locked(state, host: str) -> bool:
     h = (host or "").strip().lower()
     if not h:
         return False
+    h_is_ip = _is_ip_or_cidr(h)          # parse the host ONCE, not per record
     for rec in _records(state):
         patt = (rec.get("host") or "").strip()
-        if patt and host_matches(h, patt):
+        if not patt:
+            continue
+        # An IP host can only match an IP/CIDR record and a hostname only a
+        # hostname record; skipping the mismatch avoids re-parsing the host
+        # inside host_matches for every record on a big-CIDR pre-scan filter.
+        if h_is_ip != _is_ip_or_cidr(patt):
+            continue
+        if host_matches(h, patt):
+            return True
+    return False
+
+
+def whitelist_match(state, host: str):
+    """Return the first ``lock_whitelist`` pattern that covers ``host``, else
+    None.  Used by the auto-lock funnel and the scanner pre-scan filter.
+    Matching is the same dot-anchored host / domain / CIDR logic as a lock
+    record (``host_matches``)."""
+    h = (host or "").strip().lower()
+    if not h:
+        return None
+    h_is_ip = _is_ip_or_cidr(h)          # parse the host ONCE, not per pattern
+    for patt in (getattr(state, "lock_whitelist", None) or []):
+        p = str(patt).strip()
+        if not p:
+            continue
+        # Skip the type-mismatched majority (IP host vs hostname pattern, or
+        # vice-versa) without the full host_matches — a scan of a large CIDR
+        # otherwise re-parses every IP against every hostname seed.
+        if h_is_ip != _is_ip_or_cidr(p):
+            continue
+        if host_matches(h, p):
+            return p
+    return None
+
+
+def has_ip_scoped_rules(state) -> bool:
+    """True if ANY lock record host or whitelist pattern is an IP / CIDR.  When
+    False, no bare-IP target can ever match (an IP only matches an IP/CIDR
+    rule), so the scanner pre-scan filter can skip the per-IP lock/whitelist
+    check entirely on a large CIDR sweep — the common case, since the shipped
+    whitelist seed is all hostnames."""
+    for rec in _records(state):
+        if _is_ip_or_cidr((rec.get("host") or "").strip()):
+            return True
+    for patt in (getattr(state, "lock_whitelist", None) or []):
+        if _is_ip_or_cidr(str(patt).strip()):
             return True
     return False
 
@@ -244,6 +291,38 @@ def lock_node(state, node, reason: str = "", *, by: str = "", now: str = ""):
     ts = now or _now_iso()
     return [lock_host(state, h, reason, auto=False, by=by, now=ts)
             for h in sorted(canonical_hosts(node))]
+
+
+def apply_auto_lock(state, node) -> list:
+    """Auto-lock every canonical host of ``node`` that matches the whitelist
+    and is not ALREADY locked.  Returns the records created (empty when the
+    node matches nothing or is already covered).
+
+    Host-scoped like a manual lock: if ANY canonical host matches the
+    whitelist the WHOLE box is locked (every canonical host — hostname AND
+    reachable IP), so a bare-IP re-scan of a whitelisted box is filtered even
+    though only its hostname matched the pattern.  The already-locked skip is
+    deliberate: it preserves a manual lock's own reason/flag (never clobbers
+    it with the auto reason) and keeps the call idempotent across repeated
+    discovery.  Because the creation funnel calls this on every (re)discovery,
+    a whitelisted host the operator manually unlocked — which removed its
+    record — re-locks here on the next pass; removing the whitelist entry is
+    what makes an unlock permanent."""
+    hosts = sorted(canonical_hosts(node))
+    matched = next((p for p in (whitelist_match(state, h) for h in hosts) if p),
+                   None)
+    if not matched:
+        return []
+    locked = []
+    for h in hosts:
+        if is_host_locked(state, h):
+            continue                      # already covered (manual or auto)
+        rec = lock_host(state, h,
+                        reason=f"auto-locked (whitelist match: {matched})",
+                        auto=True, whitelist_pattern=matched)
+        if rec:
+            locked.append(rec)
+    return locked
 
 
 def unlock_host(state, host: str, reason: str, *, by: str = "",
